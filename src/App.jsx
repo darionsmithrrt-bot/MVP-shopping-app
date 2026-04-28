@@ -1648,7 +1648,11 @@ export default function App() {
     setError("");
     setAiDebug(null);
 
-    const normalizedBarcode = String(barcode || "").trim() || null;
+    const normalizedBarcode = String(barcode || "").trim();
+    const productKey = normalizedBarcode || `photo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const isPhotoOnlyProduct = !normalizedBarcode;
+    console.log("PHOTO-FIRST PRODUCT KEY:", productKey);
+    console.log("PHOTO-FIRST HAS REAL BARCODE:", Boolean(normalizedBarcode));
     const initialSourceValue = submissionMethod === "library" ? "manual" : "camera";
 
     try {
@@ -1663,7 +1667,7 @@ export default function App() {
         setStatus(`Uploading photo ${i + 1} of ${files.length}...`);
 
         const safeFileName = `${Date.now()}-p${i}-${file.name || "photo.jpg"}`;
-        const filePath = `${normalizedBarcode || "no-barcode"}/${safeFileName}`;
+        const filePath = `${productKey}/${safeFileName}`;
 
         const { error: uploadError } = await supabase.storage
           .from(PRODUCT_IMAGE_BUCKET)
@@ -1697,7 +1701,7 @@ export default function App() {
         const result = await supabase
           .from("catalog_products")
           .upsert(
-            [{ barcode: normalizedBarcode, product_name: "Unknown product", image_url: firstImageUrl, source: initialSourceValue }],
+            [{ barcode: productKey, product_name: "Unknown product", image_url: firstImageUrl, source: initialSourceValue }],
             { onConflict: "barcode" }
           )
           .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
@@ -1707,7 +1711,7 @@ export default function App() {
       } else {
         const result = await supabase
           .from("catalog_products")
-          .insert([{ barcode: null, product_name: "Unknown product", image_url: firstImageUrl, source: initialSourceValue }])
+          .insert([{ barcode: productKey, product_name: "Unknown product", image_url: firstImageUrl, source: initialSourceValue }])
           .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
           .single();
         savedRow = result.data;
@@ -1799,7 +1803,8 @@ export default function App() {
         catalog_id: finalRow?.id || savedRow?.id || null,
         name: finalRow?.product_name || normalizedProductName || "Unknown product",
         image: finalRow?.image_url || firstImageUrl,
-        barcode: finalRow?.barcode ?? normalizedBarcode,
+        barcode: normalizedBarcode || productKey,
+        is_photo_only: isPhotoOnlyProduct,
         brand: finalRow?.brand || normalizedBrand || "",
         category: normalizedCategory || "",
         size_value: lockedSizeValue,
