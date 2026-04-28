@@ -523,7 +523,7 @@ export default function App() {
 
   // Location panel mode: 'quick' (aisle + buttons only) or 'full' (includes notes)
   const [locationPanelMode, setLocationPanelMode] = useState('quick');
-  const [locationStep, setLocationStep] = useState("area");
+  const [locationStep, setLocationStep] = useState("aisle");
 
   // ============================================================================
   // STATE - Store Selection
@@ -1165,7 +1165,7 @@ export default function App() {
     setActivePanel(null);
     setShowNextItemPrompt(false);
     setLocationPanelMode('quick');
-    setLocationStep("area");
+    setLocationStep("aisle");
     setIsEggQuantityOther(false);
     resetAiPhotoState();
   };
@@ -1458,7 +1458,7 @@ export default function App() {
               if (!knownLocation && !addResult?.updated) {
                 setActivePanel("location");
                 setLocationPanelMode("quick");
-                setLocationStep("area");
+                setLocationStep("aisle");
               }
 
               setStatus("Known product found. Photo skipped.");
@@ -3108,7 +3108,7 @@ export default function App() {
     setError("");
     setActivePanel("location");
     setLocationPanelMode("quick");
-    setLocationStep("area");
+    setLocationStep("aisle");
     setShowAiSummaryCard(false);
     setAwaitingProductConfirmation(false);
     setBestKnownLocation(null);
@@ -3175,7 +3175,7 @@ export default function App() {
 
     setActivePanel("location");
     setLocationPanelMode("quick");
-    setLocationStep("area");
+    setLocationStep("aisle");
     setStatus("Update this item location");
   };
 
@@ -3336,7 +3336,7 @@ export default function App() {
     if (!addResult?.updated) {
       setActivePanel("location");
       setLocationPanelMode("quick");
-      setLocationStep("area");
+      setLocationStep("aisle");
       setStatus("Product confirmed. Add location and price.");
     } else {
       setStatus("Added to Smart Cart");
@@ -3367,7 +3367,7 @@ export default function App() {
     if (!addResult?.updated) {
       setActivePanel("location");
       setLocationPanelMode("quick");
-      setLocationStep("area");
+      setLocationStep("aisle");
       setStatus("AI summary confirmed. Add location and price.");
     } else {
       setStatus("Added to Smart Cart");
@@ -3626,7 +3626,7 @@ export default function App() {
       if (!knownLocation && !addResult?.updated) {
         setActivePanel("location");
         setLocationPanelMode("quick");
-        setLocationStep("area");
+        setLocationStep("aisle");
       }
 
       setStatus("Known product found from manual barcode.");
@@ -3639,75 +3639,11 @@ export default function App() {
   };
 
   const renderLocationWizardStep = () => {
-    if (locationStep === "area") {
+    if (locationStep === "aisle") {
       return (
         <div>
-          <div style={styles.stepLabel}>Step 1 of 4</div>
-          <h3 style={styles.stepTitle}>Where is this item?</h3>
-
-          <button
-            type="button"
-            style={styles.primaryButton}
-            onClick={() => {
-              setLocationForm((prev) => ({ ...prev, aisle: "", price_type: "each" }));
-              setLocationStep("details");
-            }}
-          >
-            Numbered Aisle
-          </button>
-
-          <button
-            type="button"
-            style={styles.primaryButton}
-            onClick={() => {
-              setLocationForm((prev) => ({ ...prev, aisle: "Produce", price_type: "per_lb" }));
-              setLocationStep("price");
-            }}
-          >
-            Produce Area (e.g. Fruit, Vegetables)
-          </button>
-
-          <button
-            type="button"
-            style={styles.primaryButton}
-            onClick={() => {
-              setLocationForm((prev) => ({ ...prev, aisle: "Meat / Poultry", price_type: "per_lb" }));
-              setLocationStep("price");
-            }}
-          >
-            Meat/Poultry Area
-          </button>
-
-          <button
-            type="button"
-            style={styles.primaryButton}
-            onClick={() => {
-              setLocationForm((prev) => ({ ...prev, aisle: "Dairy Area", price_type: "each" }));
-              setLocationStep("price");
-            }}
-          >
-            Dairy Area
-          </button>
-
-          <button
-            type="button"
-            style={styles.secondaryButton}
-            onClick={() => {
-              setLocationForm((prev) => ({ ...prev, aisle: "", price_type: "each" }));
-              setLocationStep("details");
-            }}
-          >
-            Other / Manual
-          </button>
-        </div>
-      );
-    }
-
-    if (locationStep === "details") {
-      return (
-        <div>
-          <div style={styles.stepLabel}>Step 2 of 4</div>
-          <h3 style={styles.stepTitle}>Location details</h3>
+          <div style={styles.stepLabel}>Step 1 of 3</div>
+          <h3 style={styles.stepTitle}>Enter aisle or area</h3>
 
           <label style={styles.label}>Aisle / Area</label>
           <input
@@ -3716,8 +3652,42 @@ export default function App() {
             onChange={(e) =>
               setLocationForm((prev) => ({ ...prev, aisle: e.target.value }))
             }
-            placeholder="Example: 12 or Produce"
+            placeholder="Example: Aisle 7, Produce, Meat, Dairy, Bakery"
           />
+
+          <div style={styles.rewardDescription}>
+            Use whatever the store uses: aisle number, produce, bakery, dairy, meat, freezer, checkout, etc.
+          </div>
+
+          <div style={styles.buttonRow}>
+            <button
+              type="button"
+              style={styles.primaryButton}
+              onClick={() => {
+                if (!locationForm.aisle.trim()) {
+                  setError("Enter an aisle or area first.");
+                  return;
+                }
+                setError("");
+                setLocationStep("details");
+              }}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    if (locationStep === "details") {
+      return (
+        <div>
+          <div style={styles.stepLabel}>Step 2 of 3</div>
+          <h3 style={styles.stepTitle}>Choose section and shelf</h3>
+
+          <div style={styles.rewardDescription}>
+            Tap what you see. Skip if you are not sure.
+          </div>
 
           <label style={styles.label}>Section</label>
           <div style={styles.quickButtonRow}>
@@ -3734,6 +3704,16 @@ export default function App() {
                 {option}
               </button>
             ))}
+            <button
+              type="button"
+              style={{
+                ...styles.quickButton,
+                ...(!locationForm.section ? styles.quickButtonActive : {}),
+              }}
+              onClick={() => setLocationForm((prev) => ({ ...prev, section: "" }))}
+            >
+              Skip section
+            </button>
           </div>
 
           <label style={styles.label}>Shelf</label>
@@ -3751,20 +3731,33 @@ export default function App() {
                 {option}
               </button>
             ))}
+            <button
+              type="button"
+              style={{
+                ...styles.quickButton,
+                ...(!locationForm.shelf ? styles.quickButtonActive : {}),
+              }}
+              onClick={() => setLocationForm((prev) => ({ ...prev, shelf: "" }))}
+            >
+              Skip shelf
+            </button>
           </div>
 
           <div style={styles.buttonRow}>
             <button
               type="button"
               style={styles.secondaryButton}
-              onClick={() => setLocationStep("area")}
+              onClick={() => setLocationStep("aisle")}
             >
               Back
             </button>
             <button
               type="button"
               style={styles.primaryButton}
-              onClick={() => setLocationStep("price")}
+              onClick={() => {
+                setError("");
+                setLocationStep("price");
+              }}
             >
               Next
             </button>
@@ -4145,6 +4138,9 @@ export default function App() {
           <div><strong>Size:</strong> {locationForm.size_value || "—"} {locationForm.size_unit || ""}</div>
           <div><strong>Package Size:</strong> {locationForm.quantity || "—"}</div>
           <div><strong>Price:</strong> ${formatCentsToDollars(locationForm.price)} {formatPriceType(locationForm.price_type)}</div>
+          {locationForm.price_source === "missing" ? (
+            <div><strong>Price note:</strong> Price skipped — add later</div>
+          ) : null}
         </div>
 
         <div style={styles.buttonRow}>
@@ -4373,7 +4369,7 @@ export default function App() {
                             });
                             setActivePanel("location");
                             setLocationPanelMode("quick");
-                            setLocationStep("area");
+                            setLocationStep("aisle");
                             setStatus("Add the location for this item");
                           }}
                         >
@@ -4536,7 +4532,7 @@ export default function App() {
                                         });
                                         setActivePanel("location");
                                         setLocationPanelMode("quick");
-                                        setLocationStep("area");
+                                        setLocationStep("aisle");
                                         setStatus("Update this item location");
                                       }}
                                     >
@@ -4720,7 +4716,7 @@ export default function App() {
                                         });
                                         setActivePanel("location");
                                         setLocationPanelMode("quick");
-                                        setLocationStep("area");
+                                        setLocationStep("aisle");
                                         setStatus("Update this item location");
                                       }}
                                     >
@@ -6343,7 +6339,7 @@ export default function App() {
                     }));
                     setActivePanel('location');
                     setLocationPanelMode('quick');
-                    setLocationStep("area");
+                    setLocationStep("aisle");
                   }}
                   style={styles.secondaryButton}
                 >
