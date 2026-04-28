@@ -422,6 +422,7 @@ export default function App() {
   // ============================================================================
   const [product, setProduct] = useState(null);
   const [aiDebug, setAiDebug] = useState(null);
+  const [aiDetectedRawText, setAiDetectedRawText] = useState("");
   const [isSavingCorrection, setIsSavingCorrection] = useState(false);
   const [correctionSaved, setCorrectionSaved] = useState(false);
 
@@ -1123,6 +1124,7 @@ export default function App() {
     setPreviewImages([]);
     setPhotoAnalysisStatus('idle');
     setAiDebug(null);
+    setAiDetectedRawText("");
     setAiDetectedPrice(null);
     setAiDetectedPriceEdited(false);
     setIsEditingDetectedPrice(false);
@@ -1750,6 +1752,7 @@ export default function App() {
       const extractedPayload = extractAiProductData(aiResponse);
       const rawAiData = aiResponse?.data || {};
       const rawAiResult = rawAiData?.result || {};
+      const rawAiNestedData = rawAiData?.data || {};
 
       const aiPayload = {
         ...extractedPayload,
@@ -1758,6 +1761,9 @@ export default function App() {
           rawAiData?.product_name ||
           rawAiData?.name ||
           rawAiData?.item_name ||
+          rawAiNestedData?.product_name ||
+          rawAiNestedData?.name ||
+          rawAiNestedData?.item_name ||
           rawAiData?.output?.product_name ||
           rawAiData?.output?.name ||
           rawAiData?.output?.item_name ||
@@ -1771,16 +1777,25 @@ export default function App() {
         brand:
           extractedPayload?.brand ||
           rawAiData?.brand ||
+          rawAiNestedData?.brand ||
+          rawAiData?.output?.brand ||
+          rawAiData?.product?.brand ||
           rawAiResult?.brand ||
+          rawAiResult?.product?.brand ||
           "",
         category:
           extractedPayload?.category ||
           rawAiData?.category ||
+          rawAiNestedData?.category ||
+          rawAiData?.output?.category ||
           rawAiResult?.category ||
           "",
         size_value:
           extractedPayload?.size_value ||
           rawAiData?.size_value ||
+          rawAiNestedData?.size_value ||
+          rawAiData?.output?.size_value ||
+          rawAiData?.product?.size_value ||
           rawAiResult?.size_value ||
           rawAiData?.size?.value ||
           rawAiResult?.size?.value ||
@@ -1788,6 +1803,9 @@ export default function App() {
         size_unit:
           extractedPayload?.size_unit ||
           rawAiData?.size_unit ||
+          rawAiNestedData?.size_unit ||
+          rawAiData?.output?.size_unit ||
+          rawAiData?.product?.size_unit ||
           rawAiResult?.size_unit ||
           rawAiData?.size?.unit ||
           rawAiResult?.size?.unit ||
@@ -1795,18 +1813,63 @@ export default function App() {
         quantity:
           extractedPayload?.quantity ||
           rawAiData?.quantity ||
+          rawAiNestedData?.quantity ||
+          rawAiData?.output?.quantity ||
+          rawAiData?.product?.quantity ||
           rawAiResult?.quantity ||
           "1",
+        price:
+          extractedPayload?.price ??
+          rawAiData?.price ??
+          rawAiNestedData?.price ??
+          rawAiData?.output?.price ??
+          rawAiResult?.price ??
+          null,
+        price_unit:
+          extractedPayload?.price_unit ||
+          rawAiData?.price_unit ||
+          rawAiNestedData?.price_unit ||
+          rawAiData?.output?.price_unit ||
+          rawAiResult?.price_unit ||
+          "unknown",
         confidence:
           Number(
             extractedPayload?.confidence ??
             rawAiData?.confidence ??
+            rawAiNestedData?.confidence ??
             rawAiResult?.confidence ??
+            0
+          ),
+        size_confidence:
+          Number(
+            extractedPayload?.size_confidence ??
+            rawAiData?.size_confidence ??
+            rawAiNestedData?.size_confidence ??
+            rawAiResult?.size_confidence ??
+            0
+          ),
+        quantity_confidence:
+          Number(
+            extractedPayload?.quantity_confidence ??
+            rawAiData?.quantity_confidence ??
+            rawAiNestedData?.quantity_confidence ??
+            rawAiResult?.quantity_confidence ??
+            0
+          ),
+        price_confidence:
+          Number(
+            extractedPayload?.price_confidence ??
+            rawAiData?.price_confidence ??
+            rawAiNestedData?.price_confidence ??
+            rawAiResult?.price_confidence ??
             0
           ),
         raw_text:
           extractedPayload?.raw_text ||
           rawAiData?.raw_text ||
+          rawAiNestedData?.raw_text ||
+          rawAiData?.output?.raw_text ||
+          rawAiData?.output_text ||
           rawAiResult?.raw_text ||
           rawAiData?.detected_text ||
           rawAiResult?.detected_text ||
@@ -1814,6 +1877,28 @@ export default function App() {
       };
       
       console.log("NORMALIZED AI PAYLOAD AFTER FALLBACK:", aiPayload);
+      setAiDetectedRawText(String(aiPayload.raw_text || "").trim());
+
+      const extractLikelyProductPhraseFromRawText = (rawText) => {
+        const lines = String(rawText || "")
+          .split(/[\n\r]+/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+
+        const blockedLine = /(\$|\bper\b|\bprice\b|\btotal\b|\bsave\b|\bcoupon\b|\bwww\.|\bhttp\b|\bbarcode\b|\bnutrition\b|\bserving\b|\bcalories\b)/i;
+
+        for (const line of lines) {
+          const cleaned = line.replace(/[^\w\s&'\-]/g, " ").replace(/\s+/g, " ").trim();
+          if (!cleaned || cleaned.length < 3 || cleaned.length > 80) continue;
+          if (blockedLine.test(cleaned)) continue;
+
+          const words = cleaned.split(" ").filter(Boolean);
+          if (words.length < 2 || words.length > 8) continue;
+          return cleaned;
+        }
+
+        return "";
+      };
 
       const inferProductNameFromAi = (payload, response) => {
         const raw = response?.data || {};
@@ -1836,9 +1921,9 @@ export default function App() {
           result?.title,
           result?.description,
           result?.text,
-          raw?.raw_text,
-          raw?.detected_text,
-          payload?.raw_text,
+          raw?.data?.product_name,
+          raw?.output?.product_name,
+          raw?.product?.name,
         ];
 
         const firstUseful = candidates
@@ -1912,19 +1997,30 @@ export default function App() {
         finalRow = updatedRow;
         setStatus("? AI identified product");
       } else {
-        normalizedProductName = correctionForm.product_name?.trim()
-          || product?.name
-          || "Unknown product";
+        const rawTextCandidate = extractLikelyProductPhraseFromRawText(aiPayload.raw_text);
+        normalizedProductName = rawTextCandidate
+          ? "Review needed"
+          : (correctionForm.product_name?.trim() || product?.name || "Unknown product");
 
-        setStatus("AI could not identify the product name. Enter or correct the name below, then continue.");
+        if (rawTextCandidate) {
+          setStatus("AI found text but could not confidently name the item. Review the detected text and enter the product name.");
+        } else {
+          setStatus("AI could not identify the product name. Enter or correct the name below, then continue.");
+        }
         setError("");
         setAwaitingProductConfirmation(true);
         setShowAiSummaryCard(false);
       }
 
+      const persistedProductName = String(finalRow?.product_name || "").trim();
+      const finalResolvedProductName =
+        persistedProductName && persistedProductName.toLowerCase() !== "unknown product"
+          ? persistedProductName
+          : (String(normalizedProductName || "").trim() || persistedProductName || "Unknown product");
+
       const finalProduct = {
         catalog_id: finalRow?.id || savedRow?.id || null,
-        name: finalRow?.product_name || normalizedProductName || "Unknown product",
+        name: finalResolvedProductName,
         image: finalRow?.image_url || firstImageUrl,
         barcode: normalizedBarcode || productKey,
         is_photo_only: isPhotoOnlyProduct,
@@ -1937,7 +2033,7 @@ export default function App() {
       };
 
       setCorrectionForm({
-        product_name: finalProduct.name || "",
+        product_name: finalProduct.name === "Unknown product" && aiPayload.raw_text ? "Review needed" : (finalProduct.name || ""),
         brand: finalProduct.brand || "",
         category: finalProduct.category || "",
       });
@@ -1996,13 +2092,17 @@ export default function App() {
       const isRapidDuplicate =
         aiAutoAddGuardRef.current.fingerprint === aiAddFingerprint &&
         now - aiAutoAddGuardRef.current.timestamp < lockWindowMs;
+      const normalizedFinalName = String(finalProduct?.name || "").trim().toLowerCase();
+      const canAutoAddAiItem = normalizedFinalName !== "unknown product" && normalizedFinalName !== "review needed";
 
-      if (!isRapidDuplicate) {
+      if (!isRapidDuplicate && canAutoAddAiItem) {
         handleAddToShoppingList(aiCartItem, null);
         aiAutoAddGuardRef.current = {
           fingerprint: aiAddFingerprint,
           timestamp: now,
         };
+      } else if (!canAutoAddAiItem) {
+        console.info("AI auto-add skipped: product name requires user review");
       } else {
         console.info("AI auto-add skipped: duplicate within lock window");
       }
@@ -5925,6 +6025,15 @@ export default function App() {
               <div style={styles.rewardDescription}>
                 Confirm or edit item details. Barcode is optional.
               </div>
+
+              {aiDetectedRawText ? (
+                <div style={{ ...styles.infoBox, marginBottom: 12, background: "#f8fafc", borderColor: "#cbd5e1", color: "#334155" }}>
+                  <div style={{ fontWeight: 800, marginBottom: 6 }}>Detected text:</div>
+                  <div style={{ fontSize: 12, lineHeight: 1.45, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    {aiDetectedRawText}
+                  </div>
+                </div>
+              ) : null}
 
               <div
                 style={{

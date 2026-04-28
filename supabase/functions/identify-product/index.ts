@@ -14,14 +14,11 @@ type IdentifyProductResult = {
   size_confidence: number;
   quantity: string;
   quantity_confidence: number;
-  secondary_size_value: string;
-  secondary_size_unit: string;
   price: number | null;
-  price_unit: "unknown" | "each" | "price_per_lb" | "price_per_oz" | "price_per_pack" | "price_per_dozen";
-  price_source: "none" | "photo_sign" | "user_corrected";
+  price_unit: "unknown" | "each" | "price_per_lb" | "price_per_oz" | "price_per_kg" | "price_per_pack";
   price_confidence: number;
   confidence: number;
-  needs_user_confirmation: true;
+  raw_text: string;
 };
 
 const DEFAULT_RESULT: IdentifyProductResult = {
@@ -33,14 +30,11 @@ const DEFAULT_RESULT: IdentifyProductResult = {
   size_confidence: 0,
   quantity: "1",
   quantity_confidence: 0,
-  secondary_size_value: "",
-  secondary_size_unit: "",
   price: null,
   price_unit: "unknown",
-  price_source: "none",
   price_confidence: 0,
   confidence: 0,
-  needs_user_confirmation: true,
+  raw_text: "",
 };
 
 const VALID_PRICE_UNITS = new Set([
@@ -48,11 +42,9 @@ const VALID_PRICE_UNITS = new Set([
   "each",
   "price_per_lb",
   "price_per_oz",
+  "price_per_kg",
   "price_per_pack",
-  "price_per_dozen",
 ]);
-
-const VALID_PRICE_SOURCES = new Set(["none", "photo_sign", "user_corrected"]);
 
 const ROLE_LABELS: Record<string, string> = {
   product_label: "product front label",
@@ -62,91 +54,57 @@ const ROLE_LABELS: Record<string, string> = {
 
 const VALID_IMAGE_ROLES = new Set(["product_label", "size_label", "price_sign"]);
 
-const SYSTEM_PROMPT = `You are a grocery product data extraction assistant. You receive one or more product photos with role hints and must return a single strict JSON object. No markdown, no prose, no code fences — raw JSON only.
+const SYSTEM_PROMPT = `You are a grocery product identification assistant.
 
-═══════════════════════════════════════════════
-MULTI-IMAGE LOGIC
-═══════════════════════════════════════════════
-- Use ALL provided images together to build one unified result.
-- Image roles MUST be used this way:
-  • product_label → prioritize product_name, brand, category, and front package identity
-  • size_label    → prioritize NET WT, package size, count, quantity
-  • price_sign    → prioritize shelf price and price unit
-- Cross-check across photos and merge into ONE product result:
-  • If product identity appears in product_label and size appears in size_label, combine both into one final object.
-  • If a price sign appears in price_sign, attach price ONLY when it clearly matches the same product.
-  • If multiple prices are visible, choose the price most clearly associated with the matching product label/sign.
-  • If product-to-price match is ambiguous, leave price null and confidence low.
-- If a role-specific image is available for a field, prefer it over other images for that field.
-- Do not guess missing fields.
+Analyze all provided images together.
 
-═══════════════════════════════════════════════
-SIZE EXTRACTION — STRICT PRIORITY ORDER
-═══════════════════════════════════════════════
-1. NET WT / NET WEIGHT printed on the package (e.g. "NET WT 15.5 OZ")   ← highest priority
-2. Size text on the product front label (e.g. "32 FL OZ")
-3. Any other clearly printed package-size statement
+Photo roles may include:
+1. product_label
+2. size_label
+3. price_sign
 
-NEVER use:
-  - Serving size from a nutrition facts panel as the package size
-  - Measurements from a price tag (e.g. "$3.99 / lb") as the package size
-  - Guessed or inferred sizes
+Use cross-image reasoning:
+- product_label image identifies brand/name
+- size_label image identifies size/net weight
+- price_sign image identifies price/unit
+- combine these into one product result
 
-If dual units are present (e.g. "15.5 OZ (439g)"):
-  size_value = "15.5"  |  size_unit = "oz"
-  secondary_size_value = "439"  |  secondary_size_unit = "g"
+Extract only what is visible or strongly supported by the images.
 
-If size is genuinely not visible, leave size_value and size_unit blank and set size_confidence = 0.
+Return ONLY valid JSON with this exact shape:
 
-═══════════════════════════════════════════════
-QUANTITY EXTRACTION — STRICT RULES
-═══════════════════════════════════════════════
-- quantity represents the NUMBER OF INDIVIDUAL ITEMS in the package, as a descriptive string.
-- Default for a single can, bottle, bag, box, or carton: quantity = "1"
-- Eggs: detect and record "dozen", "18 count", "24 count", etc. as printed.
-- Multipacks: detect and record "6 pack", "12 count", "variety 4 pack", etc. as printed.
-- Do NOT use weight or volume as quantity (e.g. "32 oz" is NOT a quantity — it is a size).
-- If quantity is not clearly visible and item appears to be a single package, use quantity = "1" with quantity_confidence = 0.5.
-
-═══════════════════════════════════════════════
-PRICE EXTRACTION — STRICT RULES
-═══════════════════════════════════════════════
-- ONLY extract price if a shelf price sign is clearly visible in an image with role "shelf price sign".
-- NEVER guess or infer price from any other source.
-- NEVER use a price-per-weight shown on a size label as the product price.
-- If price is not clearly visible: price = null, price_unit = "unknown", price_source = "none", price_confidence = 0.
-- Valid price_unit values: "unknown" | "each" | "price_per_lb" | "price_per_oz" | "price_per_pack" | "price_per_dozen"
-- price_source must be "photo_sign" when a price is extracted, otherwise "none".
-
-═══════════════════════════════════════════════
-OUTPUT FORMAT — MANDATORY EXACT SHAPE
-═══════════════════════════════════════════════
-Return this exact JSON object. Do not add, remove, or rename fields:
 {
   "product_name": "",
   "brand": "",
   "category": "",
   "size_value": "",
   "size_unit": "",
-  "size_confidence": 0,
   "quantity": "1",
-  "quantity_confidence": 0,
-  "secondary_size_value": "",
-  "secondary_size_unit": "",
   "price": null,
   "price_unit": "unknown",
-  "price_source": "none",
-  "price_confidence": 0,
   "confidence": 0,
-  "needs_user_confirmation": true
+  "size_confidence": 0,
+  "quantity_confidence": 0,
+  "price_confidence": 0,
+  "raw_text": ""
 }
 
-ADDITIONAL RULES:
-- needs_user_confirmation is ALWAYS true.
-- All confidence fields are numbers in 0..1 range (e.g. 0.92, not 92).
-- Use lowercase canonical units: oz, lb, g, kg, ml, liter, fl oz, gallon, count, pack, dozen.
-- product_name / brand / category: leave blank ("") when not clearly visible — do NOT hallucinate.
-- Barcode (if provided) is context only — do not copy it to any output field.`;
+Rules:
+- product_name must be the consumer-facing product name, not "Unknown product", if any readable label is visible.
+- brand should be the brand/logo name if visible.
+- size_value and size_unit should come from net weight, net wt, fl oz, oz, lb, g, kg, count, pack, etc.
+- quantity should be "1" unless a multipack/count is visible.
+- price should only come from shelf/price sign images.
+- price_unit should be one of:
+  "each", "price_per_lb", "price_per_oz", "price_per_kg", "price_per_pack", "unknown"
+- If price sign says $3.49/lb, return price: 3.49 and price_unit: "price_per_lb".
+- If price sign says $2.99 each, return price: 2.99 and price_unit: "each".
+- Do not invent price if not visible.
+- raw_text should include all readable text from the images.
+- confidence values must be decimals from 0 to 1.
+
+Important:
+Return JSON only. No markdown. No explanation.`;
 
 const JSON_SCHEMA = {
   type: "object",
@@ -160,20 +118,14 @@ const JSON_SCHEMA = {
     size_confidence: { type: "number" },
     quantity: { type: "string" },
     quantity_confidence: { type: "number" },
-    secondary_size_value: { type: "string" },
-    secondary_size_unit: { type: "string" },
     price: { type: ["number", "null"] },
     price_unit: {
       type: "string",
-      enum: ["unknown", "each", "price_per_lb", "price_per_oz", "price_per_pack", "price_per_dozen"],
-    },
-    price_source: {
-      type: "string",
-      enum: ["none", "photo_sign", "user_corrected"],
+      enum: ["unknown", "each", "price_per_lb", "price_per_oz", "price_per_kg", "price_per_pack"],
     },
     price_confidence: { type: "number" },
     confidence: { type: "number" },
-    needs_user_confirmation: { type: "boolean" },
+    raw_text: { type: "string" },
   },
   required: [
     "product_name",
@@ -184,14 +136,11 @@ const JSON_SCHEMA = {
     "size_confidence",
     "quantity",
     "quantity_confidence",
-    "secondary_size_value",
-    "secondary_size_unit",
     "price",
     "price_unit",
-    "price_source",
     "price_confidence",
     "confidence",
-    "needs_user_confirmation",
+    "raw_text",
   ],
 };
 
@@ -248,15 +197,8 @@ const extractModelText = (data: Record<string, unknown>): string => {
 const normalizeParsedResult = (parsed: Record<string, unknown>): IdentifyProductResult => {
   const price = normalizePrice(parsed.price);
   const priceUnitRaw = typeof parsed.price_unit === "string" ? parsed.price_unit : "unknown";
-  const priceSourceRaw = typeof parsed.price_source === "string" ? parsed.price_source : "none";
 
   const price_unit = VALID_PRICE_UNITS.has(priceUnitRaw) ? priceUnitRaw : "unknown";
-  const price_source =
-    price == null
-      ? "none"
-      : VALID_PRICE_SOURCES.has(priceSourceRaw)
-      ? priceSourceRaw
-      : "photo_sign";
 
   const quantityRaw = typeof parsed.quantity === "string" ? parsed.quantity.trim() : "";
 
@@ -269,18 +211,11 @@ const normalizeParsedResult = (parsed: Record<string, unknown>): IdentifyProduct
     size_confidence: normalizeConfidence(parsed.size_confidence),
     quantity: quantityRaw || "1",
     quantity_confidence: normalizeConfidence(parsed.quantity_confidence),
-    secondary_size_value:
-      typeof parsed.secondary_size_value === "string" ? parsed.secondary_size_value.trim() : "",
-    secondary_size_unit:
-      typeof parsed.secondary_size_unit === "string"
-        ? parsed.secondary_size_unit.trim().toLowerCase()
-        : "",
     price,
     price_unit: price == null ? "unknown" : (price_unit as IdentifyProductResult["price_unit"]),
-    price_source: price == null ? "none" : (price_source as IdentifyProductResult["price_source"]),
     price_confidence: price == null ? 0 : normalizeConfidence(parsed.price_confidence),
     confidence: normalizeConfidence(parsed.confidence),
-    needs_user_confirmation: true,
+    raw_text: typeof parsed.raw_text === "string" ? parsed.raw_text.trim() : "",
   };
 };
 
@@ -399,7 +334,7 @@ serve(async (req) => {
     } catch {
       normalizedResult = {
         ...DEFAULT_RESULT,
-        product_name: cleanText.slice(0, 120),
+        raw_text: cleanText.slice(0, 120),
         confidence: 0.2,
       };
     }
