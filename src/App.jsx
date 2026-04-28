@@ -28,8 +28,6 @@ const PHOTO_ROLE_SEQUENCE = [
 ];
 
 const VALID_IMAGE_ROLES = new Set(["product_label", "size_label", "price_sign"]);
-const FORCE_PROFILE_SETUP = true;
-const BUILD_MARKER = "profile-gate-test-v3";
 
 const getRoleByPhotoIndex = (index) => {
   const boundedIndex = Math.max(0, Math.min(index, PHOTO_ROLE_SEQUENCE.length - 1));
@@ -395,6 +393,7 @@ export default function App() {
   const controlsRef = useRef(null);
   const scanningRef = useRef(false);
   const processingRef = useRef(false);
+  const aiAutoAddGuardRef = useRef({ fingerprint: "", timestamp: 0 });
   const transitionTimeoutRef = useRef(null);
   const storeSearchTimeoutRef = useRef(null);
   const priceInputRef = useRef(null);
@@ -486,10 +485,8 @@ export default function App() {
   // STATE - User Profile
   // ============================================================================
   const [currentUserProfile, setCurrentUserProfile] = useState(null);
-  const [isCheckingProfile, setIsCheckingProfile] = useState(true);
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [isCreatingProfile, setIsCreatingProfile] = useState(false);
-  const [profileSetupError, setProfileSetupError] = useState("");
+  const [isCheckingProfile, setIsCheckingProfile] = useState(true);
   const [profileForm, setProfileForm] = useState({
     display_name: "",
     email: "",
@@ -611,33 +608,20 @@ export default function App() {
 
   // Load user profile from localStorage on app mount
   useEffect(() => {
-    try {
-      if (FORCE_PROFILE_SETUP) {
-        localStorage.removeItem("currentUserProfile");
-        setCurrentUserProfile(null);
-        setIsCheckingProfile(false);
-        return;
-      }
+    const saved = localStorage.getItem("currentUserProfile");
 
-      const savedProfile = localStorage.getItem("currentUserProfile");
-
-      if (savedProfile) {
-        const parsedProfile = JSON.parse(savedProfile);
-
-        if (parsedProfile?.id && parsedProfile?.display_name) {
-          setCurrentUserProfile(parsedProfile);
-        } else {
-          localStorage.removeItem("currentUserProfile");
-          setCurrentUserProfile(null);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed?.display_name) {
+          setCurrentUserProfile(parsed);
         }
+      } catch {
+        localStorage.removeItem("currentUserProfile");
       }
-    } catch (err) {
-      console.error("Failed to load profile from localStorage", err);
-      localStorage.removeItem("currentUserProfile");
-      setCurrentUserProfile(null);
-    } finally {
-      setIsCheckingProfile(false);
     }
+
+    setIsCheckingProfile(false);
   }, []);
 
   useEffect(() => {
@@ -713,10 +697,14 @@ export default function App() {
       )
     : nearbyStores;
 
-  const shoppingListEstimatedTotal = shoppingListItems.reduce((sum, item) => {
-    const price = Number(item.avg_price ?? item.price);
-    return Number.isNaN(price) || price <= 0 ? sum : sum + price;
-  }, 0);
+  const calculateCartTotal = (cart) => {
+    return (cart || []).reduce((sum, item) => {
+      const price = Number(item?.avg_price ?? item?.price);
+      return Number.isNaN(price) || price <= 0 ? sum : sum + price;
+    }, 0);
+  };
+
+  const shoppingListEstimatedTotal = calculateCartTotal(shoppingListItems);
 
   const smartCartItems = shoppingListItems
     .map((item, originalIndex) => {
@@ -1786,8 +1774,53 @@ export default function App() {
       setAiDetectedPriceEdited(false);
 
       setProduct(finalProduct);
-      setAwaitingProductConfirmation(true);
-      setShowAiSummaryCard(true);
+      const aiCartPriceType = detectedPriceFromAi
+        ? mapDetectedUnitToPriceType(detectedPriceFromAi.unit)
+        : "each";
+      const aiCartItem = {
+        id: Date.now(),
+        name: finalProduct.name,
+        product_name: finalProduct.name,
+        price: detectedPriceFromAi?.amount ?? null,
+        price_type: aiCartPriceType,
+        quantity: finalProduct.quantity || "1",
+        size: finalProduct.size_value || null,
+        unit: finalProduct.size_unit || null,
+        size_value: finalProduct.size_value || "",
+        size_unit: finalProduct.size_unit || "",
+        source: "ai",
+        price_badge_source: "ai",
+        price_source: detectedPriceFromAi ? "photo_sign" : null,
+        price_unit_detected: detectedPriceFromAi?.unit || "unknown",
+        barcode: finalProduct.barcode || null,
+        brand: finalProduct.brand || "",
+      };
+      const aiAddFingerprint = [
+        aiCartItem.barcode || "",
+        aiCartItem.name || "",
+        aiCartItem.price ?? "",
+        aiCartItem.size_value || "",
+        aiCartItem.size_unit || "",
+      ]
+        .join("|")
+        .toLowerCase();
+      const now = Date.now();
+      const lockWindowMs = 1500;
+      const isRapidDuplicate =
+        aiAutoAddGuardRef.current.fingerprint === aiAddFingerprint &&
+        now - aiAutoAddGuardRef.current.timestamp < lockWindowMs;
+
+      if (!isRapidDuplicate) {
+        handleAddToShoppingList(aiCartItem, null);
+        aiAutoAddGuardRef.current = {
+          fingerprint: aiAddFingerprint,
+          timestamp: now,
+        };
+      } else {
+        console.info("AI auto-add skipped: duplicate within lock window");
+      }
+      setAwaitingProductConfirmation(false);
+      setShowAiSummaryCard(false);
       setShowOptionalBarcodeInput(false);
       setOptionalBarcodeInput(normalizedBarcode || "");
       setPhotoAnalysisStatus('done');
@@ -2739,50 +2772,26 @@ export default function App() {
   // PROFILE LOGIC - Create & Save User Profile
   // ============================================================================
 
-  const handleCreateProfile = async () => {
-    if (!profileForm.display_name.trim()) {
-      setProfileSetupError("Display name is required");
-      return;
-    }
+  const handleCreateProfile = () => {
+    if (!profileForm.display_name.trim()) return;
 
-    setIsCreatingProfile(true);
-    setProfileSetupError("");
+    const newProfile = {
+      id: Date.now(),
+      display_name: profileForm.display_name,
+      email: profileForm.email || null,
+      trust_score: 0,
+      points: 0,
+      total_points: 0,
+      created_at: new Date().toISOString(),
+    };
 
-    try {
-      const { data, error } = await supabase
-        .from("profiles")
-        .insert([{
-          display_name: profileForm.display_name.trim(),
-          email: profileForm.email.trim() || null,
-          home_store_id: selectedStore?.id || null,
-        }])
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      setCurrentUserProfile(data);
-      localStorage.setItem("currentUserProfile", JSON.stringify(data));
-
-      setToast({ message: "Profile created!", type: "success" });
-
-    } catch (err) {
-      console.error("PROFILE ERROR:", err);
-      setProfileSetupError("Failed to create profile");
-    } finally {
-      setIsCreatingProfile(false);
-    }
+    localStorage.setItem("currentUserProfile", JSON.stringify(newProfile));
+    setCurrentUserProfile(newProfile);
   };
 
   const handleResetProfile = () => {
     localStorage.removeItem("currentUserProfile");
     setCurrentUserProfile(null);
-    setProfileForm({
-      display_name: "",
-      email: "",
-    });
-    setShowOnboarding(false);
-    setToast({ message: "Profile reset", type: "success" });
   };
 
   const handleUpdateProfilePoints = async (earnedPoints) => {
@@ -2879,8 +2888,13 @@ export default function App() {
 
           return {
             ...item,
+            id: item.id || productToAdd.id || item.cart_item_id,
+            name: productToAdd.name || itemProductName || item.name || item.product_name,
             product_name: itemProductName || item.product_name,
             brand: itemBrand || item.brand,
+            source: productToAdd.source || item.source || "manual",
+            size: productToAdd.size ?? productToAdd.size_value ?? item.size ?? item.size_value ?? null,
+            unit: productToAdd.unit ?? productToAdd.size_unit ?? item.unit ?? item.size_unit ?? null,
             size_value: productToAdd.size_value || item.size_value || "",
             size_unit: productToAdd.size_unit || item.size_unit || "",
             quantity: productToAdd.quantity || item.quantity || "1",
@@ -2889,6 +2903,11 @@ export default function App() {
             avg_price: locationToUse?.avg_price ?? productToAdd.avg_price ?? item.avg_price ?? null,
             price_type: locationToUse?.price_type ?? productToAdd.price_type ?? item.price_type ?? "each",
             price_source: locationToUse?.price_source ?? productToAdd.price_source ?? item.price_source ?? null,
+            price_badge_source:
+              locationToUse?.price_badge_source ??
+              productToAdd.price_badge_source ??
+              item.price_badge_source ??
+              (productToAdd.source === "ai" ? "ai" : "manual"),
             price_unit_detected:
               locationToUse?.price_unit_detected ??
               productToAdd.price_unit_detected ??
@@ -2906,11 +2925,16 @@ export default function App() {
 
     const item = {
       cart_item_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: productToAdd.id || Date.now(),
+      name: productToAdd.name || itemProductName,
       barcode: itemBarcode,
       product_name: itemProductName,
       brand: itemBrand,
       store_id: itemStoreId || null,
       store_name: locationToUse?.store_name || selectedStore?.name || "",
+      source: productToAdd.source || "manual",
+      size: productToAdd.size ?? productToAdd.size_value ?? null,
+      unit: productToAdd.unit ?? productToAdd.size_unit ?? null,
       size_value: productToAdd.size_value || "",
       size_unit: productToAdd.size_unit || "",
       quantity: productToAdd.quantity || "1",
@@ -2919,6 +2943,10 @@ export default function App() {
       avg_price: locationToUse?.avg_price ?? productToAdd.avg_price ?? null,
       price_type: locationToUse?.price_type ?? productToAdd.price_type ?? "each",
       price_source: locationToUse?.price_source ?? productToAdd.price_source ?? null,
+      price_badge_source:
+        locationToUse?.price_badge_source ??
+        productToAdd.price_badge_source ??
+        (productToAdd.source === "ai" ? "ai" : "manual"),
       price_unit_detected:
         locationToUse?.price_unit_detected ?? productToAdd.price_unit_detected ?? "unknown",
       brand_lock: false,
@@ -2953,13 +2981,19 @@ export default function App() {
     setShoppingListItems((prev) => [
       ...prev,
       {
+        id: Date.now(),
+        name: trimmed,
         barcode: "",
         product_name: trimmed,
         brand: "",
+        source: "manual",
+        size: null,
+        unit: null,
         size_value: "",
         size_unit: "",
         quantity: "1",
         notes: "",
+        price_badge_source: "manual",
         brand_lock: false,
       },
     ]);
@@ -3104,6 +3138,8 @@ export default function App() {
     setCartEditForm({
       product_name: item.product_name || "",
       quantity: item.quantity || "",
+      size_value: item.size_value || item.size || "",
+      size_unit: item.size_unit || item.unit || "",
       notes: item.notes || "",
       price: itemPrice != null ? Number(itemPrice).toFixed(2) : "",
     });
@@ -3120,6 +3156,8 @@ export default function App() {
 
     const name = (cartEditForm.product_name || "").trim();
     const quantity = (cartEditForm.quantity || "").trim();
+    const sizeValue = (cartEditForm.size_value || "").trim();
+    const sizeUnit = (cartEditForm.size_unit || "").trim();
     const notes = (cartEditForm.notes || "").trim();
     const priceText = (cartEditForm.price || "").trim();
 
@@ -3144,9 +3182,14 @@ export default function App() {
               ...item,
               product_name: name,
               quantity: quantity || "1",
+              size: sizeValue || null,
+              unit: sizeUnit || null,
+              size_value: sizeValue,
+              size_unit: sizeUnit,
               notes,
               price: parsedPrice,
               avg_price: parsedPrice,
+              price_badge_source: "manual",
             }
           : item
       )
@@ -4051,40 +4094,16 @@ export default function App() {
 
   if (isCheckingProfile) return null;
 
-  return (
-    <div style={{ padding: 40, background: "red", color: "white", fontSize: 30 }}>
-      LIVE TEST - THIS IS THE DEPLOYED FILE
-    </div>
-  );
-
   if (!currentUserProfile && showOnboarding) {
     return (
       <div style={styles.fullScreenCenter}>
         <div style={styles.cardLarge}>
-          <div style={{ background: "purple", color: "white", padding: 12, fontWeight: 900 }}>
-            BUILD: {BUILD_MARKER}
-          </div>
-          <h2>How MVP Works</h2>
+          <h2>How it works</h2>
 
-          <div style={styles.infoBox}>
-            <strong>Scan or Snap</strong>
-            <p>Identify products instantly</p>
-          </div>
-
-          <div style={styles.infoBox}>
-            <strong>Smart Cart</strong>
-            <p>Auto-organize by aisle</p>
-          </div>
-
-          <div style={styles.infoBox}>
-            <strong>Save Time</strong>
-            <p>Find items faster</p>
-          </div>
-
-          <div style={styles.infoBox}>
-            <strong>Earn Rewards</strong>
-            <p>Help improve data</p>
-          </div>
+          <p>📸 Snap product</p>
+          <p>💲 Auto-detect price</p>
+          <p>🛒 Build smart cart</p>
+          <p>⚡ Save time shopping</p>
 
           <button
             style={styles.primaryButton}
@@ -4101,15 +4120,12 @@ export default function App() {
     return (
       <div style={styles.fullScreenCenter}>
         <div style={styles.cardLarge}>
-          <div style={{ background: "purple", color: "white", padding: 12, fontWeight: 900 }}>
-            BUILD: {BUILD_MARKER}
-          </div>
-          <h1>Welcome to MVP</h1>
+          <h1>Welcome</h1>
 
-          <p>Your smart shopping assistant</p>
+          <p>Start your smart shopping system</p>
 
           <input
-            placeholder="Display Name"
+            placeholder="Your name"
             value={profileForm.display_name}
             onChange={(e) =>
               setProfileForm((prev) => ({
@@ -4119,33 +4135,18 @@ export default function App() {
             }
           />
 
-          <input
-            placeholder="Email (optional)"
-            value={profileForm.email}
-            onChange={(e) =>
-              setProfileForm((prev) => ({
-                ...prev,
-                email: e.target.value,
-              }))
-            }
-          />
-
-          {profileSetupError && (
-            <div style={styles.errorText}>{profileSetupError}</div>
-          )}
-
           <button
             style={styles.primaryButton}
             onClick={handleCreateProfile}
           >
-            {isCreatingProfile ? "Creating..." : "Start Shopping"}
+            Continue
           </button>
 
           <button
             style={styles.secondaryButton}
             onClick={() => setShowOnboarding(true)}
           >
-            Learn how it works
+            How it works
           </button>
         </div>
       </div>
@@ -4156,9 +4157,6 @@ export default function App() {
     return (
       <div style={styles.page}>
         <div style={styles.container}>
-          <div style={{ background: "purple", color: "white", padding: 12, fontWeight: 900 }}>
-            BUILD: {BUILD_MARKER}
-          </div>
           <div style={styles.profileHeader}>
             <span>{currentUserProfile.display_name}</span>
             <span>{currentUserProfile.total_points || 0} pts</span>
@@ -4761,6 +4759,10 @@ export default function App() {
                     {smartItem.needsContribution ? " • Needs contribution" : " • Known location"}
                   </div>
 
+                  <div style={{ ...styles.rewardDescription, marginTop: -2 }}>
+                    {item.price_badge_source === "manual" ? "🟡 User edited" : "🟢 AI detected"}
+                  </div>
+
                   {isEditing && cartEditForm ? (
                     <div style={{ marginTop: 8 }}>
                       <label style={styles.label}>Product name</label>
@@ -4782,6 +4784,28 @@ export default function App() {
                         }
                         style={styles.input}
                         placeholder="e.g. 1, dozen, 2 pack"
+                      />
+
+                      <label style={styles.label}>Size</label>
+                      <input
+                        type="text"
+                        value={cartEditForm.size_value}
+                        onChange={(e) =>
+                          setCartEditForm((prev) => ({ ...prev, size_value: e.target.value }))
+                        }
+                        style={styles.input}
+                        placeholder="e.g. 16"
+                      />
+
+                      <label style={styles.label}>Unit</label>
+                      <input
+                        type="text"
+                        value={cartEditForm.size_unit}
+                        onChange={(e) =>
+                          setCartEditForm((prev) => ({ ...prev, size_unit: e.target.value }))
+                        }
+                        style={styles.input}
+                        placeholder="e.g. oz"
                       />
 
                       {isEggCartItem ? (
