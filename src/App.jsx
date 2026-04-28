@@ -1614,6 +1614,17 @@ export default function App() {
     setStatus(nextRoleLabel ? `Photo added. Next: ${nextRoleLabel}.` : "Photo added. Tap Analyze now.");
   };
 
+  const handleImageUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) {
+      alert("Camera failed. Please try again or upload from your gallery.");
+      return;
+    }
+
+    console.log("Uploading file:", file);
+    handlePhotoSelected(e, "library");
+  };
+
   const readFileAsDataURL = (file) =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -5543,19 +5554,25 @@ export default function App() {
                       : `?? ${capturedPhotos.length === 0 ? "Take" : "Add"} Photo ${capturedPhotos.length + 1} of ${MAX_PHOTOS}: ${PHOTO_ROLE_SEQUENCE[capturedPhotos.length]?.label || "Additional photo"}`}
                   </button>
 
-                  <label style={{ ...styles.libraryButton, marginBottom: 10 }}>
+                  <button
+                    type="button"
+                    style={{ ...styles.libraryButton, marginBottom: 10 }}
+                    onClick={() => {
+                      document.getElementById("cameraInput")?.click();
+                    }}
+                  >
                     {capturedPhotos.length === 0
                       ? "Upload Photo 1 of 3: Product front label"
                       : `Upload Photo ${capturedPhotos.length + 1} of ${MAX_PHOTOS}: ${PHOTO_ROLE_SEQUENCE[capturedPhotos.length]?.label || "Additional photo"}`}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      capture="environment"
-                      multiple
-                      onChange={(e) => handlePhotoSelected(e, "library")}
-                      style={styles.realFileInput}
-                    />
-                  </label>
+                  </button>
+                  <input
+                    id="cameraInput"
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={handleImageUpload}
+                    style={{ display: "none" }}
+                  />
                 </>
               )}
 
