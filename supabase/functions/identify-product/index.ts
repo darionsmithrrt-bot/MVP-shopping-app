@@ -1,6 +1,6 @@
 ﻿import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
-const CORS_HEADERS = {
+const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
@@ -194,6 +194,24 @@ const extractModelText = (data: Record<string, unknown>): string => {
   return "";
 };
 
+const extractJsonObjectText = (raw: string): string => {
+  const cleaned = String(raw || "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/, "")
+    .trim();
+
+  if (!cleaned) return "";
+
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    return cleaned.slice(firstBrace, lastBrace + 1).trim();
+  }
+
+  return cleaned;
+};
+
 const normalizeParsedResult = (parsed: Record<string, unknown>): IdentifyProductResult => {
   const price = normalizePrice(parsed.price);
   const priceUnitRaw = typeof parsed.price_unit === "string" ? parsed.price_unit : "unknown";
@@ -234,7 +252,7 @@ const normalizeRole = (value: unknown, index: number): string => {
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: CORS_HEADERS });
+    return new Response("ok", { headers: corsHeaders });
   }
 
   try {
@@ -257,10 +275,18 @@ serve(async (req) => {
       ? payload.barcode.trim()
       : null;
 
+    console.log("IDENTIFY_PRODUCT INPUT DEBUG:", {
+      imageUrlsLength: rawUrls.length,
+      imageRoles,
+      firstImageUrl: rawUrls[0] || null,
+      hasBarcode: Boolean(barcode),
+      barcode,
+    });
+
     if (rawUrls.length === 0) {
       return new Response(
         JSON.stringify({ error: "No image URLs provided" }),
-        { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
@@ -282,6 +308,9 @@ serve(async (req) => {
       contentParts.push({ type: "input_image", image_url: url });
     });
 
+    const modelName = Deno.env.get("OPENAI_VISION_MODEL") || "gpt-4.1";
+    console.log("IDENTIFY_PRODUCT MODEL:", modelName);
+
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -289,7 +318,7 @@ serve(async (req) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4.1-mini",
+        model: modelName,
         instructions: SYSTEM_PROMPT,
         text: {
           format: {
@@ -314,17 +343,16 @@ serve(async (req) => {
         JSON.stringify({ error: `OpenAI request failed: ${response.status}`, details: errText }),
         {
           status: 502,
-          headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
         }
       );
     }
 
     const data = (await response.json()) as Record<string, unknown>;
+    console.log("IDENTIFY_PRODUCT RAW OPENAI RESPONSE:", JSON.stringify(data));
+
     const rawText = extractModelText(data);
-    const cleanText = rawText
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/\s*```\s*$/, "")
-      .trim();
+    const cleanText = extractJsonObjectText(rawText);
 
     let normalizedResult: IdentifyProductResult = { ...DEFAULT_RESULT };
 
@@ -339,16 +367,34 @@ serve(async (req) => {
       };
     }
 
-    return new Response(
-      JSON.stringify(normalizedResult),
-      { headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
-    );
+    const parsedResult = {
+      product_name: normalizedResult.product_name || "",
+      brand: normalizedResult.brand || "",
+      category: normalizedResult.category || "",
+      size_value: normalizedResult.size_value || "",
+      size_unit: normalizedResult.size_unit || "",
+      quantity: normalizedResult.quantity || "1",
+      price: normalizedResult.price ?? null,
+      price_unit: normalizedResult.price_unit || "unknown",
+      confidence: normalizedResult.confidence || 0,
+      size_confidence: normalizedResult.size_confidence || 0,
+      quantity_confidence: normalizedResult.quantity_confidence || 0,
+      price_confidence: normalizedResult.price_confidence || 0,
+      raw_text: normalizedResult.raw_text || "",
+      debug_version: "vision-function-v2",
+    };
+
+    console.log("IDENTIFY_PRODUCT FINAL JSON:", JSON.stringify(parsedResult));
+
+    return new Response(JSON.stringify(parsedResult), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" }
+    });
   } catch (err) {
     return new Response(
       JSON.stringify({ error: (err as Error).message }),
       {
         status: 500,
-        headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
       }
     );
   }
