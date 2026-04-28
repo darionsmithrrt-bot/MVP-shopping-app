@@ -1758,7 +1758,14 @@ export default function App() {
           rawAiData?.product_name ||
           rawAiData?.name ||
           rawAiData?.item_name ||
+          rawAiData?.output?.product_name ||
+          rawAiData?.output?.name ||
+          rawAiData?.output?.item_name ||
+          rawAiData?.product?.name ||
+          rawAiData?.product?.product_name ||
           rawAiResult?.product_name ||
+          rawAiResult?.product?.name ||
+          rawAiResult?.product?.product_name ||
           rawAiResult?.name ||
           "",
         brand:
@@ -1808,7 +1815,42 @@ export default function App() {
       
       console.log("NORMALIZED AI PAYLOAD AFTER FALLBACK:", aiPayload);
 
-      const normalizedProductName = aiPayload.product_name || "";
+      const inferProductNameFromAi = (payload, response) => {
+        const raw = response?.data || {};
+        const result = raw?.result || {};
+
+        const candidates = [
+          payload?.product_name,
+          payload?.name,
+          payload?.item_name,
+          payload?.title,
+          payload?.description,
+          raw?.product_name,
+          raw?.name,
+          raw?.item_name,
+          raw?.title,
+          raw?.description,
+          result?.product_name,
+          result?.name,
+          result?.item_name,
+          result?.title,
+          result?.description,
+          result?.text,
+          raw?.raw_text,
+          raw?.detected_text,
+          payload?.raw_text,
+        ];
+
+        const firstUseful = candidates
+          .map((v) => String(v || "").trim())
+          .find((v) => v && v.length >= 2);
+
+        return firstUseful || "";
+      };
+
+      let normalizedProductName =
+        String(aiPayload.product_name || "").trim() ||
+        inferProductNameFromAi(aiPayload, aiResponse);
       const normalizedBrand = aiPayload.brand || "";
       const normalizedCategory = aiPayload.category || "";
       let normalizedSizeValue = aiPayload.size_value || "";
@@ -1870,8 +1912,14 @@ export default function App() {
         finalRow = updatedRow;
         setStatus("? AI identified product");
       } else {
-        setStatus("AI ran, but product name was missing from the response.");
-        setError("AI response did not include product_name. Check console FULL AI RESPONSE and Edge Function output format.");
+        normalizedProductName = correctionForm.product_name?.trim()
+          || product?.name
+          || "Unknown product";
+
+        setStatus("AI could not identify the product name. Enter or correct the name below, then continue.");
+        setError("");
+        setAwaitingProductConfirmation(true);
+        setShowAiSummaryCard(false);
       }
 
       const finalProduct = {
