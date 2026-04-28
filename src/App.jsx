@@ -1729,10 +1729,84 @@ export default function App() {
         .map((photo, index) => normalizeImageRole(photo?.role, index));
       const aiResponse = await identifyProductFromPhoto(uploadedUrls, normalizedBarcode, imageRoles);
       console.log("FULL AI RESPONSE:", aiResponse);
+      
+      if (aiResponse?.error) {
+        throw new Error(`AI function failed: ${aiResponse.error.message || JSON.stringify(aiResponse.error)}`);
+      }
+      
+      console.log("AI RESPONSE DATA:", aiResponse?.data);
+      console.log("AI RESPONSE ERROR:", aiResponse?.error);
+      console.log("AI RESPONSE RESULT:", aiResponse?.data?.result);
+      console.log("AI RESPONSE PRODUCT NAME CANDIDATES:", {
+        product_name: aiResponse?.data?.product_name,
+        name: aiResponse?.data?.name,
+        result_product_name: aiResponse?.data?.result?.product_name,
+        result_name: aiResponse?.data?.result?.name,
+        item_name: aiResponse?.data?.item_name,
+      });
+      
       setAiDebug(aiResponse);
 
-      const aiPayload = extractAiProductData(aiResponse);
-      console.log("NORMALIZED AI PAYLOAD:", aiPayload);
+      const extractedPayload = extractAiProductData(aiResponse);
+      const rawAiData = aiResponse?.data || {};
+      const rawAiResult = rawAiData?.result || {};
+
+      const aiPayload = {
+        ...extractedPayload,
+        product_name:
+          extractedPayload?.product_name ||
+          rawAiData?.product_name ||
+          rawAiData?.name ||
+          rawAiData?.item_name ||
+          rawAiResult?.product_name ||
+          rawAiResult?.name ||
+          "",
+        brand:
+          extractedPayload?.brand ||
+          rawAiData?.brand ||
+          rawAiResult?.brand ||
+          "",
+        category:
+          extractedPayload?.category ||
+          rawAiData?.category ||
+          rawAiResult?.category ||
+          "",
+        size_value:
+          extractedPayload?.size_value ||
+          rawAiData?.size_value ||
+          rawAiResult?.size_value ||
+          rawAiData?.size?.value ||
+          rawAiResult?.size?.value ||
+          "",
+        size_unit:
+          extractedPayload?.size_unit ||
+          rawAiData?.size_unit ||
+          rawAiResult?.size_unit ||
+          rawAiData?.size?.unit ||
+          rawAiResult?.size?.unit ||
+          "",
+        quantity:
+          extractedPayload?.quantity ||
+          rawAiData?.quantity ||
+          rawAiResult?.quantity ||
+          "1",
+        confidence:
+          Number(
+            extractedPayload?.confidence ??
+            rawAiData?.confidence ??
+            rawAiResult?.confidence ??
+            0
+          ),
+        raw_text:
+          extractedPayload?.raw_text ||
+          rawAiData?.raw_text ||
+          rawAiResult?.raw_text ||
+          rawAiData?.detected_text ||
+          rawAiResult?.detected_text ||
+          "",
+      };
+      
+      console.log("NORMALIZED AI PAYLOAD AFTER FALLBACK:", aiPayload);
 
       const normalizedProductName = aiPayload.product_name || "";
       const normalizedBrand = aiPayload.brand || "";
@@ -1796,7 +1870,8 @@ export default function App() {
         finalRow = updatedRow;
         setStatus("? AI identified product");
       } else {
-        setStatus("?? AI did not return a product name");
+        setStatus("AI ran, but product name was missing from the response.");
+        setError("AI response did not include product_name. Check console FULL AI RESPONSE and Edge Function output format.");
       }
 
       const finalProduct = {
