@@ -466,6 +466,8 @@ export default function App() {
   // Multi-photo capture
   const MAX_PHOTOS = 3;
   const [capturedPhotos, setCapturedPhotos] = useState([]); // [{file, previewUrl, label}]
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [previewImages, setPreviewImages] = useState([]);
   const [photoAnalysisStatus, setPhotoAnalysisStatus] = useState('idle'); // 'idle'|'uploading'|'analyzing'|'done'|'error'
   const [awaitingProductConfirmation, setAwaitingProductConfirmation] = useState(false);
   const [optionalBarcodeInput, setOptionalBarcodeInput] = useState("");
@@ -638,6 +640,13 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("shoppingListItems", JSON.stringify(shoppingListItems));
   }, [shoppingListItems]);
+
+  useEffect(() => {
+    const files = capturedPhotos.map((photo) => photo.file).filter(Boolean);
+    const previews = capturedPhotos.map((photo) => photo.previewUrl).filter(Boolean);
+    setSelectedFiles(files);
+    setPreviewImages(previews);
+  }, [capturedPhotos]);
 
   // ============================================================================
   // STORE LOGIC - Load Stores, Select/Create Store
@@ -1110,6 +1119,8 @@ export default function App() {
 
   const resetAiPhotoState = () => {
     setCapturedPhotos([]);
+    setSelectedFiles([]);
+    setPreviewImages([]);
     setPhotoAnalysisStatus('idle');
     setAiDebug(null);
     setAiDetectedPrice(null);
@@ -1538,7 +1549,14 @@ export default function App() {
       });
 
       const file = blobToFile(blob, `camera-${Date.now()}.jpg`);
+      if (!file || file.size === 0) {
+        alert("Camera failed. Please try again or upload from your gallery.");
+        throw new Error("Captured camera file is empty");
+      }
       const previewUrl = URL.createObjectURL(blob);
+      console.log("FILES RECEIVED:", [file]);
+      console.log("FILE TYPES:", [file].map((f) => f.type));
+      console.log("FILE SIZE:", [file].map((f) => f.size));
       setSubmissionMethod("camera");
       setCapturedPhotos((prev) => {
         if (prev.length >= MAX_PHOTOS) return prev;
@@ -1557,6 +1575,7 @@ export default function App() {
       setStatus(nextRoleLabel ? `Photo captured. Next: ${nextRoleLabel}.` : "Photo captured. Tap Analyze now.");
     } catch (err) {
       console.error("CAPTURE ERROR:", err);
+      alert("Camera failed. Please try again or upload from your gallery.");
       setError(err.message || "Failed to capture photo");
       setStatus("? Photo capture failed");
     } finally {
@@ -1565,30 +1584,54 @@ export default function App() {
   };
 
   const handlePhotoSelected = (event, source) => {
-    const file = event.target.files?.[0];
+    const files = Array.from(event.target.files || []);
     event.target.value = "";
-    if (!file) return;
+    if (files.length === 0) {
+      alert("Camera failed. Please try again or upload from your gallery.");
+      return;
+    }
+    console.log("FILES RECEIVED:", files);
+    console.log("FILE TYPES:", files.map((f) => f.type));
+    console.log("FILE SIZE:", files.map((f) => f.size));
     setSubmissionMethod(source);
-    const previewUrl = URL.createObjectURL(file);
     setCapturedPhotos((prev) => {
       if (prev.length >= MAX_PHOTOS) return prev;
-      const role = getRoleByPhotoIndex(prev.length);
-      return [
-        ...prev,
-        {
+      const slotsLeft = Math.max(MAX_PHOTOS - prev.length, 0);
+      const filesToAdd = files.slice(0, slotsLeft);
+      const mappedPhotos = filesToAdd.map((file, index) => {
+        const absoluteIndex = prev.length + index;
+        const role = getRoleByPhotoIndex(absoluteIndex);
+        return {
           file,
-          previewUrl,
-          label: `Photo ${prev.length + 1}`,
+          previewUrl: URL.createObjectURL(file),
+          label: `Photo ${absoluteIndex + 1}`,
           role,
-        },
-      ];
+        };
+      });
+      return [...prev, ...mappedPhotos];
     });
     const nextRoleLabel = PHOTO_ROLE_SEQUENCE[Math.min(capturedPhotos.length + 1, MAX_PHOTOS - 1)]?.label;
     setStatus(nextRoleLabel ? `Photo added. Next: ${nextRoleLabel}.` : "Photo added. Tap Analyze now.");
   };
 
-  const analyzeAllPhotos = async () => {
-    if (capturedPhotos.length === 0) return;
+  const readFileAsDataURL = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+  const analyzeAllPhotos = async (filesInput = selectedFiles) => {
+    const files = (filesInput && filesInput.length > 0)
+      ? filesInput
+      : capturedPhotos.map((photo) => photo.file).filter(Boolean);
+
+    if (files.length === 0) {
+      alert("Camera failed. Please try again or upload from your gallery.");
+      return;
+    }
+
     processingRef.current = true;
     setPhotoAnalysisStatus('uploading');
     setError("");
@@ -1598,12 +1641,15 @@ export default function App() {
     const initialSourceValue = submissionMethod === "library" ? "manual" : "camera";
 
     try {
+      const images = await Promise.all(files.map(readFileAsDataURL));
+      console.info("Prepared image payloads for analysis", { imageCount: images.length });
+
       // â”€â”€ Upload all captured photos â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       const uploadedUrls = [];
 
-      for (let i = 0; i < capturedPhotos.length; i++) {
-        const { file } = capturedPhotos[i];
-        setStatus(`Uploading photo ${i + 1} of ${capturedPhotos.length}...`);
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        setStatus(`Uploading photo ${i + 1} of ${files.length}...`);
 
         const safeFileName = `${Date.now()}-p${i}-${file.name || "photo.jpg"}`;
         const filePath = `${normalizedBarcode || "no-barcode"}/${safeFileName}`;
@@ -1663,7 +1709,9 @@ export default function App() {
       setPhotoAnalysisStatus('analyzing');
       setStatus(`Analyzing ${uploadedUrls.length} photo${uploadedUrls.length > 1 ? "s" : ""} with AI...`);
 
-      const imageRoles = capturedPhotos.map((photo, index) => normalizeImageRole(photo?.role, index));
+      const imageRoles = capturedPhotos
+        .slice(0, files.length)
+        .map((photo, index) => normalizeImageRole(photo?.role, index));
       const aiResponse = await identifyProductFromPhoto(uploadedUrls, normalizedBarcode, imageRoles);
       console.log("FULL AI RESPONSE:", aiResponse);
       setAiDebug(aiResponse);
@@ -5417,7 +5465,7 @@ export default function App() {
                       style={{ position: "relative", width: 80, height: 80, borderRadius: 10, overflow: "hidden", border: "2px solid #e2e8f0", flexShrink: 0 }}
                     >
                       <img
-                        src={p.previewUrl}
+                        src={previewImages[i] || p.previewUrl}
                         alt={p.label}
                         style={{ width: "100%", height: "100%", objectFit: "cover" }}
                       />
@@ -5468,7 +5516,7 @@ export default function App() {
               {/* â”€â”€ Analyze button (shown after â‰¥1 photo) â”€â”€ */}
               {capturedPhotos.length > 0 && (
                 <button
-                  onClick={analyzeAllPhotos}
+                  onClick={() => analyzeAllPhotos(selectedFiles)}
                   style={{ ...styles.confirmButton, width: "100%", minHeight: 56, fontSize: 17, fontWeight: 800, marginBottom: 10 }}
                   disabled={photoAnalysisStatus === 'uploading' || photoAnalysisStatus === 'analyzing' || processingRef.current}
                 >
@@ -5506,6 +5554,8 @@ export default function App() {
                     <input
                       type="file"
                       accept="image/*"
+                      capture="environment"
+                      multiple
                       onChange={(e) => handlePhotoSelected(e, "library")}
                       style={styles.realFileInput}
                     />
