@@ -1336,7 +1336,7 @@ export default function App() {
     try {
       const { data, error: productError } = await supabase
         .from("catalog_products")
-        .select("id, barcode, product_name, image_url, brand, category, source, size_value, size_unit, quantity")
+        .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
         .eq("barcode", scannedBarcode)
         .maybeSingle();
 
@@ -1354,7 +1354,7 @@ export default function App() {
         image: data.image_url || "",
         barcode: data.barcode || scannedBarcode,
         brand: data.brand || "",
-        category: data.category || "",
+        category: "",
         size_value: data.size_value || "",
         size_unit: data.size_unit || "",
         quantity: data.quantity || "",
@@ -1643,7 +1643,7 @@ export default function App() {
             [{ barcode: normalizedBarcode, product_name: "Unknown product", image_url: firstImageUrl, source: initialSourceValue }],
             { onConflict: "barcode" }
           )
-          .select("id, barcode, product_name, image_url, brand, category, source, size_value, size_unit, quantity")
+          .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
           .single();
         savedRow = result.data;
         saveError = result.error;
@@ -1651,7 +1651,7 @@ export default function App() {
         const result = await supabase
           .from("catalog_products")
           .insert([{ barcode: null, product_name: "Unknown product", image_url: firstImageUrl, source: initialSourceValue }])
-          .select("id, barcode, product_name, image_url, brand, category, source, size_value, size_unit, quantity")
+          .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
           .single();
         savedRow = result.data;
         saveError = result.error;
@@ -1719,14 +1719,13 @@ export default function App() {
           .update({
             product_name: normalizedProductName,
             brand: normalizedBrand,
-            category: normalizedCategory,
             size_value: normalizedSizeValue,
             size_unit: normalizedSizeUnit,
             quantity: normalizedQuantity,
             source: initialSourceValue,
           })
           .eq("id", savedRow?.id)
-          .select("id, barcode, product_name, image_url, brand, category, source, size_value, size_unit, quantity")
+          .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
           .single();
 
         if (updateError) throw new Error(`AI update failed: ${updateError.message}`);
@@ -1743,7 +1742,7 @@ export default function App() {
         image: finalRow?.image_url || firstImageUrl,
         barcode: finalRow?.barcode ?? normalizedBarcode,
         brand: finalRow?.brand || normalizedBrand || "",
-        category: finalRow?.category || normalizedCategory || "",
+        category: normalizedCategory || "",
         size_value: lockedSizeValue,
         size_unit: lockedSizeUnit,
         quantity: lockedQuantity,
@@ -1765,7 +1764,7 @@ export default function App() {
           ? mapDetectedUnitToPriceType(detectedPriceFromAi.unit)
           : prev.price_type,
         detected_price_unit: detectedPriceFromAi?.unit || "unknown",
-        price_source: detectedPriceFromAi ? "photo_sign" : prev.price_source,
+        price_source: detectedPriceFromAi ? "photo_sign" : "manual",
       }));
 
       setPriceConfirmed(Boolean(detectedPriceFromAi));
@@ -1782,6 +1781,7 @@ export default function App() {
         name: finalProduct.name,
         product_name: finalProduct.name,
         price: detectedPriceFromAi?.amount ?? null,
+        avg_price: null,
         price_type: aiCartPriceType,
         quantity: finalProduct.quantity || "1",
         size: finalProduct.size_value || null,
@@ -1789,8 +1789,8 @@ export default function App() {
         size_value: finalProduct.size_value || "",
         size_unit: finalProduct.size_unit || "",
         source: "ai",
-        price_badge_source: "ai",
-        price_source: detectedPriceFromAi ? "photo_sign" : null,
+        price_badge_source: detectedPriceFromAi ? "ai" : "manual",
+        price_source: detectedPriceFromAi ? "photo_sign" : "missing",
         price_unit_detected: detectedPriceFromAi?.unit || "unknown",
         barcode: finalProduct.barcode || null,
         brand: finalProduct.brand || "",
@@ -1819,7 +1819,17 @@ export default function App() {
       } else {
         console.info("AI auto-add skipped: duplicate within lock window");
       }
-      setAwaitingProductConfirmation(false);
+      if (!detectedPriceFromAi) {
+        setPriceConfirmed(false);
+        setLocationForm((prev) => ({
+          ...prev,
+          price: "",
+          price_source: "manual",
+          detected_price_unit: "unknown",
+        }));
+        setStatus("Product identified. Enter price manually or skip price for now.");
+      }
+      setAwaitingProductConfirmation(true);
       setShowAiSummaryCard(false);
       setShowOptionalBarcodeInput(false);
       setOptionalBarcodeInput(normalizedBarcode || "");
@@ -1834,8 +1844,16 @@ export default function App() {
       await stopScanner();
     } catch (err) {
       console.error("ANALYZE PHOTOS ERROR:", err);
-      setError(err.message || "Something went wrong");
-      setStatus("? Error occurred");
+      const rawMessage = String(err?.message || err || "");
+      const schemaMismatchMessage =
+        "Database schema mismatch: catalog_products does not have a category column. Category will remain local until schema is updated.";
+      const isCategorySchemaMismatch = rawMessage.toLowerCase().includes("catalog_products.category does not exist");
+      setError(isCategorySchemaMismatch ? schemaMismatchMessage : (err.message || "Something went wrong"));
+      setStatus(
+        isCategorySchemaMismatch
+          ? "Database schema mismatch detected."
+          : "Something went wrong while analyzing photos."
+      );
       setPhotoAnalysisStatus('error');
     } finally {
       processingRef.current = false;
@@ -2227,12 +2245,12 @@ export default function App() {
       const sizeValue = locationForm.size_value.trim();
       const sizeUnit = locationForm.size_unit.trim();
       const quantity = locationForm.quantity.trim();
-      const price = locationForm.price.trim()
-        ? Number(locationForm.price) / 100
-        : null;
+      const selectedPriceSource = String(locationForm.price_source || "").trim();
+      const enteredPrice = locationForm.price.trim();
+      const price = enteredPrice ? Number(locationForm.price) / 100 : null;
 
-      if (price === null) {
-        setError("Price is required");
+      if (!enteredPrice && selectedPriceSource !== "missing") {
+        setError("Enter a price or tap Skip price for now.");
         setIsSavingLocation(false);
         return;
       }
@@ -2250,12 +2268,12 @@ export default function App() {
         return;
       }
       const selectedPriceType = locationForm.price_type || "each";
-      const selectedPriceSource = String(locationForm.price_source || "").trim();
       const selectedDetectedUnit = String(locationForm.detected_price_unit || "unknown").trim();
       const weightedAreas = ["produce", "meat", "meat / poultry"];
       const aisleLower = String(aisle || "").toLowerCase();
 
       const finalPriceType =
+        price !== null &&
         selectedPriceType === "each" &&
         weightedAreas.some((area) => aisleLower.includes(area))
           ? "per_lb"
@@ -2280,12 +2298,16 @@ export default function App() {
       ).maybeSingle();
 
       const existingPriceCount = Number(existingPriceRow?.price_count || 0);
-      const existingAvgPrice = Number(existingPriceRow?.avg_price || 0);
-      const nextPriceCount = existingPriceCount + 1;
+      const existingAvgPriceRaw = existingPriceRow?.avg_price;
+      const existingAvgPrice = Number(existingAvgPriceRaw || 0);
+      const hasPriceValue = price !== null;
+      const nextPriceCount = hasPriceValue ? existingPriceCount + 1 : existingPriceCount;
       const nextAvgPrice =
-        existingPriceCount > 0
+        hasPriceValue
+          ? existingPriceCount > 0
           ? ((existingAvgPrice * existingPriceCount) + price) / nextPriceCount
-          : price;
+          : price
+          : existingAvgPriceRaw ?? null;
 
       const aiConfidenceForWeight = Number(aiIdentityConfidence || 0);
       const hasPhotoEvidence =
@@ -2339,16 +2361,18 @@ export default function App() {
         userTrustScore: currentUserProfile?.trust_score || 0,
       });
 
-      const weightedPriceConfidence = calculateCrowdConfidence({
-        confirmationCount: projectedConfirmationCount,
-        priceCount: nextPriceCount,
-        source: submissionMethod || "manual",
-        hasPhoto: hasPhotoEvidence,
-        priceSource: selectedPriceSource,
-        userEdited: Boolean(aiDetectedPriceEdited),
-        aiConfidence: Number(aiFieldConfidence?.price || aiConfidenceForWeight || 0),
-        userTrustScore: currentUserProfile?.trust_score || 0,
-      });
+      const weightedPriceConfidence = hasPriceValue
+        ? calculateCrowdConfidence({
+            confirmationCount: projectedConfirmationCount,
+            priceCount: nextPriceCount,
+            source: submissionMethod || "manual",
+            hasPhoto: hasPhotoEvidence,
+            priceSource: selectedPriceSource,
+            userEdited: Boolean(aiDetectedPriceEdited),
+            aiConfidence: Number(aiFieldConfidence?.price || aiConfidenceForWeight || 0),
+            userTrustScore: currentUserProfile?.trust_score || 0,
+          })
+        : 0;
 
       console.info("LOCATION SAVE: saving store-specific product location", {
         barcode: barcodeValue,
@@ -2367,7 +2391,6 @@ export default function App() {
             size_value: sizeValue || null,
             size_unit: sizeUnit || null,
             quantity: quantity || null,
-            category: correctionForm.category?.trim() || null,
           });
 
         if (barcodeValue) {
@@ -2731,7 +2754,11 @@ export default function App() {
       setToast({ message: 'Location saved!', type: 'success' });
     } catch (err) {
       console.error("LOCATION SAVE ERROR:", err);
-      setError(err.message || "Failed to save location");
+      const rawMessage = String(err?.message || err || "");
+      const schemaMismatchMessage =
+        "Database schema mismatch: catalog_products does not have a category column. Category will remain local until schema is updated.";
+      const isCategorySchemaMismatch = rawMessage.toLowerCase().includes("catalog_products.category does not exist");
+      setError(isCategorySchemaMismatch ? schemaMismatchMessage : (err.message || "Failed to save location"));
       setToast({ message: 'Failed to save location', type: 'error' });
     } finally {
       setIsSavingLocation(false);
@@ -4008,8 +4035,8 @@ export default function App() {
               type="button"
               style={styles.confirmButton}
               onClick={() => {
-                if (!locationForm.price) {
-                  setError("Enter a price before confirming");
+                if (!locationForm.price && locationForm.price_source !== "missing") {
+                  setError("Enter a price or tap Skip price for now.");
                   return;
                 }
                 setPriceConfirmed(true);
@@ -4041,8 +4068,8 @@ export default function App() {
               type="button"
               style={styles.primaryButton}
               onClick={() => {
-                if (!locationForm.price) {
-                  setError("Price is required");
+                if (!locationForm.price && locationForm.price_source !== "missing") {
+                  setError("Enter a price or tap Skip price for now.");
                   return;
                 }
                 setError("");
@@ -4750,7 +4777,9 @@ export default function App() {
                     {item.quantity ? ` • qty ${item.quantity}` : ""}
                     {itemPrice != null
                       ? ` • $${Number(itemPrice).toFixed(2)} ${priceTypeLabel}`
-                      : ""}
+                      : item.price_source === "missing"
+                        ? " • Price not added yet"
+                        : ""}
                     {item.notes ? ` • note: ${item.notes}` : ""}
                   </div>
 
@@ -5784,6 +5813,49 @@ export default function App() {
                 </div>
               ) : null}
 
+              {!aiDetectedPrice ? (
+                <div style={styles.aiPriceConfirmationCard}>
+                  <div style={styles.aiPriceConfirmationTitle}>Price not detected</div>
+                  <div style={styles.rewardDescription}>
+                    No shelf price was found. You can enter it now, skip it for home testing, or add it later in store.
+                  </div>
+                  <div style={styles.buttonRow}>
+                    <button
+                      type="button"
+                      style={styles.secondaryButton}
+                      onClick={() => {
+                        setLocationForm((prev) => ({ ...prev, price_source: "manual" }));
+                        setPriceConfirmed(false);
+                        setTimeout(() => {
+                          if (priceInputRef.current?.focus) {
+                            priceInputRef.current.focus();
+                          }
+                        }, 0);
+                      }}
+                    >
+                      Enter price now
+                    </button>
+                    <button
+                      type="button"
+                      style={styles.confirmButton}
+                      onClick={() => {
+                        setPriceConfirmed(true);
+                        setLocationForm((prev) => ({
+                          ...prev,
+                          price: "",
+                          price_source: "missing",
+                          detected_price_unit: "unknown",
+                        }));
+                        setError("");
+                        setStatus("Price skipped for now. You can add it later in store.");
+                      }}
+                    >
+                      Skip price for now
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
               {aiDetectedPrice && priceConfirmed ? (
                 <div style={styles.aiPriceConfirmedBar}>
                   Confirmed price: ${formatCentsToDollars(locationForm.price)}{detectedUnitLabel}
@@ -6011,6 +6083,10 @@ export default function App() {
                     ? ` • unit: ${locationForm.detected_price_unit}`
                     : ""}
                 </div>
+              ) : null}
+
+              {locationForm.price_source === "missing" ? (
+                <div style={styles.inlineWarning}>Price skipped — add later</div>
               ) : null}
 
               {!priceConfirmed && locationForm.price ? (
