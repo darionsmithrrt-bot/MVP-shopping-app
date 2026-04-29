@@ -48,9 +48,12 @@ const identifyProductFromPhoto = async (imageUrls, barcode, imageRoles = []) => 
     imageRoles: normalizedRoles,
     barcode,
   };
+  console.log("INVOKING identify-product WITH PAYLOAD:", payload);
   const { data, error } = await supabase.functions.invoke("identify-product", {
     body: payload,
   });
+  console.log("IDENTIFY PRODUCT INVOKE DATA:", data);
+  console.log("IDENTIFY PRODUCT INVOKE ERROR:", error);
   return { data, error };
 };
 
@@ -5833,6 +5836,18 @@ export default function App() {
               <span style={styles.chipIcon}>??</span>
               {status}
             </div>
+            {aiDebug?.data?.debug_version && (
+              <div style={styles.methodChip}>
+                <span style={styles.chipIcon}>??</span>
+                AI Debug: {aiDebug.data.debug_version}
+              </div>
+            )}
+            {aiDebug?.data?.product_name && (
+              <div style={styles.confirmChip}>
+                <span style={styles.chipIcon}>??</span>
+                AI Product: {aiDebug.data.product_name}
+              </div>
+            )}
             {barcode && (
               <div style={styles.barcodeChip}>
                 <span style={styles.chipIcon}>??</span>

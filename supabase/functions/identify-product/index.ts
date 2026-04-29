@@ -312,6 +312,29 @@ serve(async (req) => {
       });
     }
 
+    return new Response(
+      JSON.stringify({
+        debug_version: "identify-product-hard-test-v1",
+        success: true,
+        product_name: "FUNCTION IS LIVE",
+        brand: "Debug",
+        category: "Debug",
+        size_value: "1",
+        size_unit: "test",
+        quantity: "1",
+        price: 2.29,
+        price_unit: "each",
+        confidence: 1,
+      }),
+      {
+        status: 200,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
     const userText = barcode
       ? `Analyze ${rawUrls.length} product image(s). Barcode context: ${barcode}.`
       : `Analyze ${rawUrls.length} product image(s). No barcode provided.`;
