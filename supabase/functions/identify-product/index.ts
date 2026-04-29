@@ -251,13 +251,35 @@ const normalizeRole = (value: unknown, index: number): string => {
 };
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
-  }
-
   try {
+    const debugVersion = "identify-product-debug-v3";
+    const jsonResponse = (status: number, payload: Record<string, unknown>) =>
+      new Response(JSON.stringify(payload), {
+        status,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+
+    if (req.method === "OPTIONS") {
+      return jsonResponse(200, { ok: true, debug_version: debugVersion });
+    }
+
     const body = await req.json();
     const payload = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    const openAiApiKey = Deno.env.get("OPENAI_API_KEY");
+
+    if (!openAiApiKey) {
+      return jsonResponse(500, {
+        error: "Missing OPENAI_API_KEY",
+        debug_version: debugVersion,
+      });
+    }
+
+    if (!Array.isArray(payload.imageUrls) || payload.imageUrls.length === 0) {
+      return jsonResponse(400, {
+        error: "No imageUrls received",
+        debug_version: debugVersion,
+      });
+    }
 
     // Accept imageUrls (array) and maintain legacy imageUrl support.
     const rawUrls: string[] = Array.isArray(payload.imageUrls)
@@ -284,10 +306,10 @@ serve(async (req) => {
     });
 
     if (rawUrls.length === 0) {
-      return new Response(
-        JSON.stringify({ error: "No image URLs provided" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return jsonResponse(400, {
+        error: "No imageUrls received",
+        debug_version: debugVersion,
+      });
     }
 
     const userText = barcode
@@ -311,44 +333,48 @@ serve(async (req) => {
     const modelName = Deno.env.get("OPENAI_VISION_MODEL") || "gpt-4.1";
     console.log("IDENTIFY_PRODUCT MODEL:", modelName);
 
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${Deno.env.get("OPENAI_API_KEY")}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: modelName,
-        instructions: SYSTEM_PROMPT,
-        text: {
-          format: {
-            type: "json_schema",
-            name: "identify_product_result",
-            schema: JSON_SCHEMA,
-            strict: true,
-          },
+    let data: Record<string, unknown> = {};
+    try {
+      const response = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${openAiApiKey}`,
+          "Content-Type": "application/json",
         },
-        input: [
-          {
-            role: "user",
-            content: contentParts,
+        body: JSON.stringify({
+          model: modelName,
+          instructions: SYSTEM_PROMPT,
+          text: {
+            format: {
+              type: "json_schema",
+              name: "identify_product_result",
+              schema: JSON_SCHEMA,
+              strict: true,
+            },
           },
-        ],
-      }),
-    });
+          input: [
+            {
+              role: "user",
+              content: contentParts,
+            },
+          ],
+        }),
+      });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      return new Response(
-        JSON.stringify({ error: `OpenAI request failed: ${response.status}`, details: errText }),
-        {
-          status: 502,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
-      );
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`OpenAI request failed: ${response.status} ${errText}`);
+      }
+
+      data = (await response.json()) as Record<string, unknown>;
+    } catch (openAiError) {
+      return jsonResponse(500, {
+        error: "OpenAI call failed",
+        details: (openAiError as Error)?.message || "Unknown OpenAI error",
+        debug_version: debugVersion,
+      });
     }
 
-    const data = (await response.json()) as Record<string, unknown>;
     console.log("IDENTIFY_PRODUCT RAW OPENAI RESPONSE:", JSON.stringify(data));
 
     const rawText = extractModelText(data);
@@ -381,17 +407,19 @@ serve(async (req) => {
       quantity_confidence: normalizedResult.quantity_confidence || 0,
       price_confidence: normalizedResult.price_confidence || 0,
       raw_text: normalizedResult.raw_text || "",
-      debug_version: "vision-function-v2",
+      debug_version: debugVersion,
     };
 
     console.log("IDENTIFY_PRODUCT FINAL JSON:", JSON.stringify(parsedResult));
 
-    return new Response(JSON.stringify(parsedResult), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" }
-    });
+    return jsonResponse(200, parsedResult);
   } catch (err) {
     return new Response(
-      JSON.stringify({ error: (err as Error).message }),
+      JSON.stringify({
+        error: "Unhandled identify-product error",
+        details: (err as Error)?.message || "Unknown error",
+        debug_version: "identify-product-debug-v3",
+      }),
       {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
