@@ -725,6 +725,7 @@ export default function App() {
     }
   };
 
+  // Supabase email confirmation may block sign-in unless disabled in Authentication > Settings > Email Auth or the user confirms by email.
   const handleSupabaseAuth = async () => {
     const email = loginForm.username.trim();
     const password = loginForm.password;
@@ -738,6 +739,9 @@ export default function App() {
     setIsSubmittingAuth(true);
 
     try {
+      let shouldCloseModal = false;
+      let successMessage = "Signed in successfully.";
+
       if (loginMode === "signUp") {
         const { data, error: signUpError } = await supabase.auth.signUp({
           email,
@@ -749,9 +753,14 @@ export default function App() {
           },
         });
         if (signUpError) throw signUpError;
-        if (data?.user) {
+        if (data?.user && data?.session) {
           setAuthUser(data.user);
           await loadOrCreateSupabaseProfile(data.user);
+          shouldCloseModal = true;
+          successMessage = "Account created. Welcome to MVP.";
+        } else if (data?.user && !data?.session) {
+          setAuthError("Account created. Check your email to confirm your account, or continue as guest for now.");
+          return;
         }
       } else {
         const { data, error: signInError } = await supabase.auth.signInWithPassword({
@@ -762,19 +771,54 @@ export default function App() {
         if (data?.user) {
           setAuthUser(data.user);
           await loadOrCreateSupabaseProfile(data.user);
+          shouldCloseModal = true;
         }
       }
 
-      setAuthError("");
-      setShowLoginModal(false);
-      setLoginForm({ username: "", password: "" });
-      setToast({
-        message: loginMode === "signUp" ? "Account created. Welcome to MVP." : "Signed in successfully.",
-        type: "success",
-      });
+      if (shouldCloseModal) {
+        setAuthError("");
+        setShowLoginModal(false);
+        setLoginForm({ username: "", password: "" });
+        setToast({
+          message: successMessage,
+          type: "success",
+        });
+      }
     } catch (err) {
       console.error("SUPABASE AUTH ERROR:", err);
-      setAuthError(err?.message || "Unable to authenticate right now.");
+      if (String(err?.message || "").includes("Email not confirmed")) {
+        setAuthError("Email not confirmed. Check your inbox for the confirmation link, or continue as guest for now.");
+      } else {
+        setAuthError(err?.message || "Unable to authenticate right now.");
+      }
+    } finally {
+      setIsSubmittingAuth(false);
+    }
+  };
+
+  const handleResendConfirmationEmail = async () => {
+    const email = loginForm.username.trim();
+
+    if (!email) {
+      setAuthError("Enter your email first, then resend the confirmation link.");
+      return;
+    }
+
+    setIsSubmittingAuth(true);
+    setAuthError("");
+
+    try {
+      const { error } = await supabase.auth.resend({
+        type: "signup",
+        email,
+      });
+
+      if (error) throw error;
+
+      setAuthError("Confirmation email resent. Check your inbox and spam folder.");
+    } catch (err) {
+      console.error("RESEND CONFIRMATION ERROR:", err);
+      setAuthError(err?.message || "Could not resend confirmation email.");
     } finally {
       setIsSubmittingAuth(false);
     }
@@ -5104,6 +5148,17 @@ export default function App() {
 
                 {authError ? (
                   <div style={styles.errorText}>{authError}</div>
+                ) : null}
+
+                {authError.toLowerCase().includes("email not confirmed") ? (
+                  <button
+                    type="button"
+                    style={styles.modalSecondaryButton}
+                    onClick={handleResendConfirmationEmail}
+                    disabled={isSubmittingAuth}
+                  >
+                    Resend Confirmation Email
+                  </button>
                 ) : null}
 
                 <button
