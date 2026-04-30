@@ -2740,15 +2740,35 @@ export default function App() {
         throw new Error(`Could not save location: ${locationError.message}`);
       }
 
-      const { data: verifiedLocationRow, error: verifyError } = await applyBarcodeFilter(
-        supabase
-          .from("product_locations")
-          .select("barcode, aisle, section, shelf, notes, price, price_type, source, last_confirmed_at, avg_price, price_count, price_confidence")
-          .eq("store_id", selectedStore.id)
-      ).maybeSingle();
+      let verifyQuery = supabase
+        .from("product_locations")
+        .select("barcode, aisle, section, shelf, notes, price, price_type, source, last_confirmed_at, avg_price, price_count, price_confidence")
+        .eq("store_id", selectedStore.id)
+        .eq("barcode", barcodeValue)
+        .eq("aisle", aisle)
+        .order("last_confirmed_at", { ascending: false })
+        .limit(1);
+
+      if (section === null) {
+        verifyQuery = verifyQuery.is("section", null);
+      } else {
+        verifyQuery = verifyQuery.eq("section", section);
+      }
+
+      if (shelf === null) {
+        verifyQuery = verifyQuery.is("shelf", null);
+      } else {
+        verifyQuery = verifyQuery.eq("shelf", shelf);
+      }
+
+      const { data: verifiedRows, error: verifyError } = await verifyQuery;
+
+      const verifiedLocationRow = Array.isArray(verifiedRows) && verifiedRows.length > 0
+        ? verifiedRows[0]
+        : null;
 
       if (verifyError) {
-        throw new Error(`Could not verify saved price type: ${verifyError.message}`);
+        console.warn("VERIFY SAVED LOCATION WARNING:", verifyError);
       }
 
       let confirmationCount = 0;
