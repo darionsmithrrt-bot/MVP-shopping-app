@@ -250,9 +250,26 @@ const normalizeRole = (value: unknown, index: number): string => {
   return defaultRoleByIndex(index);
 };
 
+const SAFE_FALLBACK = {
+  product_name: "",
+  brand: "",
+  category: "",
+  size_value: "",
+  size_unit: "",
+  quantity: "1",
+  price: null,
+  price_unit: "unknown",
+  confidence: 0,
+  size_confidence: 0,
+  quantity_confidence: 0,
+  price_confidence: 0,
+  raw_text: "",
+  error: "AI could not confidently identify the product",
+};
+
 serve(async (req) => {
   try {
-    const debugVersion = "identify-product-debug-v3";
+    const debugVersion = "identify-product-debug-v4";
     const jsonResponse = (status: number, payload: Record<string, unknown>) =>
       new Response(JSON.stringify(payload), {
         status,
@@ -260,11 +277,16 @@ serve(async (req) => {
       });
 
     if (req.method === "OPTIONS") {
-      return jsonResponse(200, { ok: true, debug_version: debugVersion });
+      return new Response(null, { status: 204, headers: corsHeaders });
     }
 
     const body = await req.json();
     const payload = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+
+    console.log("IDENTIFY_PRODUCT RECEIVED PAYLOAD KEYS:", Object.keys(payload));
+    console.log("IDENTIFY_PRODUCT imageUrls count:", Array.isArray(payload.imageUrls) ? payload.imageUrls.length : 0);
+    console.log("IDENTIFY_PRODUCT imageRoles received:", payload.imageRoles);
+
     const openAiApiKey = Deno.env.get("OPENAI_API_KEY");
 
     if (!openAiApiKey) {
@@ -275,7 +297,9 @@ serve(async (req) => {
     }
 
     if (!Array.isArray(payload.imageUrls) || payload.imageUrls.length === 0) {
-      return jsonResponse(400, {
+      console.log("IDENTIFY_PRODUCT: no imageUrls in payload, returning safe fallback");
+      return jsonResponse(200, {
+        ...SAFE_FALLBACK,
         error: "No imageUrls received",
         debug_version: debugVersion,
       });
@@ -306,34 +330,13 @@ serve(async (req) => {
     });
 
     if (rawUrls.length === 0) {
-      return jsonResponse(400, {
-        error: "No imageUrls received",
+      console.log("IDENTIFY_PRODUCT: rawUrls empty after filtering, returning safe fallback");
+      return jsonResponse(200, {
+        ...SAFE_FALLBACK,
+        error: "No valid imageUrls after filtering",
         debug_version: debugVersion,
       });
     }
-
-    return new Response(
-      JSON.stringify({
-        debug_version: "identify-product-hard-test-v1",
-        success: true,
-        product_name: "FUNCTION IS LIVE",
-        brand: "Debug",
-        category: "Debug",
-        size_value: "1",
-        size_unit: "test",
-        quantity: "1",
-        price: 2.29,
-        price_unit: "each",
-        confidence: 1,
-      }),
-      {
-        status: 200,
-        headers: {
-          ...corsHeaders,
-          "Content-Type": "application/json"
-        }
-      }
-    );
 
     const userText = barcode
       ? `Analyze ${rawUrls.length} product image(s). Barcode context: ${barcode}.`
@@ -355,6 +358,7 @@ serve(async (req) => {
 
     const modelName = Deno.env.get("OPENAI_VISION_MODEL") || "gpt-4.1";
     console.log("IDENTIFY_PRODUCT MODEL:", modelName);
+    console.log("CALLING OPENAI WITH IMAGE");
 
     let data: Record<string, unknown> = {};
     try {
@@ -389,11 +393,15 @@ serve(async (req) => {
         throw new Error(`OpenAI request failed: ${response.status} ${errText}`);
       }
 
-      data = (await response.json()) as Record<string, unknown>;
+      const aiResult = (await response.json()) as Record<string, unknown>;
+      console.log("OPENAI RESPONSE TEXT:", JSON.stringify(aiResult));
+      data = aiResult;
     } catch (openAiError) {
-      return jsonResponse(500, {
-        error: "OpenAI call failed",
-        details: (openAiError as Error)?.message || "Unknown OpenAI error",
+      const errMsg = (openAiError as Error)?.message || "Unknown OpenAI error";
+      console.log("IDENTIFY_PRODUCT CAUGHT ERROR:", errMsg);
+      return jsonResponse(200, {
+        ...SAFE_FALLBACK,
+        error: `OpenAI call failed: ${errMsg}`,
         debug_version: debugVersion,
       });
     }
@@ -401,18 +409,21 @@ serve(async (req) => {
     console.log("IDENTIFY_PRODUCT RAW OPENAI RESPONSE:", JSON.stringify(data));
 
     const rawText = extractModelText(data);
+    console.log("IDENTIFY_PRODUCT OPENAI RESPONSE TEXT:", rawText.slice(0, 500));
     const cleanText = extractJsonObjectText(rawText);
 
     let normalizedResult: IdentifyProductResult = { ...DEFAULT_RESULT };
 
     try {
       const parsed = JSON.parse(cleanText) as Record<string, unknown>;
+      console.log("IDENTIFY_PRODUCT PARSED JSON RESULT:", JSON.stringify(parsed));
       normalizedResult = normalizeParsedResult(parsed);
-    } catch {
+    } catch (parseErr) {
+      console.log("IDENTIFY_PRODUCT JSON PARSE ERROR:", (parseErr as Error)?.message, "raw:", cleanText.slice(0, 120));
       normalizedResult = {
         ...DEFAULT_RESULT,
         raw_text: cleanText.slice(0, 120),
-        confidence: 0.2,
+        confidence: 0,
       };
     }
 
@@ -437,14 +448,16 @@ serve(async (req) => {
 
     return jsonResponse(200, parsedResult);
   } catch (err) {
+    const errMsg = (err as Error)?.message || "Unknown error";
+    console.log("IDENTIFY_PRODUCT UNHANDLED CAUGHT ERROR:", errMsg);
     return new Response(
       JSON.stringify({
-        error: "Unhandled identify-product error",
-        details: (err as Error)?.message || "Unknown error",
-        debug_version: "identify-product-debug-v3",
+        ...SAFE_FALLBACK,
+        error: `Unhandled identify-product error: ${errMsg}`,
+        debug_version: "identify-product-debug-v4",
       }),
       {
-        status: 500,
+        status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       }
     );

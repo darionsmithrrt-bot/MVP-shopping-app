@@ -65,6 +65,16 @@ const EGG_QUANTITY_OPTIONS = [
   { label: "30 count", value: "30 count" },
 ];
 
+const LOCATION_QUICK_AREAS = [
+  "Produce Area",
+  "Meat/Poultry Area",
+  "Dairy Area",
+  "Bakery Area",
+  "Deli Area",
+  "Frozen Area",
+  "General Aisle",
+];
+
 const isEggText = (value) => /\beggs?\b/.test(String(value || "").toLowerCase());
 
 const isEggItem = (product, correctionForm) => {
@@ -122,7 +132,7 @@ const formatDetectedUnitLabel = (detectedUnit) => {
 const getPriceSourceMeta = (priceSource) => {
   if (priceSource === "photo_sign") {
     return {
-      icon: "??",
+      icon: "📷",
       label: "Price from shelf photo",
       color: "#166534",
       background: "#dcfce7",
@@ -132,7 +142,7 @@ const getPriceSourceMeta = (priceSource) => {
 
   if (priceSource === "user_corrected") {
     return {
-      icon: "??",
+      icon: "✏️",
       label: "User edited price",
       color: "#92400e",
       background: "#fef3c7",
@@ -141,7 +151,7 @@ const getPriceSourceMeta = (priceSource) => {
   }
 
   return {
-    icon: "?",
+    icon: "",
     label: "Manual entry",
     color: "#334155",
     background: "#f8fafc",
@@ -401,6 +411,7 @@ export default function App() {
   const storeSearchTimeoutRef = useRef(null);
   const priceInputRef = useRef(null);
   const priceConfirmationCardRef = useRef(null);
+  const aisleInputRef = useRef(null);
 
   // ============================================================================
   // STATE - Scanner & Camera
@@ -873,20 +884,14 @@ export default function App() {
     }
 
     const targetName = normalizeMatchValue(productLike?.product_name || productLike?.name);
-    const targetBrand = normalizeMatchValue(productLike?.brand);
     const targetStoreId = String(productLike?.store_id || "").trim();
 
     const itemName = normalizeMatchValue(item?.product_name);
-    const itemBrand = normalizeMatchValue(item?.brand);
     const itemStoreId = String(item?.store_id || "").trim();
 
     if (!targetName) return false;
 
-    return (
-      itemName === targetName &&
-      itemStoreId === targetStoreId &&
-      (itemBrand === targetBrand || !targetBrand)
-    );
+    return itemName === targetName && itemStoreId === targetStoreId;
   };
 
   const currentProductBarcode = product?.barcode || barcode;
@@ -1582,7 +1587,7 @@ export default function App() {
       console.error("CAPTURE ERROR:", err);
       alert("Camera failed. Please try again or upload from your gallery.");
       setError(err.message || "Failed to capture photo");
-      setStatus("? Photo capture failed");
+      setStatus("Photo capture failed");
     } finally {
       setIsCapturingPhoto(false);
     }
@@ -1998,7 +2003,7 @@ export default function App() {
         if (updateError) throw new Error(`AI update failed: ${updateError.message}`);
 
         finalRow = updatedRow;
-        setStatus("? AI identified product");
+        setStatus("AI identified product");
       } else {
         const rawTextCandidate = extractLikelyProductPhraseFromRawText(aiPayload.raw_text);
         normalizedProductName = rawTextCandidate
@@ -2059,56 +2064,19 @@ export default function App() {
       setAiDetectedPriceEdited(false);
 
       setProduct(finalProduct);
-      const aiCartPriceType = detectedPriceFromAi
-        ? mapDetectedUnitToPriceType(detectedPriceFromAi.unit)
-        : "each";
-      const aiCartItem = {
-        id: Date.now(),
-        name: finalProduct.name,
-        product_name: finalProduct.name,
-        price: detectedPriceFromAi?.amount ?? null,
-        avg_price: null,
-        price_type: aiCartPriceType,
-        quantity: finalProduct.quantity || "1",
-        size: finalProduct.size_value || null,
-        unit: finalProduct.size_unit || null,
-        size_value: finalProduct.size_value || "",
-        size_unit: finalProduct.size_unit || "",
-        source: "ai",
-        price_badge_source: detectedPriceFromAi ? "ai" : "manual",
-        price_source: detectedPriceFromAi ? "photo_sign" : "missing",
-        price_unit_detected: detectedPriceFromAi?.unit || "unknown",
-        barcode: finalProduct.barcode || null,
-        brand: finalProduct.brand || "",
-      };
-      const aiAddFingerprint = [
-        aiCartItem.barcode || "",
-        aiCartItem.name || "",
-        aiCartItem.price ?? "",
-        aiCartItem.size_value || "",
-        aiCartItem.size_unit || "",
-      ]
-        .join("|")
-        .toLowerCase();
-      const now = Date.now();
-      const lockWindowMs = 1500;
-      const isRapidDuplicate =
-        aiAutoAddGuardRef.current.fingerprint === aiAddFingerprint &&
-        now - aiAutoAddGuardRef.current.timestamp < lockWindowMs;
-      const normalizedFinalName = String(finalProduct?.name || "").trim().toLowerCase();
-      const canAutoAddAiItem = normalizedFinalName !== "unknown product" && normalizedFinalName !== "review needed";
-
-      if (!isRapidDuplicate && canAutoAddAiItem) {
-        handleAddToShoppingList(aiCartItem, null);
-        aiAutoAddGuardRef.current = {
-          fingerprint: aiAddFingerprint,
-          timestamp: now,
-        };
-      } else if (!canAutoAddAiItem) {
-        console.info("AI auto-add skipped: product name requires user review");
-      } else {
-        console.info("AI auto-add skipped: duplicate within lock window");
+      setActivePanel("location");
+      setLocationPanelMode("quick");
+      setLocationStep("aisle");
+      setLocationSaved(false);
+      setStatus("Product identified. Add item location.");
+      const bestKnownLocationResult = await loadBestKnownLocation(productKey);
+      if (bestKnownLocationResult) {
+        setBestKnownLocation(bestKnownLocationResult);
       }
+      aiAutoAddGuardRef.current = {
+        fingerprint: "",
+        timestamp: 0,
+      };
       if (!detectedPriceFromAi) {
         setPriceConfirmed(false);
         setLocationForm((prev) => ({
@@ -2117,18 +2085,13 @@ export default function App() {
           price_source: "manual",
           detected_price_unit: "unknown",
         }));
-        setStatus("Product identified. Enter price manually or skip price for now.");
       }
-      setAwaitingProductConfirmation(true);
+      setAwaitingProductConfirmation(false);
       setShowAiSummaryCard(false);
       setShowOptionalBarcodeInput(false);
       setOptionalBarcodeInput(normalizedBarcode || "");
       setPhotoAnalysisStatus('done');
-
-      if (detectedPriceFromAi) {
-        const detectedUnitLabel = formatDetectedUnitLabel(detectedPriceFromAi.unit);
-        setStatus(`AI found price: $${detectedPriceFromAi.amount.toFixed(2)}${detectedUnitLabel}`);
-      }
+      setToast({ message: "Product identified. Add location next.", type: "success" });
 
       setAwaitingPhoto(false);
       await stopScanner();
@@ -2260,7 +2223,6 @@ export default function App() {
         .update({
           confidence_score: confidenceScore,
           last_confirmed_at: nowIso,
-          last_user_profile_id: currentUserProfile?.id || null,
           last_user_trust_score: currentUserProfile?.trust_score || 0,
         })
         .eq("store_id", selectedStore.id);
@@ -2358,7 +2320,7 @@ export default function App() {
       // TODO: Future Google Maps directions hook.
 
       setStatus(
-        `? Location confirmed and added to your cart memory • ${strongConfirmationCount} ${
+        `Location confirmed and added to your cart memory • ${strongConfirmationCount} ${
           strongConfirmationCount === 1 ? "confirmation" : "confirmations"
         } • confidence ${confidenceScore}%`
       );
@@ -2478,7 +2440,7 @@ export default function App() {
       setProduct(updatedProduct);
       setCorrectionSaved(true);
       setActivePanel(null);
-      setStatus("? Product correction saved. Review or update location.");
+      setStatus("Product correction saved. Review or update location.");
       setToast({ message: 'Product correction saved!', type: 'success' });
     } catch (err) {
       console.error("CORRECTION SAVE ERROR:", err);
@@ -2712,7 +2674,6 @@ export default function App() {
         source: submissionMethod || "manual",
         last_confirmed_at: nowIso,
         store_id: selectedStore.id,
-        last_user_profile_id: currentUserProfile?.id || null,
         last_user_trust_score: currentUserProfile?.trust_score || 0,
       };
 
@@ -2762,7 +2723,6 @@ export default function App() {
           source: submissionMethod || "manual",
           last_confirmed_at: nowIso,
           store_id: selectedStore.id,
-          last_user_profile_id: currentUserProfile?.id || null,
           last_user_trust_score: currentUserProfile?.trust_score || 0,
         };
 
@@ -2947,101 +2907,36 @@ export default function App() {
       };
 
       setBestKnownLocation(savedLocation);
-      setShoppingListItems((prev) => {
-        const existingIndex = prev.findIndex((item) =>
-          doesCartItemMatchProduct(item, {
-            barcode: barcodeValue,
-            product_name: product?.name || "Unknown product",
-            brand: product?.brand || "",
-            store_id: selectedStore.id,
-          })
-        );
-        const updatedItemFields = {
-          barcode: barcodeValue,
-          price: savedLocation.price,
-          avg_price: savedLocation.avg_price,
-          price_type: savedLocation.price_type,
-          price_source: savedLocation.price_source,
-          price_unit_detected: savedLocation.price_unit_detected,
-          confidence_score: savedLocation.confidence_score,
-          price_confidence: savedLocation.price_confidence,
-          ai_confidence: savedLocation.ai_confidence,
-          photo_evidence_count: savedLocation.photo_evidence_count,
-          aisle: savedLocation.aisle,
-          section: savedLocation.section,
-          shelf: savedLocation.shelf,
-          notes: savedLocation.notes || "",
-          store_id: selectedStore.id,
-          store_name: selectedStore.name,
-          size_value: sizeValue || "",
-          size_unit: sizeUnit || "",
-          quantity: quantity || "1",
-        };
-
-        if (existingIndex >= 0) {
-          const next = [...prev];
-          next[existingIndex] = {
-            ...next[existingIndex],
-            ...updatedItemFields,
-          };
-          return next;
-        }
-
-        return [
-          ...prev,
-          {
-            barcode: barcodeValue,
-            product_name: product?.name || "Unknown product",
-            brand: product?.brand || "",
-            brand_lock: false,
-            ...updatedItemFields,
-          },
-        ];
-      });
       setLocationSaved(true);
       setLocationConfirmationCount(confirmationCount);
       setLocationConfidenceScore(confidenceScore);
       setActivePanel(null);
+      const finalizedProduct = {
+        ...product,
+        name: product?.name || "Unknown product",
+        brand: product?.brand || "",
+        barcode: barcodeValue,
+        size_value: sizeValue || "",
+        size_unit: sizeUnit || "",
+        quantity: quantity || "",
+        price: savedLocation.price,
+        avg_price: savedLocation.avg_price,
+        price_type: savedLocation.price_type,
+        price_source: savedLocation.price_source,
+        price_unit_detected: savedLocation.price_unit_detected,
+        confidence_score: savedLocation.confidence_score,
+        notes: savedLocation.notes || "",
+        source: submissionMethod || product?.source || "manual",
+      };
+      setProduct(finalizedProduct);
+      await handleAddToShoppingList(finalizedProduct, {
+        ...locationForm,
+        ...savedLocation,
+        store_id: selectedStore.id,
+        store_name: selectedStore.name,
+      });
 
-      // HARD RESET CURRENT ITEM UI
-      setAwaitingPhoto(false);
-      resetAiPhotoState();
-
-      setStatus("Saving complete. Preparing next scan...");
-      setShowNextItemPrompt(true);
-
-      setTimeout(() => {
-        setShowNextItemPrompt(false);
-
-        setProduct(null);
-        setBarcode("");
-        setBestKnownLocation(null);
-        resetContributionFlow();
-
-        setStatus("Ready for next item");
-
-        startScanner();
-      }, 1200);
-      setProduct((prev) =>
-        prev
-          ? {
-              ...prev,
-              size_value: sizeValue || "",
-              size_unit: sizeUnit || "",
-              quantity: quantity || "",
-            }
-          : prev
-      );
-
-      const confirmationLabel =
-        confirmationCount === 1
-          ? "1 confirmation"
-          : `${confirmationCount} confirmations`;
-
-      setStatus(
-        `? Location saved • ${confirmationLabel} • confidence ${confidenceScore}%`
-      );
-      setToast({ message: 'Location saved!', type: 'success' });
+      setStatus("Location saved. Item added to Smart Cart.");
     } catch (err) {
       console.error("LOCATION SAVE ERROR:", err);
       const rawMessage = String(err?.message || err || "");
@@ -3169,7 +3064,7 @@ export default function App() {
     }
   };
 
-  const handleAddToShoppingList = (productToAdd = product, locationToUse = bestKnownLocation) => {
+  const handleAddToShoppingList = async (productToAdd = product, locationToUse = bestKnownLocation) => {
     if (!productToAdd) {
       setError("No product available to add");
       return { added: false, updated: false, hasLocation: false };
@@ -3187,7 +3082,6 @@ export default function App() {
         doesCartItemMatchProduct(item, {
           barcode: itemBarcode,
           product_name: itemProductName,
-          brand: itemBrand,
           store_id: itemStoreId,
         })
       )
@@ -3197,7 +3091,6 @@ export default function App() {
           const isMatch = doesCartItemMatchProduct(item, {
             barcode: itemBarcode,
             product_name: itemProductName,
-            brand: itemBrand,
             store_id: itemStoreId,
           });
 
@@ -3233,6 +3126,9 @@ export default function App() {
             aisle: locationToUse?.aisle || item.aisle || "",
             section: locationToUse?.section || item.section || "",
             shelf: locationToUse?.shelf || item.shelf || "",
+            confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? item.confidence_score ?? 0,
+            store_id: itemStoreId || item.store_id || null,
+            store_name: locationToUse?.store_name || item.store_name || selectedStore?.name || "",
           };
         })
       );
@@ -3266,18 +3162,19 @@ export default function App() {
         (productToAdd.source === "ai" ? "ai" : "manual"),
       price_unit_detected:
         locationToUse?.price_unit_detected ?? productToAdd.price_unit_detected ?? "unknown",
+      aisle: locationToUse?.aisle || "",
+      section: locationToUse?.section || "",
+      shelf: locationToUse?.shelf || "",
+      confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? 0,
       brand_lock: false,
     };
 
     setShoppingListItems((prev) => [...prev, item]);
-    setToast({ message: "? Added to shopping list", type: "success" });
+    setToast({ message: "Added to shopping list", type: "success" });
     return { added: true, updated: false, hasLocation };
   };
 
   const handleRemoveProductFromCart = () => {
-    if (!currentProductBarcode && !currentProductName) {
-      return;
-    }
 
     setShoppingListItems((prev) =>
       prev.filter((item) => {
@@ -3317,6 +3214,24 @@ export default function App() {
 
     setManualListItemName("");
     setToast({ message: "Item added to shopping list", type: "success" });
+  };
+
+  const handleRemoveShoppingListItem = (indexToRemove) => {
+    setShoppingListItems((prev) =>
+      prev.filter((_, index) => index !== indexToRemove)
+    );
+
+    setEditingCartItemIndex((prev) => {
+      if (prev === null) return null;
+      if (prev === indexToRemove) {
+        setCartEditForm(null);
+        setCartEditError("");
+        return null;
+      }
+      return prev > indexToRemove ? prev - 1 : prev;
+    });
+
+    setToast({ message: "Item removed", type: "success" });
   };
 
   const handleNavigateCartItem = (item) => {
@@ -3389,6 +3304,7 @@ export default function App() {
 
   const handleSmartCartUpdateLocation = (smartItem) => {
     const item = smartItem.item;
+    const itemPrice = Number(item?.avg_price ?? item?.price);
 
     setProduct({
       name: item.product_name,
@@ -3400,65 +3316,42 @@ export default function App() {
     });
 
     setBarcode(item.barcode || "");
-
-    setLocationForm({
+    setError("");
+    setActivePanel("location");
+    setLocationPanelMode("quick");
+    setLocationStep("aisle");
+    setShowAiSummaryCard(false);
+    setAwaitingProductConfirmation(false);
+    setBestKnownLocation(null);
+    setLocationForm((prev) => ({
+      ...prev,
       aisle: item.aisle || "",
       section: item.section || "",
       shelf: item.shelf || "",
       notes: item.notes || "",
-      size_value: item.size_value || "",
-      size_unit: item.size_unit || "",
-      quantity: item.quantity || "",
-      price: item.price ? String(Math.round(item.price * 100)) : "",
-      price_type: item.price_type || "each",
-      price_source: "",
-      detected_price_unit: "unknown",
-    });
-
-    setActivePanel("location");
-    setLocationPanelMode("quick");
-    setLocationStep("aisle");
-    setStatus("Update this item location");
-  };
-
-  const handleSmartCartHelpLocate = (smartItem) => {
-    if (!smartItem) return;
-    const item = smartItem.item || smartItem;
-    handleUpdateCartItemLocation(item);
-    setStatus("Add the location for this item");
-  };
-
-  const handleSmartCartMarkFound = (smartItem) => {
-    if (smartItem.aisle) {
-      setToast({ message: "Location confirmed ready", type: "success" });
-    } else {
-      handleSmartCartUpdateLocation(smartItem);
-    }
-  };
-
-  const handleRemoveShoppingListItem = (indexToRemove) => {
-    if (editingCartItemIndex === indexToRemove) {
-      setEditingCartItemIndex(null);
-      setCartEditForm(null);
-      setCartEditError("");
-    }
-
-    setShoppingListItems((prev) =>
-      prev.filter((_, index) => index !== indexToRemove)
-    );
-  };
-
-  const startEditingCartItem = (item, index) => {
-    const itemPrice = item.avg_price ?? item.price;
-    setEditingCartItemIndex(index);
-    setCartEditError("");
-    setCartEditForm({
-      product_name: item.product_name || "",
-      quantity: item.quantity || "",
       size_value: item.size_value || item.size || "",
       size_unit: item.size_unit || item.unit || "",
-      notes: item.notes || "",
-      price: itemPrice != null ? Number(itemPrice).toFixed(2) : "",
+      quantity: item.quantity || "1",
+      price: Number.isFinite(itemPrice) && itemPrice > 0 ? String(Math.round(itemPrice * 100)) : "",
+      price_type: item.price_type || prev.price_type || "each",
+      price_source: item.price_source || prev.price_source || "",
+      detected_price_unit: item.price_unit_detected || prev.detected_price_unit || "unknown",
+    }));
+
+    setToast({ message: `Update location for ${item?.product_name || "item"}`, type: "success" });
+  };
+
+  const startEditingCartItem = (item, indexToEdit) => {
+    const parsedPrice = Number(item?.avg_price ?? item?.price);
+    setEditingCartItemIndex(indexToEdit);
+    setCartEditError("");
+    setCartEditForm({
+      product_name: item?.product_name || "",
+      quantity: item?.quantity || "1",
+      size_value: item?.size_value || item?.size || "",
+      size_unit: item?.size_unit || item?.unit || "",
+      notes: item?.notes || "",
+      price: Number.isFinite(parsedPrice) && parsedPrice >= 0 ? parsedPrice.toFixed(2) : "",
     });
   };
 
@@ -3498,6 +3391,7 @@ export default function App() {
           ? {
               ...item,
               product_name: name,
+              name,
               quantity: quantity || "1",
               size: sizeValue || null,
               unit: sizeUnit || null,
@@ -3549,7 +3443,19 @@ export default function App() {
   };
 
   const handleConfirmProductFromPhoto = () => {
-    const productName = correctionForm.product_name.trim();
+    const productName = (
+      correctionForm.product_name ||
+      product?.name ||
+      aiDebug?.data?.product_name ||
+      ""
+    ).trim();
+
+    console.info("CONFIRM PRODUCT CONTINUE CLICKED:", {
+      productName,
+      correctionProductName: correctionForm.product_name,
+      productNameFromState: product?.name,
+    });
+
     if (!productName) {
       setError("Product name is required");
       return;
@@ -3560,7 +3466,7 @@ export default function App() {
     const confirmedProduct = {
       ...product,
       name: productName,
-      brand: correctionForm.brand.trim(),
+      brand: correctionForm.brand.trim() || product?.brand || "",
       category: correctionForm.category?.trim() || "",
       size_value: locationForm.size_value,
       size_unit: locationForm.size_unit,
@@ -3568,21 +3474,29 @@ export default function App() {
       barcode: confirmedBarcode,
     };
 
+    setCorrectionForm((prev) => ({
+      ...prev,
+      product_name: productName,
+      brand: prev.brand || product?.brand || "",
+    }));
     setProduct(confirmedProduct);
     setBarcode(confirmedBarcode || "");
     setAwaitingProductConfirmation(false);
     setShowAiSummaryCard(false);
     setError("");
 
-    const addResult = handleAddToShoppingList(confirmedProduct, null);
-    if (!addResult?.updated) {
-      setActivePanel("location");
-      setLocationPanelMode("quick");
-      setLocationStep("aisle");
-      setStatus("Product confirmed. Add location and price.");
-    } else {
-      setStatus("Added to Smart Cart");
-    }
+    setActivePanel("location");
+    setLocationPanelMode("quick");
+    setLocationStep("aisle");
+    setLocationSaved(false);
+    setLocationForm((prev) => ({
+      ...prev,
+      aisle: "",
+      section: "",
+      shelf: "",
+      notes: "",
+    }));
+    setStatus("Product confirmed. Add location and price.");
   };
 
   const handleConfirmAiSummary = () => {
@@ -3605,15 +3519,11 @@ export default function App() {
     setShowAiSummaryCard(false);
     setError("");
 
-    const addResult = handleAddToShoppingList(confirmedProduct, null);
-    if (!addResult?.updated) {
-      setActivePanel("location");
-      setLocationPanelMode("quick");
-      setLocationStep("aisle");
-      setStatus("AI summary confirmed. Add location and price.");
-    } else {
-      setStatus("Added to Smart Cart");
-    }
+    setActivePanel("location");
+    setLocationPanelMode("quick");
+    setLocationStep("aisle");
+    setLocationSaved(false);
+    setStatus("AI summary confirmed. Add location and price.");
   };
 
   const handleRetakePhotosFromSummary = async () => {
@@ -3639,14 +3549,14 @@ export default function App() {
   const getAiFieldIndicator = (field, hasValue) => {
     if (aiUserEditedFields[field]) {
       return {
-        text: "?? User edited",
+        text: "User edited",
         style: styles.fieldConfidenceBadgeEdited,
       };
     }
 
     if (aiAutoLockedFields[field] && Number(aiFieldConfidence[field] || 0) >= 0.85 && hasValue) {
       return {
-        text: "? Auto-detected",
+        text: "Auto-detected",
         style: styles.fieldConfidenceBadgeHigh,
       };
     }
@@ -3880,6 +3790,25 @@ export default function App() {
     await startLivePreview();
   };
 
+  const handleOpenLocationFromStatus = () => {
+    if (!product || locationSaved) return;
+
+    setError("");
+    setActivePanel("location");
+    setLocationPanelMode("quick");
+    setLocationStep("aisle");
+  };
+
+  const statusOpensLocationPanel =
+    Boolean(product) &&
+    !locationSaved &&
+    [
+      "Add the location for this item",
+      "Add item location.",
+      "Product identified. Add item location.",
+      "Add this item location in the store.",
+    ].includes(String(status || "").trim());
+
   const renderLocationWizardStep = () => {
     if (locationStep === "aisle") {
       return (
@@ -3889,6 +3818,7 @@ export default function App() {
 
           <label style={styles.label}>Aisle / Area</label>
           <input
+            ref={aisleInputRef}
             style={styles.input}
             value={locationForm.aisle}
             onChange={(e) =>
@@ -3901,12 +3831,52 @@ export default function App() {
             Use whatever the store uses: aisle number, produce, bakery, dairy, meat, freezer, checkout, etc.
           </div>
 
+          <div style={styles.quickButtonRow}>
+            {[
+              { label: "Numbered Aisle (Manual Input)", aisle: null, manual: true },
+              { label: "Produce Area (Fruit / Vegetables)", aisle: "Produce Area" },
+              { label: "Meat / Poultry Area", aisle: "Meat / Poultry Area" },
+              { label: "Dairy Area", aisle: "Dairy Area" },
+              { label: "Bakery Area", aisle: "Bakery Area" },
+              { label: "Deli Area", aisle: "Deli Area" },
+              { label: "Open Freezer Area", aisle: "Open Freezer Area" },
+              { label: "Other / Manual", aisle: null, manual: true },
+            ].map((option) => (
+              <button
+                key={`wizard-quick-area-${option.label}`}
+                type="button"
+                style={{
+                  ...styles.quickButton,
+                  ...(locationForm.aisle === option.aisle && option.aisle ? styles.quickButtonActive : {}),
+                }}
+                onClick={() => {
+                  if (option.aisle) {
+                    setLocationForm((prev) => ({ ...prev, aisle: option.aisle }));
+                    setError("");
+                    setLocationStep("details");
+                    return;
+                  }
+
+                  setError("");
+                  setLocationStep("aisle");
+                  setTimeout(() => {
+                    aisleInputRef.current?.focus?.();
+                  }, 0);
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+
           <div style={styles.buttonRow}>
             <button
               type="button"
               style={styles.primaryButton}
               onClick={() => {
-                if (!locationForm.aisle.trim()) {
+                const aisleValue = String(locationForm.aisle || "").trim();
+
+                if (!aisleValue) {
                   setError("Enter an aisle or area first.");
                   return;
                 }
@@ -3933,7 +3903,7 @@ export default function App() {
 
           <label style={styles.label}>Section</label>
           <div style={styles.quickButtonRow}>
-            {SECTION_OPTIONS.map((option) => (
+            {["Left side", "Middle", "Right side"].map((option) => (
               <button
                 key={option}
                 type="button"
@@ -3946,21 +3916,11 @@ export default function App() {
                 {option}
               </button>
             ))}
-            <button
-              type="button"
-              style={{
-                ...styles.quickButton,
-                ...(!locationForm.section ? styles.quickButtonActive : {}),
-              }}
-              onClick={() => setLocationForm((prev) => ({ ...prev, section: "" }))}
-            >
-              Skip section
-            </button>
           </div>
 
           <label style={styles.label}>Shelf</label>
           <div style={styles.quickButtonRow}>
-            {SHELF_OPTIONS.map((option) => (
+            {["Top shelf", "Middle shelf", "Bottom shelf"].map((option) => (
               <button
                 key={option}
                 type="button"
@@ -3973,17 +3933,21 @@ export default function App() {
                 {option}
               </button>
             ))}
-            <button
-              type="button"
-              style={{
-                ...styles.quickButton,
-                ...(!locationForm.shelf ? styles.quickButtonActive : {}),
-              }}
-              onClick={() => setLocationForm((prev) => ({ ...prev, shelf: "" }))}
-            >
-              Skip shelf
-            </button>
           </div>
+
+          {locationPanelMode === "full" ? (
+            <>
+              <label style={styles.label}>Notes (optional)</label>
+              <textarea
+                style={styles.textarea}
+                value={locationForm.notes}
+                onChange={(e) =>
+                  setLocationForm((prev) => ({ ...prev, notes: e.target.value }))
+                }
+                placeholder="Optional details, e.g. near endcap or by freezer door"
+              />
+            </>
+          ) : null}
 
           <div style={styles.buttonRow}>
             <button
@@ -4246,7 +4210,7 @@ export default function App() {
           {/* Green confirmation bar — shown after price is confirmed */}
           {priceConfirmed && locationForm.price ? (
             <div style={styles.aiPriceConfirmedBar}>
-              ? Confirmed price: ${formatCentsToDollars(locationForm.price)}
+              Confirmed price: ${formatCentsToDollars(locationForm.price)}
               {detectedUnitLabel ? ` ${detectedUnitLabel}` : ` ${formatPriceType(locationForm.price_type)}`}
             </div>
           ) : null}
@@ -4327,7 +4291,7 @@ export default function App() {
                 setError("");
               }}
             >
-              ? Confirm price: ${formatCentsToDollars(locationForm.price)}{" "}
+              Confirm price: ${formatCentsToDollars(locationForm.price)}{" "}
               {formatPriceType(locationForm.price_type)}
             </button>
           ) : null}
@@ -4485,7 +4449,6 @@ export default function App() {
 
         <div style={styles.headerMetaRow}>
           <div style={styles.pointsHeaderBadge}>
-            <span style={styles.chipIcon}>?</span>
             {userPoints} pts
           </div>
           <div style={styles.progressPlaceholder}>Level 1 Contributor</div>
@@ -4501,7 +4464,7 @@ export default function App() {
         {/* ================= PROFILE STATUS ================= */}
         <div style={{ ...styles.infoBox, marginBottom: 14, borderRadius: 14, boxShadow: "0 6px 18px rgba(15, 23, 42, 0.08)", background: "#f0fdf4", border: "1px solid #bbf7d0" }}>
           <div style={{ fontSize: 14, fontWeight: 800, color: "#166534" }}>
-            ? Logged in as: {currentUserProfile.display_name}
+            Logged in as: {currentUserProfile.display_name}
           </div>
         </div>
 
@@ -4509,7 +4472,7 @@ export default function App() {
         <div style={{ ...styles.infoBox, marginBottom: 14, borderRadius: 14, boxShadow: "0 6px 18px rgba(15, 23, 42, 0.08)" }}>
           {/* Header */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 10 }}>
-            <div style={{ fontSize: 19, fontWeight: 900, color: "#0f172a" }}>?? Smart Shopping</div>
+            <div style={{ fontSize: 19, fontWeight: 900, color: "#0f172a" }}>Smart Shopping</div>
             <button
               type="button"
               style={{ ...styles.secondaryButton, width: "auto", minHeight: 34, padding: "0 10px", fontSize: 12, flexShrink: 0 }}
@@ -4561,7 +4524,7 @@ export default function App() {
               {smartShoppingItemsToLocate.length > 0 ? (
                 <div style={{ border: "1px solid #fcd34d", background: "#fffbeb", borderRadius: 12, padding: 10, marginBottom: 14 }}>
                   <div style={{ fontSize: 14, fontWeight: 900, color: "#92400e", marginBottom: 8 }}>
-                    ?? Help Locate These Items
+                    Help Locate These Items
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {smartShoppingItemsToLocate.map((smartItem) => (
@@ -4580,8 +4543,16 @@ export default function App() {
                         <button
                           type="button"
                           style={{ ...styles.primaryButton, width: "auto", minHeight: 32, padding: "0 10px", fontSize: 12 }}
-                          onClick={() => {
-                            const item = smartItem.item;
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            console.log("ADD LOCATION BUTTON CLICKED");
+                            setError("");
+                            setActivePanel("location");
+                            setLocationPanelMode("quick");
+                            setLocationStep("aisle");
+
+                            const item = smartItem?.item || {};
                             setProduct({
                               name: item.product_name || "",
                               brand: item.brand || "",
@@ -4609,9 +4580,6 @@ export default function App() {
                               price_source: "",
                               detected_price_unit: "unknown",
                             });
-                            setActivePanel("location");
-                            setLocationPanelMode("quick");
-                            setLocationStep("aisle");
                             setStatus("Add the location for this item");
                           }}
                         >
@@ -4721,7 +4689,7 @@ export default function App() {
                                     <div style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>{confidenceText}</div>
                                     {isTrustedContributor ? (
                                       <div style={{ fontSize: 10, color: "#166534", fontWeight: 700, background: "#dcfce7", border: "1px solid #86efac", borderRadius: 999, padding: "1px 6px" }}>
-                                        ? Trusted contributor impact active
+                                        Trusted contributor impact active
                                       </div>
                                     ) : null}
                                   </div>
@@ -4821,7 +4789,7 @@ export default function App() {
                         cursor: "pointer",
                       }}
                     >
-                      ? Back to All Aisles
+                      Back to All Aisles
                     </button>
                   ) : null}
 
@@ -4905,7 +4873,7 @@ export default function App() {
                                     <div style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>{confidenceText}</div>
                                     {isTrustedContributor ? (
                                       <div style={{ fontSize: 10, color: "#166534", fontWeight: 700, background: "#dcfce7", border: "1px solid #86efac", borderRadius: 999, padding: "1px 6px" }}>
-                                        ? Trusted contributor impact active
+                                        Trusted contributor impact active
                                       </div>
                                     ) : null}
                                   </div>
@@ -5053,6 +5021,23 @@ export default function App() {
                         <div
                           key={`${item.barcode || item.product_name || "item"}-${index}`}
                           style={styles.rewardCard}
+                          onClick={() => {
+                            setEditingCartItemIndex(index);
+                            setCartEditForm({
+                              ...item,
+                              product_name: item.product_name || "",
+                              brand: item.brand || "",
+                              size_value: item.size_value || "",
+                              size_unit: item.size_unit || "",
+                              quantity: item.quantity || "",
+                              price: item.price || "",
+                              price_type: item.price_type || "each",
+                              aisle: item.aisle || "",
+                              section: item.section || "",
+                              shelf: item.shelf || "",
+                            });
+                            setCartEditError("");
+                          }}
                         >
                   <div style={styles.rewardTitle}>{item.product_name}</div>
                   <div style={styles.rewardDescription}>
@@ -5084,9 +5069,11 @@ export default function App() {
                       <input
                         type="text"
                         value={cartEditForm.product_name}
-                        onChange={(e) =>
-                          setCartEditForm((prev) => ({ ...prev, product_name: e.target.value }))
-                        }
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          setCartEditForm((prev) => ({ ...prev, product_name: e.target.value }));
+                        }}
                         style={styles.input}
                       />
 
@@ -5094,9 +5081,11 @@ export default function App() {
                       <input
                         type="text"
                         value={cartEditForm.quantity}
-                        onChange={(e) =>
-                          setCartEditForm((prev) => ({ ...prev, quantity: e.target.value }))
-                        }
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          setCartEditForm((prev) => ({ ...prev, quantity: e.target.value }));
+                        }}
                         style={styles.input}
                         placeholder="e.g. 1, dozen, 2 pack"
                       />
@@ -5105,9 +5094,11 @@ export default function App() {
                       <input
                         type="text"
                         value={cartEditForm.size_value}
-                        onChange={(e) =>
-                          setCartEditForm((prev) => ({ ...prev, size_value: e.target.value }))
-                        }
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          setCartEditForm((prev) => ({ ...prev, size_value: e.target.value }));
+                        }}
                         style={styles.input}
                         placeholder="e.g. 16"
                       />
@@ -5116,9 +5107,11 @@ export default function App() {
                       <input
                         type="text"
                         value={cartEditForm.size_unit}
-                        onChange={(e) =>
-                          setCartEditForm((prev) => ({ ...prev, size_unit: e.target.value }))
-                        }
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          setCartEditForm((prev) => ({ ...prev, size_unit: e.target.value }));
+                        }}
                         style={styles.input}
                         placeholder="e.g. oz"
                       />
@@ -5135,9 +5128,10 @@ export default function App() {
                                   ? styles.quickButtonActive
                                   : {}),
                               }}
-                              onClick={() =>
-                                setCartEditForm((prev) => ({ ...prev, quantity: option.value }))
-                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setCartEditForm((prev) => ({ ...prev, quantity: option.value }));
+                              }}
                             >
                               {option.label}
                             </button>
@@ -5149,9 +5143,11 @@ export default function App() {
                       <input
                         type="text"
                         value={cartEditForm.price}
-                        onChange={(e) =>
-                          setCartEditForm((prev) => ({ ...prev, price: e.target.value }))
-                        }
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          setCartEditForm((prev) => ({ ...prev, price: e.target.value }));
+                        }}
                         style={styles.input}
                         placeholder="e.g. 3.49"
                         inputMode="decimal"
@@ -5160,9 +5156,11 @@ export default function App() {
                       <label style={styles.label}>Area / location notes</label>
                       <textarea
                         value={cartEditForm.notes}
-                        onChange={(e) =>
-                          setCartEditForm((prev) => ({ ...prev, notes: e.target.value }))
-                        }
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          setCartEditForm((prev) => ({ ...prev, notes: e.target.value }));
+                        }}
                         style={styles.textarea}
                         placeholder="Optional note"
                       />
@@ -5172,21 +5170,32 @@ export default function App() {
                       <div style={styles.buttonRow}>
                         <button
                           type="button"
-                          onClick={() => saveEditedCartItem(index)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            saveEditedCartItem(index);
+                          }}
                           style={styles.primaryButton}
                         >
                           Save
                         </button>
                         <button
                           type="button"
-                          onClick={cancelEditingCartItem}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingCartItemIndex(null);
+                            setCartEditForm(null);
+                            setCartEditError("");
+                          }}
                           style={styles.secondaryButton}
                         >
                           Cancel
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleRemoveShoppingListItem(index)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleRemoveShoppingListItem(index);
+                          }}
                           style={styles.editButton}
                         >
                           Remove
@@ -5195,15 +5204,16 @@ export default function App() {
                     </div>
                   ) : null}
 
-                  {item.brand ? (
+                  {isEditing && item.brand ? (
                     <div style={{ display: "flex", gap: 6, marginTop: 6, marginBottom: 6 }}>
                       <button
                         type="button"
-                        onClick={() =>
+                        onClick={(e) => {
+                          e.stopPropagation();
                           setShoppingListItems((prev) =>
                             prev.map((el, i) => i === index ? { ...el, brand_lock: false } : el)
-                          )
-                        }
+                          );
+                        }}
                         style={{
                           ...styles.quickButton,
                           fontSize: 12,
@@ -5217,11 +5227,12 @@ export default function App() {
                       </button>
                       <button
                         type="button"
-                        onClick={() =>
+                        onClick={(e) => {
+                          e.stopPropagation();
                           setShoppingListItems((prev) =>
                             prev.map((el, i) => i === index ? { ...el, brand_lock: true } : el)
-                          )
-                        }
+                          );
+                        }}
                         style={{
                           ...styles.quickButton,
                           fontSize: 12,
@@ -5232,24 +5243,6 @@ export default function App() {
                         }}
                       >
                         Stick to this brand
-                      </button>
-                    </div>
-                  ) : null}
-                  {!isEditing ? (
-                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                      <button
-                        type="button"
-                        onClick={() => startEditingCartItem(item, index)}
-                        style={styles.secondaryButton}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveShoppingListItem(index)}
-                        style={styles.editButton}
-                      >
-                        Remove
                       </button>
                     </div>
                   ) : null}
@@ -5312,22 +5305,22 @@ export default function App() {
               <div style={{ ...styles.rewardsGrid, marginTop: 12 }}>
                 <div style={styles.rewardCard}>
                   <div style={styles.rewardTitle}>
-                    ?? Best Value Store: {cartComparison[0].store?.name || "Unknown store"}
+                    Best Value Store: {cartComparison[0].store?.name || "Unknown store"}
                   </div>
                   <div style={styles.rewardDescription}>
-                    ?? Estimated Total: ${Number(cartComparison[0].total_price || 0).toFixed(2)}
+                    Estimated Total: ${Number(cartComparison[0].total_price || 0).toFixed(2)}
                   </div>
                   <div style={styles.rewardDescription}>
-                    ?? Cart Coverage: {cartComparison[0].coverage}%
+                    Cart Coverage: {cartComparison[0].coverage}%
                   </div>
                   <div style={styles.rewardDescription}>
-                    ??? Brand Match: {cartComparison[0].brand_match_pct ?? "—"}%
+                    Brand Match: {cartComparison[0].brand_match_pct ?? "—"}%
                   </div>
                   <div style={styles.rewardDescription}>
-                    ?? Price Confidence: {cartComparison[0].avg_confidence ?? "—"}%
+                    Price Confidence: {cartComparison[0].avg_confidence ?? "—"}%
                   </div>
                   <div style={styles.rewardDescription}>
-                    ??? Brand mode: {brandComparisonMode === "brand_match" ? "Exact brand preferred" : "Flexible"}
+                    Brand mode: {brandComparisonMode === "brand_match" ? "Exact brand preferred" : "Flexible"}
                   </div>
                   {cartComparison[0].is_estimate ? (
                     <div style={{ fontSize: 12, color: "#92400e", background: "#fef3c7", borderRadius: 8, padding: "4px 8px", marginTop: 6 }}>
@@ -5344,7 +5337,7 @@ export default function App() {
                         key={`${result.store_id || "store-alt"}-${index}`}
                         style={{ ...styles.rewardDescription, marginBottom: 6 }}
                       >
-                        {`${index + 2}?? ${result.store?.name || "Unknown store"} — $${Number(result.total_price || 0).toFixed(2)} • ${result.coverage}% coverage • ${result.brand_match_pct ?? "—"}% brand match`}
+                        {`${index + 2}. ${result.store?.name || "Unknown store"} — $${Number(result.total_price || 0).toFixed(2)} • ${result.coverage}% coverage • ${result.brand_match_pct ?? "—"}% brand match`}
                       </div>
                     ))}
                   </div>
@@ -5370,7 +5363,7 @@ export default function App() {
               disabled={isDetectingStore || isFindingNearbyStores}
               style={{ ...styles.secondaryButton, width: '100%', marginBottom: 16, minHeight: 48 }}
             >
-              {isDetectingStore || isFindingNearbyStores ? '?? Searching...' : '?? Use My Location to Find Stores'}
+              {isDetectingStore || isFindingNearbyStores ? 'Searching...' : 'Use My Location to Find Stores'}
             </button>
 
             {storeDetectionMessage ? (
@@ -5526,8 +5519,7 @@ export default function App() {
           <>
             <div style={styles.storeBadgeRow}>
               <div style={styles.storeBadge}>
-                <span style={styles.chipIcon}>??</span>
-                Store: {selectedStore.name}
+              Store: {selectedStore.name}
               </div>
               <button
                 onClick={() => {
@@ -5558,7 +5550,7 @@ export default function App() {
                 />
                 {!isScanning && !awaitingPhoto && (
                   <div style={styles.overlay}>
-                    <div style={styles.overlayIcon}>??</div>
+                    <div style={styles.overlayIcon}>[ ]</div>
                     <div style={styles.overlayText}>
                       Ready to scan barcodes
                     </div>
@@ -5580,7 +5572,7 @@ export default function App() {
                     textAlign: "center",
                     padding: 20
                   }}>
-                    <div style={{ fontSize: 48, marginBottom: 12 }}>??</div>
+                    <div style={{ fontSize: 48, marginBottom: 12 }}>📸</div>
                     <div style={{ fontSize: 22, fontWeight: 800, color: "#fff", marginBottom: 8 }}>
                       Photo Required
                     </div>
@@ -5597,7 +5589,6 @@ export default function App() {
               {!awaitingPhoto ? (!isScanning ? (
                 <div style={{ width: "100%" }}>
                   <button onClick={handleStartPhotoFirst} style={styles.scanButton}>
-                    <span style={styles.scanButtonIcon}>??</span>
                     Identify Item with Photo
                   </button>
                   <div style={{ ...styles.infoBox, marginTop: 10 }}>
@@ -5634,7 +5625,6 @@ export default function App() {
                 </div>
               ) : (
                 <button onClick={stopScanner} style={styles.stopButton}>
-                  <span style={styles.stopButtonIcon}>??</span>
                   Stop Scanner
                 </button>
               )) : null}
@@ -5653,7 +5643,7 @@ export default function App() {
                 fontSize: 18,
                 marginBottom: 12,
               }}>
-                ?? Photo-first item identification
+                Photo-first item identification
               </div>
 
               {/* Per-role capture instruction card */}
@@ -5673,7 +5663,7 @@ export default function App() {
                     marginBottom: 12,
                   }}>
                     <div style={{ fontSize: 13, fontWeight: 700, color: "#1d4ed8", marginBottom: 2 }}>
-                      ?? Photo {capturedPhotos.length + 1} of {MAX_PHOTOS}
+                      Photo {capturedPhotos.length + 1} of {MAX_PHOTOS}
                     </div>
                     <div style={{ fontSize: 15, fontWeight: 800, color: "#1e3a8a", marginBottom: 4 }}>
                       {nextRole?.label || "Additional photo"}
@@ -5762,7 +5752,7 @@ export default function App() {
                     ? "Uploading..."
                     : photoAnalysisStatus === 'analyzing'
                     ? "Analyzing with AI..."
-                    : `? Analyze ${capturedPhotos.length} Photo${capturedPhotos.length > 1 ? "s" : ""} Now`}
+                    : `Analyze ${capturedPhotos.length} Photo${capturedPhotos.length > 1 ? "s" : ""} Now`}
                 </button>
               )}
 
@@ -5782,7 +5772,7 @@ export default function App() {
                   >
                     {isCapturingPhoto
                       ? "Capturing..."
-                      : `?? ${capturedPhotos.length === 0 ? "Take" : "Add"} Photo ${capturedPhotos.length + 1} of ${MAX_PHOTOS}: ${PHOTO_ROLE_SEQUENCE[capturedPhotos.length]?.label || "Additional photo"}`}
+                      : `${capturedPhotos.length === 0 ? "Take" : "Add"} Photo ${capturedPhotos.length + 1} of ${MAX_PHOTOS}: ${PHOTO_ROLE_SEQUENCE[capturedPhotos.length]?.label || "Additional photo"}`}
                   </button>
 
                   <button
@@ -5832,60 +5822,64 @@ export default function App() {
           )}
 
           <div style={styles.statusChips}>
-            <div style={styles.statusChip}>
-              <span style={styles.chipIcon}>??</span>
+            <div
+              style={styles.statusChip}
+              onClick={statusOpensLocationPanel ? handleOpenLocationFromStatus : undefined}
+              role={statusOpensLocationPanel ? "button" : undefined}
+              tabIndex={statusOpensLocationPanel ? 0 : undefined}
+              onKeyDown={(e) => {
+                if (!statusOpensLocationPanel) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  handleOpenLocationFromStatus();
+                }
+              }}
+            >
               {status}
             </div>
             {aiDebug?.data?.debug_version && (
               <div style={styles.methodChip}>
-                <span style={styles.chipIcon}>??</span>
                 AI Debug: {aiDebug.data.debug_version}
               </div>
             )}
             {aiDebug?.data?.product_name && (
               <div style={styles.confirmChip}>
-                <span style={styles.chipIcon}>??</span>
                 AI Product: {aiDebug.data.product_name}
               </div>
             )}
             {barcode && (
               <div style={styles.barcodeChip}>
-                <span style={styles.chipIcon}>??</span>
-                {barcode}
+                Image ID: {barcode}
               </div>
             )}
             {submissionMethod && (
               <div style={styles.methodChip}>
-                <span style={styles.chipIcon}>??</span>
-                {submissionMethod}
+                Source: {submissionMethod}
               </div>
             )}
             {userPoints > 0 && (
               <div style={styles.pointsChip}>
-                <span style={styles.chipIcon}>?</span>
                 {userPoints} pts
               </div>
             )}
             {locationConfirmationCount > 0 && (
               <div style={styles.confirmChip}>
-                <span style={styles.chipIcon}>?</span>
                 {locationConfirmationCount} confirms
               </div>
             )}
             {locationConfidenceScore > 0 && (
               <div style={styles.confidenceChip}>
-                <span style={styles.chipIcon}>??</span>
                 {locationConfidenceScore}% confidence
               </div>
             )}
           </div>
 
-          {product && !isCurrentProductInCart ? (
+          {product && locationSaved && !isCurrentProductInCart ? (
             <button
               onClick={() => handleAddToShoppingList(product)}
               style={{ ...styles.secondaryButton, width: "100%", marginTop: 12 }}
             >
-              ?? Add to Shopping List
+              Add to Shopping List
             </button>
           ) : null}
 
@@ -5897,6 +5891,32 @@ export default function App() {
               Remove from Cart
             </button>
           ) : null}
+
+          {product && !locationSaved && activePanel !== "location" ? (
+            <div style={{ ...styles.infoBox, marginTop: 12, borderColor: "#f59e0b", background: "#fffbeb", color: "#92400e" }}>
+              <div style={{ fontWeight: 800, marginBottom: 8 }}>
+                Location needed: help other shoppers find this item.
+              </div>
+              <button
+                type="button"
+                style={{ ...styles.primaryButton, width: "100%" }}
+                onClick={() => {
+                  setActivePanel("location");
+                  setLocationPanelMode("quick");
+                  setLocationStep("aisle");
+                }}
+              >
+                Add Location
+              </button>
+            </div>
+          ) : null}
+
+          {activePanel === "location" && (
+            <div style={{ ...styles.sectionBox, marginTop: 12 }}>
+              <div style={styles.sectionTitle}>Add Store Location</div>
+              {renderLocationWizardStep()}
+            </div>
+          )}
 
           {awaitingProductConfirmation ? (
             <div style={{ ...styles.sectionBox, marginTop: 12 }}>
@@ -5970,6 +5990,17 @@ export default function App() {
                         <div style={styles.aiSummaryName}>
                           {correctionForm.product_name || product?.name || "Unknown product"}
                         </div>
+                        <button
+                          type="button"
+                          style={{ ...styles.primaryButton, width: "100%", marginTop: 8 }}
+                          onClick={() => {
+                            setActivePanel("location");
+                            setLocationPanelMode("quick");
+                            setLocationStep("aisle");
+                          }}
+                        >
+                          Add Item Location
+                        </button>
                         {correctionForm.brand ? (
                           <div style={styles.aiSummaryBrand}>{correctionForm.brand}</div>
                         ) : null}
@@ -6029,6 +6060,18 @@ export default function App() {
                         >
                           Retake Photos
                         </button>
+                        <button
+                          type="button"
+                          style={{ ...styles.primaryButton, width: "100%", marginTop: 8, fontWeight: 800 }}
+                          onClick={() => {
+                            setActivePanel("location");
+                            setLocationPanelMode("quick");
+                            setLocationStep("aisle");
+                            setStatus("Add item location.");
+                          }}
+                        >
+                          Add Item Location
+                        </button>
                       </div>
                     </>
                   );
@@ -6040,6 +6083,21 @@ export default function App() {
               <div style={styles.rewardDescription}>
                 Confirm or edit item details. Barcode is optional.
               </div>
+              <div style={{ ...styles.aiSummaryName, marginBottom: 8 }}>
+                {correctionForm.product_name || product?.name || "Unknown product"}
+              </div>
+
+              <button
+                type="button"
+                style={{ ...styles.primaryButton, width: "100%", marginTop: 0, marginBottom: 12, fontWeight: 800 }}
+                onClick={() => {
+                  setActivePanel("location");
+                  setLocationPanelMode("quick");
+                  setLocationStep("aisle");
+                }}
+              >
+                Add Item Location
+              </button>
 
               {aiDetectedRawText ? (
                 <div style={{ ...styles.infoBox, marginBottom: 12, background: "#f8fafc", borderColor: "#cbd5e1", color: "#334155" }}>
@@ -6476,6 +6534,20 @@ export default function App() {
                   Retake Photo
                 </button>
               </div>
+              <button
+                type="button"
+                style={{ ...styles.primaryButton, width: "100%", marginTop: 8, background: "#0f766e" }}
+                onClick={() => {
+                  setAwaitingProductConfirmation(false);
+                  setShowAiSummaryCard(false);
+                  setActivePanel("location");
+                  setLocationPanelMode("quick");
+                  setLocationStep("aisle");
+                  setStatus("Add this item location in the store.");
+                }}
+              >
+                Add Store Location
+              </button>
                   </>
                 );
               })()}
@@ -6582,7 +6654,6 @@ export default function App() {
 
               <div style={styles.locationMetaRow}>
                 <div style={styles.locationMeta}>
-                  <span style={styles.metaIcon}>?</span>
                   <span style={styles.metaText}>Last confirmed {formatTimestamp(bestKnownLocation.last_confirmed_at)}</span>
                 </div>
               </div>
@@ -6682,41 +6753,6 @@ export default function App() {
         </div>
       </div>
 
-      {activePanel === "location" && (
-        <div style={{
-          position: "fixed",
-          bottom: 0,
-          left: 0,
-          right: 0,
-          background: "#fff",
-          borderTopLeftRadius: 24,
-          borderTopRightRadius: 24,
-          padding: 20,
-          zIndex: 9999,
-          boxShadow: "0 -4px 20px rgba(0,0,0,0.15)",
-          maxHeight: "90vh",
-          overflowY: "auto"
-        }}>
-          {renderLocationWizardStep()}
-
-          <button
-            type="button"
-            onClick={() => setActivePanel(null)}
-            style={{
-              marginTop: 16,
-              width: "100%",
-              padding: 12,
-              borderRadius: 12,
-              background: "#e5e7eb",
-              border: "none",
-              fontWeight: 600
-            }}
-          >
-            Close
-          </button>
-        </div>
-      )}
-
       {showNextItemPrompt && (
         <div
           style={{
@@ -6742,7 +6778,7 @@ export default function App() {
             }}
           >
             <h2 style={{ fontSize: 24, fontWeight: 900, marginBottom: 10 }}>
-              ? Item saved
+              Item saved
             </h2>
 
             <p style={{ color: "#64748b", fontSize: 16, lineHeight: 1.5, marginBottom: 20 }}>
@@ -6804,6 +6840,49 @@ export default function App() {
               Done for Now
             </button>
           </div>
+        </div>
+      )}
+
+      {activePanel === "location" && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: 0,
+            left: 0,
+            right: 0,
+            background: "#fff",
+            borderTopLeftRadius: 24,
+            borderTopRightRadius: 24,
+            padding: 20,
+            zIndex: 9999,
+            boxShadow: "0 -4px 20px rgba(0,0,0,0.15)",
+            maxHeight: "90vh",
+            overflowY: "auto",
+          }}
+        >
+          {renderLocationWizardStep()}
+
+          {error ? <div style={styles.errorBox}>{error}</div> : null}
+
+          <button
+            type="button"
+            onClick={() => {
+              setActivePanel(null);
+              setError("");
+            }}
+            style={{
+              marginTop: 16,
+              width: "100%",
+              padding: 12,
+              borderRadius: 12,
+              background: "#e5e7eb",
+              border: "none",
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Close
+          </button>
         </div>
       )}
 
