@@ -22,6 +22,11 @@ import { blobToFile, extractAiProductData } from "./utils/productUtils";
 import { useRewards } from "./hooks/useRewards";
 import mvpLogo from "./assets/mvp-logo.png";
 
+const AUTH_REDIRECT_URL =
+  window.location.hostname === "localhost"
+    ? "http://localhost:3000"
+    : "https://mvp-app-tau.vercel.app";
+
 const PHOTO_ROLE_SEQUENCE = [
   { key: "product_label", label: "Product front label" },
   { key: "size_label", label: "Size / net weight label" },
@@ -747,7 +752,7 @@ export default function App() {
           email,
           password,
           options: {
-            emailRedirectTo: window.location.origin,
+            emailRedirectTo: AUTH_REDIRECT_URL,
             data: {
               display_name: email.split("@")[0],
             },
@@ -812,6 +817,9 @@ export default function App() {
       const { error } = await supabase.auth.resend({
         type: "signup",
         email,
+        options: {
+          emailRedirectTo: AUTH_REDIRECT_URL,
+        },
       });
 
       if (error) throw error;
@@ -892,14 +900,6 @@ export default function App() {
   useEffect(() => {
     fetchUserPoints();
   }, [fetchUserPoints]);
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      if (data?.session?.user) {
-        setAuthUser(data.session.user);
-      }
-    });
-  }, []);
 
   useEffect(() => {
     let isMounted = true;
