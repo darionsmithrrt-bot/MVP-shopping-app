@@ -2223,7 +2223,6 @@ export default function App() {
         .update({
           confidence_score: confidenceScore,
           last_confirmed_at: nowIso,
-          last_user_trust_score: currentUserProfile?.trust_score || 0,
         })
         .eq("store_id", selectedStore.id);
 
@@ -2674,7 +2673,6 @@ export default function App() {
         source: submissionMethod || "manual",
         last_confirmed_at: nowIso,
         store_id: selectedStore.id,
-        last_user_trust_score: currentUserProfile?.trust_score || 0,
       };
 
       if (selectedPriceSource) {
@@ -2703,7 +2701,7 @@ export default function App() {
         )
         .single();
 
-      const hasOptionalPriceFieldError = /price_source|price_unit_detected|ai_confidence|photo_evidence_count|column/i.test(
+      const hasOptionalPriceFieldError = /price_source|price_unit_detected|ai_confidence|photo_evidence_count|last_user_trust_score|last_user|trust_score|column|schema cache/i.test(
         String(locationUpsertResult.error?.message || "")
       );
 
@@ -2723,7 +2721,6 @@ export default function App() {
           source: submissionMethod || "manual",
           last_confirmed_at: nowIso,
           store_id: selectedStore.id,
-          last_user_trust_score: currentUserProfile?.trust_score || 0,
         };
 
         locationUpsertResult = await supabase
