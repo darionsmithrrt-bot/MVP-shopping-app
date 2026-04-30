@@ -29,6 +29,53 @@ const PHOTO_ROLE_SEQUENCE = [
 ];
 
 const VALID_IMAGE_ROLES = new Set(["product_label", "size_label", "price_sign"]);
+const LOCAL_ITEM_REQUEST_PATTERNS = {
+  dove: [
+    { product_name: "Dove Body Wash", brand: "Dove" },
+    { product_name: "Dove Sensitive Skin Body Wash", brand: "Dove" },
+    { product_name: "Dove Bar Soap", brand: "Dove" },
+    { product_name: "Dove Deodorant", brand: "Dove" },
+  ],
+  milk: [
+    { product_name: "Whole Milk", brand: "" },
+    { product_name: "2% Milk", brand: "" },
+    { product_name: "Almond Milk", brand: "" },
+    { product_name: "Oat Milk", brand: "" },
+  ],
+  eggs: [
+    { product_name: "Large Eggs", brand: "" },
+    { product_name: "Brown Eggs", brand: "" },
+    { product_name: "Organic Eggs", brand: "" },
+    { product_name: "18 Count Eggs", brand: "" },
+  ],
+};
+
+const toTitleCase = (value) =>
+  String(value || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+
+const getLocalItemRequestSuggestions = (term) => {
+  const query = String(term || "").trim().toLowerCase();
+  if (!query) return [];
+
+  for (const [key, suggestions] of Object.entries(LOCAL_ITEM_REQUEST_PATTERNS)) {
+    if (query.includes(key)) {
+      return suggestions;
+    }
+  }
+
+  const titled = toTitleCase(query);
+  if (!titled) return [];
+  return [
+    { product_name: titled, brand: "" },
+    { product_name: `${titled} Family Size`, brand: "" },
+    { product_name: `${titled} Organic`, brand: "" },
+  ];
+};
 
 const getRoleByPhotoIndex = (index) => {
   const boundedIndex = Math.max(0, Math.min(index, PHOTO_ROLE_SEQUENCE.length - 1));
@@ -509,6 +556,14 @@ export default function App() {
     username: "",
     password: "",
   });
+  const [showItemRequestModal, setShowItemRequestModal] = useState(false);
+  const [itemRequestForm, setItemRequestForm] = useState({
+    product_name: "",
+    brand: "",
+    notes: "",
+  });
+  const [itemRequestSuggestions, setItemRequestSuggestions] = useState([]);
+  const [isSavingItemRequest, setIsSavingItemRequest] = useState(false);
   const [isCheckingProfile, setIsCheckingProfile] = useState(true);
   const [profileForm, setProfileForm] = useState({
     display_name: "",
@@ -560,6 +615,16 @@ export default function App() {
   const [nearbyStores, setNearbyStores] = useState([]);
   const [searchResults, setSearchResults] = useState([]);
   const [isFindingNearbyStores, setIsFindingNearbyStores] = useState(false);
+
+  const applyItemRequestSuggestion = (suggestion) => {
+    if (!suggestion?.product_name) return;
+    setItemRequestForm((prev) => ({
+      ...prev,
+      product_name: suggestion.product_name,
+      brand: suggestion.brand || prev.brand,
+    }));
+    setItemRequestSuggestions([]);
+  };
 
   // ============================================================================
   // EFFECTS - Initialization & Cleanup
@@ -661,6 +726,50 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("shoppingListItems", JSON.stringify(shoppingListItems));
   }, [shoppingListItems]);
+
+  useEffect(() => {
+    if (!showItemRequestModal) {
+      setItemRequestSuggestions([]);
+      return;
+    }
+
+    const term = itemRequestForm.product_name.trim();
+    if (!term || term.length < 2) {
+      setItemRequestSuggestions([]);
+      return;
+    }
+
+    const timeoutId = setTimeout(async () => {
+      try {
+        const { data, error: catalogError } = await supabase
+          .from("catalog_products")
+          .select("product_name, brand")
+          .ilike("product_name", `%${term}%`)
+          .limit(6);
+
+        if (catalogError) throw catalogError;
+
+        const dbSuggestions = (data || [])
+          .map((row) => ({
+            product_name: String(row.product_name || "").trim(),
+            brand: String(row.brand || "").trim(),
+          }))
+          .filter((row) => row.product_name);
+
+        if (dbSuggestions.length > 0) {
+          setItemRequestSuggestions(dbSuggestions);
+          return;
+        }
+
+        setItemRequestSuggestions(getLocalItemRequestSuggestions(term));
+      } catch (err) {
+        console.warn("ITEM REQUEST CATALOG LOOKUP FAILED", err);
+        setItemRequestSuggestions(getLocalItemRequestSuggestions(term));
+      }
+    }, 300);
+
+    return () => clearTimeout(timeoutId);
+  }, [itemRequestForm.product_name, showItemRequestModal]);
 
   useEffect(() => {
     const files = capturedPhotos.map((photo) => photo.file).filter(Boolean);
@@ -3053,6 +3162,48 @@ export default function App() {
     setCurrentUserProfile(newProfile);
   };
 
+  const handleSubmitItemRequest = async () => {
+    const productName = itemRequestForm.product_name.trim();
+    if (!productName) {
+      setError("Enter the item you want help finding.");
+      return;
+    }
+
+    setIsSavingItemRequest(true);
+    setError("");
+
+    try {
+      const payload = {
+        user_profile_id: currentUserProfile?.id || null,
+        product_name: productName,
+        brand: itemRequestForm.brand.trim() || null,
+        notes: itemRequestForm.notes.trim() || null,
+        store_id: selectedStore?.id || null,
+        store_name: selectedStore?.name || null,
+        status: "open",
+        source: "community_request",
+        created_at: new Date().toISOString(),
+      };
+
+      const { error: requestError } = await supabase
+        .from("item_requests")
+        .insert(payload);
+
+      if (requestError) throw requestError;
+
+      setShowItemRequestModal(false);
+      setItemRequestForm({ product_name: "", brand: "", notes: "" });
+      setItemRequestSuggestions([]);
+      setToast({ message: "Request posted. The community can help locate this item.", type: "success" });
+    } catch (err) {
+      console.error("ITEM REQUEST SAVE ERROR:", err);
+      setError("Request could not be saved yet.");
+      setToast({ message: "Request could not be saved yet.", type: "error" });
+    } finally {
+      setIsSavingItemRequest(false);
+    }
+  };
+
   const handleResetProfile = () => {
     localStorage.removeItem("currentUserProfile");
     setCurrentUserProfile(null);
@@ -4549,40 +4700,120 @@ export default function App() {
           </button>
 
           <div style={styles.introCommunityCard}>
-            <div style={styles.introCommunityTitle}>📢 Missing an item?</div>
+            <div style={styles.introCommunityTitle}>🔎 Can’t find an item?</div>
 
             <button
               style={styles.introCommunityButton}
               onClick={() => {
-                const guestProfile = {
-                  id: `guest-${Date.now()}`,
-                  display_name: "Guest",
-                  email: null,
-                  trust_score: 0,
-                  points: 0,
-                  total_points: 0,
-                  is_guest: true,
-                  created_at: new Date().toISOString(),
-                };
-                localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
-                setCurrentUserProfile(guestProfile);
+                if (!currentUserProfile) {
+                  const guestProfile = {
+                    id: `guest-${Date.now()}`,
+                    display_name: "Guest",
+                    email: null,
+                    trust_score: 0,
+                    points: 0,
+                    total_points: 0,
+                    is_guest: true,
+                    created_at: new Date().toISOString(),
+                  };
+                  localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
+                  setCurrentUserProfile(guestProfile);
+                }
                 setShowOnboarding(false);
                 setShowLoginModal(false);
-                setStatus("Start by identifying an item, then add its location.");
-                setToast({ message: "Start by identifying an item, then add its location.", type: "success" });
+                setShowItemRequestModal(true);
               }}
             >
-              Add Location for an Item
+              Request Help Finding an Item
             </button>
 
             <p style={styles.introCommunityText}>
-              Help other shoppers find products faster by adding an aisle, section, shelf, or store area.
+              Tell the community what you’re looking for. If another shopper sees it, they can submit the aisle, shelf, price, or store location.
             </p>
           </div>
 
           <p style={styles.introFooter}>
             Photo-first shopping intelligence powered by community contributions.
           </p>
+
+          {showItemRequestModal && (
+            <div style={styles.modalOverlay}>
+              <div style={styles.itemRequestModalCard}>
+                <h2 style={styles.itemRequestModalTitle}>Request Help Finding an Item</h2>
+
+                <label style={styles.itemRequestFieldLabel}>Product</label>
+                <input
+                  style={styles.itemRequestModalInput}
+                  placeholder="Example: Dove body wash, Tide pods, oat milk"
+                  value={itemRequestForm.product_name}
+                  onChange={(e) =>
+                    setItemRequestForm((prev) => ({ ...prev, product_name: e.target.value }))
+                  }
+                />
+
+                {itemRequestSuggestions.length > 0 && (
+                  <div style={styles.itemRequestSuggestionList}>
+                    {itemRequestSuggestions.map((suggestion, index) => (
+                      <button
+                        key={`${suggestion.product_name}-${suggestion.brand}-${index}`}
+                        type="button"
+                        style={styles.itemRequestSuggestionButton}
+                        onClick={() => applyItemRequestSuggestion(suggestion)}
+                      >
+                        <span style={styles.itemRequestSuggestionTitle}>{suggestion.product_name}</span>
+                        {suggestion.brand ? (
+                          <span style={styles.itemRequestSuggestionBrand}>{suggestion.brand}</span>
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <label style={styles.itemRequestFieldLabel}>Brand (optional)</label>
+                <input
+                  style={styles.itemRequestModalInput}
+                  placeholder="Example: Dove, Tide, Oatly"
+                  value={itemRequestForm.brand}
+                  onChange={(e) =>
+                    setItemRequestForm((prev) => ({ ...prev, brand: e.target.value }))
+                  }
+                />
+
+                <label style={styles.itemRequestFieldLabel}>Notes (optional)</label>
+                <textarea
+                  style={styles.itemRequestModalInput}
+                  placeholder="Size, scent, flavor, or anything helpful"
+                  value={itemRequestForm.notes}
+                  onChange={(e) =>
+                    setItemRequestForm((prev) => ({ ...prev, notes: e.target.value }))
+                  }
+                />
+
+                <div style={styles.itemRequestModalActions}>
+                  <button
+                    style={styles.itemRequestSubmitButton}
+                    disabled={isSavingItemRequest}
+                    onClick={handleSubmitItemRequest}
+                  >
+                    {isSavingItemRequest ? "Submitting..." : "Submit Request"}
+                  </button>
+
+                  <button
+                    style={styles.itemRequestCancelButton}
+                    onClick={() => {
+                      setShowItemRequestModal(false);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+
+                <div style={styles.itemRequestHint}>
+                  Pick a suggestion or keep typing to refine your request.
+                </div>
+              </div>
+            </div>
+          )}
 
           {showLoginModal && (
             <div style={styles.modalOverlay}>
@@ -4645,6 +4876,85 @@ export default function App() {
     return (
       <div style={styles.page}>
         <div style={styles.container}>
+          {showItemRequestModal && (
+            <div style={styles.modalOverlay}>
+              <div style={styles.itemRequestModalCard}>
+                <h2 style={styles.itemRequestModalTitle}>Request Help Finding an Item</h2>
+
+                <label style={styles.itemRequestFieldLabel}>Product</label>
+                <input
+                  style={styles.itemRequestModalInput}
+                  placeholder="Example: Dove body wash, Tide pods, oat milk"
+                  value={itemRequestForm.product_name}
+                  onChange={(e) =>
+                    setItemRequestForm((prev) => ({ ...prev, product_name: e.target.value }))
+                  }
+                />
+
+                {itemRequestSuggestions.length > 0 && (
+                  <div style={styles.itemRequestSuggestionList}>
+                    {itemRequestSuggestions.map((suggestion, index) => (
+                      <button
+                        key={`${suggestion.product_name}-${suggestion.brand}-${index}`}
+                        type="button"
+                        style={styles.itemRequestSuggestionButton}
+                        onClick={() => applyItemRequestSuggestion(suggestion)}
+                      >
+                        <span style={styles.itemRequestSuggestionTitle}>{suggestion.product_name}</span>
+                        {suggestion.brand ? (
+                          <span style={styles.itemRequestSuggestionBrand}>{suggestion.brand}</span>
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <label style={styles.itemRequestFieldLabel}>Brand (optional)</label>
+                <input
+                  style={styles.itemRequestModalInput}
+                  placeholder="Example: Dove, Tide, Oatly"
+                  value={itemRequestForm.brand}
+                  onChange={(e) =>
+                    setItemRequestForm((prev) => ({ ...prev, brand: e.target.value }))
+                  }
+                />
+
+                <label style={styles.itemRequestFieldLabel}>Notes (optional)</label>
+                <textarea
+                  style={styles.itemRequestModalInput}
+                  placeholder="Size, scent, flavor, or anything helpful"
+                  value={itemRequestForm.notes}
+                  onChange={(e) =>
+                    setItemRequestForm((prev) => ({ ...prev, notes: e.target.value }))
+                  }
+                />
+
+                <div style={styles.itemRequestModalActions}>
+                  <button
+                    style={styles.itemRequestSubmitButton}
+                    disabled={isSavingItemRequest}
+                    onClick={handleSubmitItemRequest}
+                  >
+                    {isSavingItemRequest ? "Submitting..." : "Submit Request"}
+                  </button>
+
+                  <button
+                    style={styles.itemRequestCancelButton}
+                    onClick={() => {
+                      setShowItemRequestModal(false);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+
+                <div style={styles.itemRequestHint}>
+                  Pick a suggestion or keep typing to refine your request.
+                </div>
+              </div>
+            </div>
+          )}
+
           <div style={styles.profileHeader}>
             <span>{currentUserProfile.display_name}</span>
             <span>{currentUserProfile.total_points || 0} pts</span>
@@ -7404,6 +7714,100 @@ const styles = {
     border: "none",
     fontSize: 18,
     cursor: "pointer",
+  },
+  itemRequestModalCard: {
+    background: "white",
+    borderRadius: 20,
+    padding: 22,
+    width: "90%",
+    maxWidth: 460,
+    boxShadow: "0 16px 34px rgba(0,0,0,0.22)",
+  },
+  itemRequestModalTitle: {
+    fontSize: 20,
+    fontWeight: 800,
+    color: "#0f172a",
+    marginBottom: 14,
+    textAlign: "left",
+  },
+  itemRequestFieldLabel: {
+    display: "block",
+    fontSize: 13,
+    fontWeight: 700,
+    color: "#334155",
+    marginBottom: 6,
+  },
+  itemRequestModalInput: {
+    width: "100%",
+    border: "1px solid #cbd5e1",
+    borderRadius: 12,
+    padding: "11px 12px",
+    marginBottom: 12,
+    fontSize: 14,
+    color: "#0f172a",
+    background: "#ffffff",
+    boxSizing: "border-box",
+    minHeight: 44,
+  },
+  itemRequestSuggestionList: {
+    display: "grid",
+    gap: 8,
+    marginBottom: 12,
+  },
+  itemRequestSuggestionButton: {
+    width: "100%",
+    border: "1px solid #dbeafe",
+    background: "#f8fafc",
+    borderRadius: 10,
+    padding: "10px 12px",
+    cursor: "pointer",
+    textAlign: "left",
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+  },
+  itemRequestSuggestionTitle: {
+    fontSize: 14,
+    fontWeight: 700,
+    color: "#0f172a",
+  },
+  itemRequestSuggestionBrand: {
+    fontSize: 12,
+    color: "#64748b",
+  },
+  itemRequestModalActions: {
+    display: "grid",
+    gap: 10,
+    marginTop: 2,
+  },
+  itemRequestSubmitButton: {
+    width: "100%",
+    minHeight: 46,
+    borderRadius: 12,
+    border: "none",
+    background: "linear-gradient(135deg, #10b981, #2563eb)",
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  itemRequestCancelButton: {
+    width: "100%",
+    minHeight: 44,
+    borderRadius: 12,
+    border: "1px solid #cbd5e1",
+    background: "#f8fafc",
+    color: "#0f172a",
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  itemRequestHint: {
+    marginTop: 12,
+    fontSize: 12,
+    color: "#64748b",
+    borderTop: "1px solid #e2e8f0",
+    paddingTop: 10,
   },
   profileHeader: {
     display: "flex",
