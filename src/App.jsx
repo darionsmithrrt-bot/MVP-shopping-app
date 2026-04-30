@@ -4548,6 +4548,38 @@ export default function App() {
             How it works
           </button>
 
+          <div style={styles.introCommunityCard}>
+            <div style={styles.introCommunityTitle}>📢 Missing an item?</div>
+
+            <button
+              style={styles.introCommunityButton}
+              onClick={() => {
+                const guestProfile = {
+                  id: `guest-${Date.now()}`,
+                  display_name: "Guest",
+                  email: null,
+                  trust_score: 0,
+                  points: 0,
+                  total_points: 0,
+                  is_guest: true,
+                  created_at: new Date().toISOString(),
+                };
+                localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
+                setCurrentUserProfile(guestProfile);
+                setShowOnboarding(false);
+                setShowLoginModal(false);
+                setStatus("Start by identifying an item, then add its location.");
+                setToast({ message: "Start by identifying an item, then add its location.", type: "success" });
+              }}
+            >
+              Add Location for an Item
+            </button>
+
+            <p style={styles.introCommunityText}>
+              Help other shoppers find products faster by adding an aisle, section, shelf, or store area.
+            </p>
+          </div>
+
           <p style={styles.introFooter}>
             Photo-first shopping intelligence powered by community contributions.
           </p>
@@ -7235,6 +7267,43 @@ const styles = {
     fontWeight: 800,
     cursor: "pointer",
     boxShadow: "0 8px 18px rgba(15,23,42,0.08)",
+  },
+  introCommunityCard: {
+    width: "100%",
+    marginTop: 14,
+    marginBottom: 4,
+    padding: "16px 14px",
+    borderRadius: 18,
+    background: "#ffffff",
+    border: "1px solid #dbeafe",
+    boxShadow: "0 8px 22px rgba(15,23,42,0.08)",
+  },
+  introCommunityTitle: {
+    fontSize: 17,
+    fontWeight: 800,
+    color: "#0f172a",
+    marginBottom: 10,
+    textAlign: "left",
+  },
+  introCommunityButton: {
+    width: "100%",
+    minHeight: 46,
+    borderRadius: 14,
+    border: "none",
+    background: "linear-gradient(135deg, #10b981 0%, #2563eb 100%)",
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: 800,
+    cursor: "pointer",
+    marginBottom: 10,
+    boxShadow: "0 8px 18px rgba(37,99,235,0.2)",
+  },
+  introCommunityText: {
+    margin: 0,
+    fontSize: 13,
+    lineHeight: 1.6,
+    color: "#475569",
+    textAlign: "left",
   },
   introFooter: {
     fontSize: 12,
