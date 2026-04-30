@@ -4513,21 +4513,24 @@ export default function App() {
             Find products faster. Confirm prices. Build smarter shopping routes.
           </p>
 
-          <input
-            style={styles.introInput}
-            placeholder="Your name"
-            value={profileForm.display_name}
-            onChange={(e) =>
-              setProfileForm((prev) => ({
-                ...prev,
-                display_name: e.target.value,
-              }))
-            }
-          />
-
           <button
             style={styles.introPrimaryButton}
-            onClick={handleCreateProfile}
+            onClick={() => {
+              const guestProfile = {
+                id: `guest-${Date.now()}`,
+                display_name: "Guest",
+                email: null,
+                trust_score: 0,
+                points: 0,
+                total_points: 0,
+                is_guest: true,
+                created_at: new Date().toISOString(),
+              };
+              localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
+              setCurrentUserProfile(guestProfile);
+              setShowOnboarding(false);
+              setShowLoginModal(false);
+            }}
           >
             Start Shopping Smarter
           </button>
@@ -7286,8 +7289,9 @@ const styles = {
     width: "100%",
     padding: 12,
     borderRadius: 12,
-    border: "1px solid #ccc",
+    border: "1px solid #cbd5e1",
     background: "#f9fafb",
+    color: "#0f172a",
     cursor: "pointer",
   },
   modalClose: {
