@@ -682,6 +682,8 @@ export default function App() {
   const loadOrCreateSupabaseProfile = async (user) => {
     if (!user?.id) return null;
 
+    console.log("PROFILE LOOKUP USER:", user);
+
     try {
       const { data: existingProfile, error: existingProfileError } = await supabase
         .from("profiles")
@@ -699,6 +701,10 @@ export default function App() {
 
       const newProfilePayload = {
         id: user.id,
+        username:
+          user.email?.split("@")[0] ||
+          user.user_metadata?.display_name ||
+          "mvp_shopper",
         display_name:
           user.user_metadata?.display_name ||
           user.email?.split("@")[0] ||
@@ -712,11 +718,16 @@ export default function App() {
         updated_at: new Date().toISOString(),
       };
 
+      console.log("PROFILE INSERT PAYLOAD:", newProfilePayload);
+
       const { data: insertedProfile, error: insertProfileError } = await supabase
         .from("profiles")
         .insert(newProfilePayload)
         .select()
         .single();
+
+      console.log("PROFILE INSERT RESULT:", insertedProfile);
+      console.log("PROFILE INSERT ERROR:", insertProfileError);
 
       if (insertProfileError) throw insertProfileError;
 
@@ -759,9 +770,11 @@ export default function App() {
           },
         });
         if (signUpError) throw signUpError;
+        if (data?.user) {
+          await loadOrCreateSupabaseProfile(data.user);
+        }
         if (data?.user && data?.session) {
           setAuthUser(data.user);
-          await loadOrCreateSupabaseProfile(data.user);
           shouldCloseModal = true;
           successMessage = "Account created. Welcome to MVP.";
         } else if (data?.user && !data?.session) {
