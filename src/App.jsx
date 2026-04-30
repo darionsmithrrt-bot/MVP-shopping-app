@@ -571,6 +571,11 @@ export default function App() {
   // STATE - User Profile
   // ============================================================================
   const [currentUserProfile, setCurrentUserProfile] = useState(null);
+  const [authUser, setAuthUser] = useState(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [loginMode, setLoginMode] = useState("signIn");
+  const [authError, setAuthError] = useState("");
+  const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [loginForm, setLoginForm] = useState({
@@ -647,6 +652,134 @@ export default function App() {
     setItemRequestSuggestions([]);
   };
 
+  const loadProfileFromLocalStorage = () => {
+    const saved = localStorage.getItem("currentUserProfile");
+
+    if (!saved) {
+      setCurrentUserProfile(null);
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(saved);
+      if (parsed?.display_name) {
+        setCurrentUserProfile(parsed);
+        return;
+      }
+      localStorage.removeItem("currentUserProfile");
+      setCurrentUserProfile(null);
+    } catch {
+      localStorage.removeItem("currentUserProfile");
+      setCurrentUserProfile(null);
+    }
+  };
+
+  const loadOrCreateSupabaseProfile = async (user) => {
+    if (!user?.id) return null;
+
+    try {
+      const { data: existingProfile, error: existingProfileError } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (existingProfileError) throw existingProfileError;
+
+      if (existingProfile) {
+        setCurrentUserProfile(existingProfile);
+        localStorage.setItem("currentUserProfile", JSON.stringify(existingProfile));
+        return existingProfile;
+      }
+
+      const newProfilePayload = {
+        id: user.id,
+        display_name:
+          user.user_metadata?.display_name ||
+          user.email?.split("@")[0] ||
+          "MVP Shopper",
+        email: user.email,
+        trust_score: 0,
+        points: 0,
+        total_points: 0,
+        is_guest: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      const { data: insertedProfile, error: insertProfileError } = await supabase
+        .from("profiles")
+        .insert(newProfilePayload)
+        .select()
+        .single();
+
+      if (insertProfileError) throw insertProfileError;
+
+      setCurrentUserProfile(insertedProfile);
+      localStorage.setItem("currentUserProfile", JSON.stringify(insertedProfile));
+      return insertedProfile;
+    } catch (err) {
+      console.error("SUPABASE PROFILE BOOTSTRAP ERROR:", err);
+      setError(err?.message || "Unable to load your profile.");
+      return null;
+    }
+  };
+
+  const handleSupabaseAuth = async () => {
+    const email = loginForm.username.trim();
+    const password = loginForm.password;
+
+    if (!email || !password) {
+      setAuthError("Enter email and password.");
+      return;
+    }
+
+    setAuthError("");
+    setIsSubmittingAuth(true);
+
+    try {
+      if (loginMode === "signUp") {
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              display_name: email.split("@")[0],
+            },
+          },
+        });
+        if (signUpError) throw signUpError;
+        if (data?.user) {
+          setAuthUser(data.user);
+          await loadOrCreateSupabaseProfile(data.user);
+        }
+      } else {
+        const { data, error: signInError } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+        if (signInError) throw signInError;
+        if (data?.user) {
+          setAuthUser(data.user);
+          await loadOrCreateSupabaseProfile(data.user);
+        }
+      }
+
+      setAuthError("");
+      setShowLoginModal(false);
+      setLoginForm({ username: "", password: "" });
+      setToast({
+        message: loginMode === "signUp" ? "Account created. Welcome to MVP." : "Signed in successfully.",
+        type: "success",
+      });
+    } catch (err) {
+      console.error("SUPABASE AUTH ERROR:", err);
+      setAuthError(err?.message || "Unable to authenticate right now.");
+    } finally {
+      setIsSubmittingAuth(false);
+    }
+  };
+
   // ============================================================================
   // EFFECTS - Initialization & Cleanup
   // ============================================================================
@@ -715,22 +848,56 @@ export default function App() {
     fetchUserPoints();
   }, [fetchUserPoints]);
 
-  // Load user profile from localStorage on app mount
   useEffect(() => {
-    const saved = localStorage.getItem("currentUserProfile");
+    let isMounted = true;
 
-    if (saved) {
+    const bootstrapAuth = async () => {
+      setIsAuthLoading(true);
+
       try {
-        const parsed = JSON.parse(saved);
-        if (parsed?.display_name) {
-          setCurrentUserProfile(parsed);
-        }
-      } catch {
-        localStorage.removeItem("currentUserProfile");
-      }
-    }
+        const { data, error: sessionError } = await supabase.auth.getSession();
+        if (sessionError) throw sessionError;
 
-    setIsCheckingProfile(false);
+        const user = data?.session?.user || null;
+
+        if (user) {
+          setAuthUser(user);
+          await loadOrCreateSupabaseProfile(user);
+        } else {
+          setAuthUser(null);
+          loadProfileFromLocalStorage();
+        }
+      } catch (err) {
+        console.error("AUTH SESSION BOOTSTRAP ERROR:", err);
+        setError(err?.message || "Unable to initialize authentication.");
+        loadProfileFromLocalStorage();
+      } finally {
+        if (isMounted) {
+          setIsAuthLoading(false);
+          setIsCheckingProfile(false);
+        }
+      }
+    };
+
+    bootstrapAuth();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      const user = session?.user || null;
+      setAuthUser(user);
+
+      if (user) {
+        await loadOrCreateSupabaseProfile(user);
+      } else {
+        loadProfileFromLocalStorage();
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      subscription?.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -3248,9 +3415,20 @@ export default function App() {
     }
   };
 
-  const handleResetProfile = () => {
-    localStorage.removeItem("currentUserProfile");
-    setCurrentUserProfile(null);
+  const handleResetProfile = async () => {
+    try {
+      if (authUser) {
+        await supabase.auth.signOut();
+      }
+    } catch (err) {
+      console.error("AUTH SIGN OUT ERROR:", err);
+    } finally {
+      localStorage.removeItem("currentUserProfile");
+      setCurrentUserProfile(null);
+      setAuthUser(null);
+      setShowLoginModal(false);
+      setShowOnboarding(false);
+    }
   };
 
   const handleUpdateProfilePoints = async (earnedPoints) => {
@@ -4616,7 +4794,7 @@ export default function App() {
   // RENDER - Main UI
   // ============================================================================
 
-  if (isCheckingProfile) return null;
+  if (isCheckingProfile || isAuthLoading) return null;
 
   if (!currentUserProfile && showOnboarding) {
     return (
@@ -4866,12 +5044,41 @@ export default function App() {
 
                 <input
                   style={styles.modalInput}
-                  placeholder="Username"
+                  placeholder="Email"
                   value={loginForm.username}
                   onChange={(e) =>
                     setLoginForm({ ...loginForm, username: e.target.value })
                   }
                 />
+
+                <div style={styles.authModeToggleRow}>
+                  <button
+                    type="button"
+                    style={{
+                      ...styles.authModeToggleButton,
+                      ...(loginMode === "signIn" ? styles.authModeToggleButtonActive : {}),
+                    }}
+                    onClick={() => {
+                      setLoginMode("signIn");
+                      setAuthError("");
+                    }}
+                  >
+                    Sign In
+                  </button>
+                  <button
+                    type="button"
+                    style={{
+                      ...styles.authModeToggleButton,
+                      ...(loginMode === "signUp" ? styles.authModeToggleButtonActive : {}),
+                    }}
+                    onClick={() => {
+                      setLoginMode("signUp");
+                      setAuthError("");
+                    }}
+                  >
+                    Create Account
+                  </button>
+                </div>
 
                 <input
                   type="password"
@@ -4885,18 +5092,37 @@ export default function App() {
 
                 <button
                   style={styles.modalPrimaryButton}
-                  onClick={() => {
-                    console.log("Login attempt:", loginForm);
-                    setShowLoginModal(false);
-                  }}
+                  disabled={isSubmittingAuth}
+                  onClick={handleSupabaseAuth}
                 >
-                  Login
+                  {isSubmittingAuth
+                    ? "Signing in..."
+                    : loginMode === "signUp"
+                      ? "Create Account"
+                      : "Login"}
                 </button>
+
+                {authError ? (
+                  <div style={styles.errorText}>{authError}</div>
+                ) : null}
 
                 <button
                   style={styles.modalSecondaryButton}
                   onClick={() => {
+                    const guestProfile = {
+                      id: `guest-${Date.now()}`,
+                      display_name: "Guest",
+                      email: null,
+                      trust_score: 0,
+                      points: 0,
+                      total_points: 0,
+                      is_guest: true,
+                      created_at: new Date().toISOString(),
+                    };
+                    localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
+                    setCurrentUserProfile(guestProfile);
                     setShowLoginModal(false);
+                    setShowOnboarding(false);
                   }}
                 >
                   Continue as Guest
@@ -5008,7 +5234,7 @@ export default function App() {
               style={styles.changeStoreButton}
               onClick={handleResetProfile}
             >
-              Switch Profile
+              {currentUserProfile?.is_guest ? "Switch Profile" : "Logout"}
             </button>
           </div>
 
@@ -7740,6 +7966,27 @@ const styles = {
     fontWeight: "bold",
     marginBottom: 10,
     cursor: "pointer",
+  },
+  authModeToggleRow: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 8,
+    marginBottom: 12,
+  },
+  authModeToggleButton: {
+    minHeight: 36,
+    borderRadius: 10,
+    border: "1px solid #cbd5e1",
+    background: "#f8fafc",
+    color: "#334155",
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  authModeToggleButtonActive: {
+    background: "#e0f2fe",
+    border: "1px solid #7dd3fc",
+    color: "#0c4a6e",
   },
   modalSecondaryButton: {
     width: "100%",
