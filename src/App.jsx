@@ -504,6 +504,11 @@ export default function App() {
   // ============================================================================
   const [currentUserProfile, setCurrentUserProfile] = useState(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [showLoginModal, setShowLoginModal] = useState(false);
+  const [loginForm, setLoginForm] = useState({
+    username: "",
+    password: "",
+  });
   const [isCheckingProfile, setIsCheckingProfile] = useState(true);
   const [profileForm, setProfileForm] = useState({
     display_name: "",
@@ -4487,6 +4492,15 @@ export default function App() {
     return (
       <div style={styles.introPage}>
         <div style={styles.introHeroCard}>
+          <div style={styles.topRightIconContainer}>
+            <button
+              style={styles.loginIconButton}
+              onClick={() => setShowLoginModal(true)}
+            >
+              👤
+            </button>
+          </div>
+
           <img
             src={mvpLogo}
             alt="MVP logo"
@@ -4528,6 +4542,59 @@ export default function App() {
           <p style={styles.introFooter}>
             Photo-first shopping intelligence powered by community contributions.
           </p>
+
+          {showLoginModal && (
+            <div style={styles.modalOverlay}>
+              <div style={styles.modalCard}>
+                <h2 style={styles.modalTitle}>Login</h2>
+
+                <input
+                  style={styles.modalInput}
+                  placeholder="Username"
+                  value={loginForm.username}
+                  onChange={(e) =>
+                    setLoginForm({ ...loginForm, username: e.target.value })
+                  }
+                />
+
+                <input
+                  type="password"
+                  style={styles.modalInput}
+                  placeholder="Password"
+                  value={loginForm.password}
+                  onChange={(e) =>
+                    setLoginForm({ ...loginForm, password: e.target.value })
+                  }
+                />
+
+                <button
+                  style={styles.modalPrimaryButton}
+                  onClick={() => {
+                    console.log("Login attempt:", loginForm);
+                    setShowLoginModal(false);
+                  }}
+                >
+                  Login
+                </button>
+
+                <button
+                  style={styles.modalSecondaryButton}
+                  onClick={() => {
+                    setShowLoginModal(false);
+                  }}
+                >
+                  Continue as Guest
+                </button>
+
+                <button
+                  style={styles.modalClose}
+                  onClick={() => setShowLoginModal(false)}
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -7153,6 +7220,84 @@ const styles = {
     background: "linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(248,250,252,0.96) 100%)",
     border: "1px solid rgba(20,184,166,0.14)",
     boxShadow: "0 10px 24px rgba(15,23,42,0.08)",
+  },
+  topRightIconContainer: {
+    position: "absolute",
+    top: 16,
+    right: 16,
+    zIndex: 10,
+  },
+  loginIconButton: {
+    fontSize: 22,
+    background: "white",
+    borderRadius: "50%",
+    width: 44,
+    height: 44,
+    border: "none",
+    boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+    cursor: "pointer",
+  },
+  modalOverlay: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1000,
+  },
+  modalCard: {
+    background: "white",
+    borderRadius: 20,
+    padding: 24,
+    width: "85%",
+    maxWidth: 400,
+    position: "relative",
+    boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: "bold",
+    marginBottom: 16,
+    textAlign: "center",
+  },
+  modalInput: {
+    width: "100%",
+    padding: 12,
+    marginBottom: 12,
+    borderRadius: 10,
+    border: "1px solid #ccc",
+  },
+  modalPrimaryButton: {
+    width: "100%",
+    padding: 14,
+    borderRadius: 12,
+    border: "none",
+    background: "linear-gradient(135deg, #10b981, #2563eb)",
+    color: "white",
+    fontWeight: "bold",
+    marginBottom: 10,
+    cursor: "pointer",
+  },
+  modalSecondaryButton: {
+    width: "100%",
+    padding: 12,
+    borderRadius: 12,
+    border: "1px solid #ccc",
+    background: "#f9fafb",
+    cursor: "pointer",
+  },
+  modalClose: {
+    position: "absolute",
+    top: 10,
+    right: 12,
+    background: "transparent",
+    border: "none",
+    fontSize: 18,
+    cursor: "pointer",
   },
   profileHeader: {
     display: "flex",
