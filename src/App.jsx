@@ -778,7 +778,7 @@ export default function App() {
           shouldCloseModal = true;
           successMessage = "Account created. Welcome to MVP.";
         } else if (data?.user && !data?.session) {
-          setAuthError("Account created. Check your email to confirm your account, or continue as guest for now.");
+          setAuthError("Account created. Check your inbox and spam folder to confirm your account. If no email arrives, tap Resend Confirmation Email or continue as guest for now.");
           return;
         }
       } else {
@@ -5172,7 +5172,8 @@ export default function App() {
                   <div style={styles.errorText}>{authError}</div>
                 ) : null}
 
-                {authError.toLowerCase().includes("email not confirmed") ? (
+                {authError.toLowerCase().includes("email not confirmed") ||
+                authError.toLowerCase().includes("account created") ? (
                   <button
                     type="button"
                     style={styles.modalSecondaryButton}
