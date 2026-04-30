@@ -20,6 +20,7 @@ import {
 import { tryInsertWithPayloads } from "./utils/dbUtils";
 import { blobToFile, extractAiProductData } from "./utils/productUtils";
 import { useRewards } from "./hooks/useRewards";
+import mvpLogo from "./assets/mvp-logo.png";
 
 const PHOTO_ROLE_SEQUENCE = [
   { key: "product_label", label: "Product front label" },
@@ -4419,20 +4420,63 @@ export default function App() {
 
   if (!currentUserProfile && showOnboarding) {
     return (
-      <div style={styles.fullScreenCenter}>
-        <div style={styles.cardLarge}>
-          <h2>How it works</h2>
+      <div style={styles.introPage}>
+        <div style={styles.introHeroCard}>
+          <img
+            src={mvpLogo}
+            alt="MVP logo"
+            style={styles.introLogo}
+          />
 
-          <p>📸 Snap product</p>
-          <p>💲 Auto-detect price</p>
-          <p>🛒 Build smart cart</p>
-          <p>⚡ Save time shopping</p>
+          <div style={styles.introSubtitle}>How MVP Works</div>
+
+          <div style={styles.onboardingGrid}>
+            <div style={styles.onboardingStepCard}>
+              <div style={{ fontSize: 26, marginBottom: 10 }}>1.</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a", marginBottom: 8 }}>
+                Snap the item
+              </div>
+              <div style={{ fontSize: 14, lineHeight: 1.6, color: "#475569" }}>
+                Capture the product label, size, and shelf price.
+              </div>
+            </div>
+
+            <div style={styles.onboardingStepCard}>
+              <div style={{ fontSize: 26, marginBottom: 10 }}>2.</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a", marginBottom: 8 }}>
+                Let AI assist
+              </div>
+              <div style={{ fontSize: 14, lineHeight: 1.6, color: "#475569" }}>
+                MVP extracts product name, size, quantity, and price when visible.
+              </div>
+            </div>
+
+            <div style={styles.onboardingStepCard}>
+              <div style={{ fontSize: 26, marginBottom: 10 }}>3.</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a", marginBottom: 8 }}>
+                Add the location
+              </div>
+              <div style={{ fontSize: 14, lineHeight: 1.6, color: "#475569" }}>
+                Confirm aisle, section, and shelf so others can find it faster.
+              </div>
+            </div>
+
+            <div style={styles.onboardingStepCard}>
+              <div style={{ fontSize: 26, marginBottom: 10 }}>4.</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a", marginBottom: 8 }}>
+                Build your Smart Cart
+              </div>
+              <div style={{ fontSize: 14, lineHeight: 1.6, color: "#475569" }}>
+                Compare prices, group by aisle, and improve with every contribution.
+              </div>
+            </div>
+          </div>
 
           <button
-            style={styles.primaryButton}
+            style={styles.introSecondaryButton}
             onClick={() => setShowOnboarding(false)}
           >
-            Back
+            Back to Start
           </button>
         </div>
       </div>
@@ -4441,13 +4485,22 @@ export default function App() {
 
   if (!currentUserProfile) {
     return (
-      <div style={styles.fullScreenCenter}>
-        <div style={styles.cardLarge}>
-          <h1>Welcome</h1>
+      <div style={styles.introPage}>
+        <div style={styles.introHeroCard}>
+          <img
+            src={mvpLogo}
+            alt="MVP logo"
+            style={styles.introLogo}
+          />
 
-          <p>Start your smart shopping system</p>
+          <h1 style={styles.introTitle}>MVP</h1>
+          <div style={styles.introSubtitle}>Most Valuable Purchase</div>
+          <p style={styles.introTagline}>
+            Find products faster. Confirm prices. Build smarter shopping routes.
+          </p>
 
           <input
+            style={styles.introInput}
             placeholder="Your name"
             value={profileForm.display_name}
             onChange={(e) =>
@@ -4459,18 +4512,22 @@ export default function App() {
           />
 
           <button
-            style={styles.primaryButton}
+            style={styles.introPrimaryButton}
             onClick={handleCreateProfile}
           >
-            Continue
+            Start Shopping Smarter
           </button>
 
           <button
-            style={styles.secondaryButton}
+            style={styles.introSecondaryButton}
             onClick={() => setShowOnboarding(true)}
           >
             How it works
           </button>
+
+          <p style={styles.introFooter}>
+            Photo-first shopping intelligence powered by community contributions.
+          </p>
         </div>
       </div>
     );
@@ -6985,6 +7042,117 @@ const styles = {
     background: "#fff",
     boxShadow: "0 8px 40px rgba(59,130,246,0.10), 0 2px 8px rgba(0,0,0,0.06)",
     border: "1px solid #e2e8f0",
+  },
+  introPage: {
+    minHeight: "100vh",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "24px 18px",
+    background: "radial-gradient(circle at top, rgba(20,184,166,0.24) 0%, rgba(20,184,166,0) 32%), linear-gradient(160deg, #064e3b 0%, #10b981 34%, #14b8a6 66%, #2563eb 100%)",
+  },
+  introHeroCard: {
+    width: "100%",
+    maxWidth: 420,
+    padding: 28,
+    borderRadius: 28,
+    background: "linear-gradient(180deg, rgba(255,255,255,0.92) 0%, rgba(255,255,255,0.84) 100%)",
+    border: "1px solid rgba(255,255,255,0.45)",
+    boxShadow: "0 24px 60px rgba(15,23,42,0.28), inset 0 1px 0 rgba(255,255,255,0.6)",
+    backdropFilter: "blur(18px)",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    textAlign: "center",
+  },
+  introLogo: {
+    width: 126,
+    height: 126,
+    objectFit: "contain",
+    marginBottom: 12,
+    filter: "drop-shadow(0 14px 24px rgba(15,23,42,0.24))",
+  },
+  introTitle: {
+    fontSize: 44,
+    lineHeight: 1,
+    fontWeight: 900,
+    letterSpacing: "-1.5px",
+    margin: "0 0 8px",
+    color: "#0f172a",
+  },
+  introSubtitle: {
+    fontSize: 22,
+    lineHeight: 1.2,
+    fontWeight: 800,
+    color: "#064e3b",
+    marginBottom: 12,
+  },
+  introTagline: {
+    fontSize: 15,
+    lineHeight: 1.7,
+    color: "#334155",
+    margin: "0 0 20px",
+    maxWidth: 320,
+  },
+  introInput: {
+    width: "100%",
+    minHeight: 54,
+    borderRadius: 18,
+    border: "1.5px solid rgba(15,23,42,0.12)",
+    background: "rgba(255,255,255,0.92)",
+    color: "#0f172a",
+    padding: "0 16px",
+    fontSize: 16,
+    fontWeight: 600,
+    marginBottom: 14,
+    boxSizing: "border-box",
+    boxShadow: "inset 0 1px 2px rgba(15,23,42,0.06)",
+  },
+  introPrimaryButton: {
+    width: "100%",
+    minHeight: 56,
+    borderRadius: 18,
+    border: "none",
+    background: "linear-gradient(135deg, #064e3b 0%, #10b981 34%, #14b8a6 68%, #2563eb 100%)",
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: 800,
+    cursor: "pointer",
+    boxShadow: "0 14px 28px rgba(6,78,59,0.22)",
+    marginBottom: 12,
+  },
+  introSecondaryButton: {
+    width: "100%",
+    minHeight: 54,
+    borderRadius: 18,
+    border: "1.5px solid rgba(15,23,42,0.10)",
+    background: "rgba(255,255,255,0.8)",
+    color: "#0f172a",
+    fontSize: 15,
+    fontWeight: 800,
+    cursor: "pointer",
+    boxShadow: "0 8px 18px rgba(15,23,42,0.08)",
+  },
+  introFooter: {
+    fontSize: 12,
+    lineHeight: 1.6,
+    color: "#475569",
+    margin: "16px 0 0",
+    maxWidth: 300,
+  },
+  onboardingGrid: {
+    width: "100%",
+    display: "grid",
+    gap: 12,
+    marginBottom: 18,
+  },
+  onboardingStepCard: {
+    textAlign: "left",
+    padding: "18px 16px",
+    borderRadius: 20,
+    background: "linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(248,250,252,0.96) 100%)",
+    border: "1px solid rgba(20,184,166,0.14)",
+    boxShadow: "0 10px 24px rgba(15,23,42,0.08)",
   },
   profileHeader: {
     display: "flex",
