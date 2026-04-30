@@ -29,6 +29,27 @@ const PHOTO_ROLE_SEQUENCE = [
 ];
 
 const VALID_IMAGE_ROLES = new Set(["product_label", "size_label", "price_sign"]);
+const PRODUCT_KEYWORD_MAP = {
+  eggs: [
+    { product_name: "Large White Eggs", brand: "Eggland's Best", category: "eggs" },
+    { product_name: "Cage Free Large Brown Eggs", brand: "Vital Farms", category: "eggs" },
+    { product_name: "Grade A Large Eggs", brand: "Great Value", category: "eggs" },
+    { product_name: "Organic Brown Eggs", brand: "365", category: "eggs" },
+    { product_name: "18 Count Large Eggs", brand: "Kirkland Signature", category: "eggs" },
+    { product_name: "Large Grade A Eggs", brand: "Lucerne", category: "eggs" },
+  ],
+  milk: [
+    { product_name: "Whole Milk", brand: "Horizon Organic", category: "milk" },
+    { product_name: "2% Reduced Fat Milk", brand: "Fairlife", category: "milk" },
+    { product_name: "Almond Milk", brand: "Silk", category: "milk" },
+    { product_name: "Oat Milk", brand: "Oatly", category: "milk" },
+  ],
+  bread: [
+    { product_name: "White Bread", brand: "Wonder", category: "bread" },
+    { product_name: "Whole Wheat Bread", brand: "Dave's Killer Bread", category: "bread" },
+    { product_name: "Sourdough Bread", brand: "Boudin", category: "bread" },
+  ],
+};
 const LOCAL_ITEM_REQUEST_PATTERNS = {
   dove: [
     { product_name: "Dove Body Wash", brand: "Dove" },
@@ -758,6 +779,29 @@ export default function App() {
 
         if (dbSuggestions.length > 0) {
           setItemRequestSuggestions(dbSuggestions);
+          return;
+        }
+
+        const { data: seedData, error: seedError } = await supabase
+          .from("seed_products")
+          .select("product_name, brand")
+          .ilike("category", `%${term}%`)
+          .or(`product_name.ilike.%${term}%`)
+          .limit(6);
+
+        if (seedError) {
+          console.warn("ITEM REQUEST SEED LOOKUP FAILED", seedError);
+        }
+
+        const seedSuggestions = (seedData || [])
+          .map((row) => ({
+            product_name: String(row.product_name || "").trim(),
+            brand: String(row.brand || "").trim(),
+          }))
+          .filter((row) => row.product_name);
+
+        if (seedSuggestions.length > 0) {
+          setItemRequestSuggestions(seedSuggestions);
           return;
         }
 
