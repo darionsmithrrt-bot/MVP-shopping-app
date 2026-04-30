@@ -4492,7 +4492,20 @@ export default function App() {
     return (
       <div style={styles.introPage}>
         <div style={styles.introHeroCard}>
-          <div style={styles.topRightIconContainer}>
+          <div style={styles.introHeaderRow}>
+            <img
+              src={mvpLogo}
+              alt="MVP logo"
+              style={styles.introHeaderLogo}
+            />
+
+            <button
+              style={styles.leaderboardHeaderButton}
+              onClick={() => window.alert("Leaderboard coming soon.")}
+            >
+              Leaderboard
+            </button>
+
             <button
               style={styles.loginIconButton}
               onClick={() => setShowLoginModal(true)}
@@ -4501,16 +4514,9 @@ export default function App() {
             </button>
           </div>
 
-          <img
-            src={mvpLogo}
-            alt="MVP logo"
-            style={styles.introLogo}
-          />
-
-          <h1 style={styles.introTitle}>MVP</h1>
-          <div style={styles.introSubtitle}>Most Valuable Purchase</div>
+          <h1 style={styles.introTitle}>Find Anything in Seconds</h1>
           <p style={styles.introTagline}>
-            Find products faster. Confirm prices. Build smarter shopping routes.
+            Aisle. Shelf. Done.
           </p>
 
           <button
@@ -7134,6 +7140,33 @@ const styles = {
     flexDirection: "column",
     alignItems: "center",
     textAlign: "center",
+  },
+  introHeaderRow: {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    marginBottom: 18,
+  },
+  introHeaderLogo: {
+    width: 54,
+    height: 54,
+    objectFit: "contain",
+    borderRadius: 12,
+    filter: "drop-shadow(0 6px 12px rgba(15,23,42,0.2))",
+  },
+  leaderboardHeaderButton: {
+    border: "1px solid #cbd5e1",
+    background: "#ffffff",
+    color: "#0f172a",
+    minHeight: 40,
+    padding: "0 14px",
+    borderRadius: 999,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    boxShadow: "0 4px 10px rgba(15,23,42,0.1)",
   },
   introLogo: {
     width: 126,
