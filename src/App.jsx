@@ -747,6 +747,7 @@ export default function App() {
           email,
           password,
           options: {
+            emailRedirectTo: window.location.origin,
             data: {
               display_name: email.split("@")[0],
             },
@@ -891,6 +892,14 @@ export default function App() {
   useEffect(() => {
     fetchUserPoints();
   }, [fetchUserPoints]);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      if (data?.session?.user) {
+        setAuthUser(data.session.user);
+      }
+    });
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
