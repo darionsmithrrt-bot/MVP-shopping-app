@@ -24,7 +24,7 @@ import mvpLogo from "./assets/mvp-logo.png";
 
 const AUTH_REDIRECT_URL =
   window.location.hostname === "localhost"
-    ? "http://localhost:3000"
+    ? window.location.origin
     : "https://mvp-app-tau.vercel.app";
 
 const PHOTO_ROLE_SEQUENCE = [
