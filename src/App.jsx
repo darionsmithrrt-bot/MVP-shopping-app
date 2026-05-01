@@ -778,7 +778,7 @@ export default function App() {
           shouldCloseModal = true;
           successMessage = "Account created. Welcome to MVP.";
         } else if (data?.user && !data?.session) {
-          setAuthError("Account created. Check your inbox and spam folder to confirm your account. If no email arrives, tap Resend Confirmation Email or continue as guest for now.");
+          setAuthError("Account created. Check your inbox and spam folder to confirm your email before signing in. If no email arrives, tap Resend Confirmation Email or continue as guest for now.");
           return;
         }
       } else {
@@ -805,8 +805,15 @@ export default function App() {
       }
     } catch (err) {
       console.error("SUPABASE AUTH ERROR:", err);
-      if (String(err?.message || "").includes("Email not confirmed")) {
+      const errorMessage = String(err?.message || "");
+      const lowerErrorMessage = errorMessage.toLowerCase();
+      if (errorMessage.includes("Email not confirmed")) {
         setAuthError("Email not confirmed. Check your inbox for the confirmation link, or continue as guest for now.");
+      } else if (errorMessage.includes("Invalid login credentials")) {
+        console.log("LOGIN FAILED: user may not exist, password may be wrong, or email may be unconfirmed:", email);
+        setAuthError("Invalid login. If you just created your account, confirm your email first. If you deleted this test user, create the account again.");
+      } else if (lowerErrorMessage.includes("rate limit") || lowerErrorMessage.includes("email rate limit exceeded")) {
+        setAuthError("Too many email attempts. Please wait a few minutes before trying again, or continue as guest for now.");
       } else {
         setAuthError(err?.message || "Unable to authenticate right now.");
       }
@@ -840,7 +847,12 @@ export default function App() {
       setAuthError("Confirmation email resent. Check your inbox and spam folder.");
     } catch (err) {
       console.error("RESEND CONFIRMATION ERROR:", err);
-      setAuthError(err?.message || "Could not resend confirmation email.");
+      const lowerErrorMessage = String(err?.message || "").toLowerCase();
+      if (lowerErrorMessage.includes("rate limit") || lowerErrorMessage.includes("email rate limit exceeded")) {
+        setAuthError("Too many confirmation emails were requested. Please wait a few minutes, then try Resend Confirmation Email again.");
+      } else {
+        setAuthError(err?.message || "Could not resend confirmation email.");
+      }
     } finally {
       setIsSubmittingAuth(false);
     }
@@ -5173,7 +5185,8 @@ export default function App() {
                 ) : null}
 
                 {authError.toLowerCase().includes("email not confirmed") ||
-                authError.toLowerCase().includes("account created") ? (
+                authError.toLowerCase().includes("account created") ||
+                authError.toLowerCase().includes("confirm your email") ? (
                   <button
                     type="button"
                     style={styles.modalSecondaryButton}
