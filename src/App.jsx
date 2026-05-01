@@ -3434,6 +3434,41 @@ export default function App() {
   // PROFILE LOGIC - Create & Save User Profile
   // ============================================================================
 
+  const handleStartShoppingSmarter = async () => {
+    const isGuestMode = Boolean(currentUserProfile?.is_guest);
+    const hasAuthenticatedProfile = Boolean(currentUserProfile && !isGuestMode);
+
+    if (hasAuthenticatedProfile) {
+      setShowOnboarding(false);
+      setShowLoginModal(false);
+      return;
+    }
+
+    if (authUser && !currentUserProfile && !isGuestMode) {
+      const profile = await loadOrCreateSupabaseProfile(authUser);
+      if (profile) {
+        setShowOnboarding(false);
+        setShowLoginModal(false);
+        return;
+      }
+    }
+
+    const guestProfile = {
+      id: `guest-${Date.now()}`,
+      display_name: "Guest",
+      email: null,
+      trust_score: 0,
+      points: 0,
+      total_points: 0,
+      is_guest: true,
+      created_at: new Date().toISOString(),
+    };
+    localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
+    setCurrentUserProfile(guestProfile);
+    setShowOnboarding(false);
+    setShowLoginModal(false);
+  };
+
   const handleCreateProfile = () => {
     if (!profileForm.display_name.trim()) return;
 
@@ -4972,22 +5007,7 @@ export default function App() {
 
           <button
             style={styles.introPrimaryButton}
-            onClick={() => {
-              const guestProfile = {
-                id: `guest-${Date.now()}`,
-                display_name: "Guest",
-                email: null,
-                trust_score: 0,
-                points: 0,
-                total_points: 0,
-                is_guest: true,
-                created_at: new Date().toISOString(),
-              };
-              localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
-              setCurrentUserProfile(guestProfile);
-              setShowOnboarding(false);
-              setShowLoginModal(false);
-            }}
+            onClick={handleStartShoppingSmarter}
           >
             Start Shopping Smarter
           </button>
