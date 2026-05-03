@@ -17,6 +17,7 @@ type IdentifyProductResult = {
   price: number | null;
   price_unit: "unknown" | "each" | "price_per_lb" | "price_per_oz" | "price_per_kg" | "price_per_pack";
   price_confidence: number;
+  total_price: number | null;
   confidence: number;
   raw_text: string;
 };
@@ -33,6 +34,7 @@ const DEFAULT_RESULT: IdentifyProductResult = {
   price: null,
   price_unit: "unknown",
   price_confidence: 0,
+  total_price: null,
   confidence: 0,
   raw_text: "",
 };
@@ -82,10 +84,11 @@ Return ONLY valid JSON with this exact shape:
   "quantity": "1",
   "price": null,
   "price_unit": "unknown",
+  "price_confidence": 0,
+  "total_price": null,
   "confidence": 0,
   "size_confidence": 0,
   "quantity_confidence": 0,
-  "price_confidence": 0,
   "raw_text": ""
 }
 
@@ -102,6 +105,20 @@ Rules:
 - Do not invent price if not visible.
 - raw_text should include all readable text from the images.
 - confidence values must be decimals from 0 to 1.
+
+For weighted items (meat, produce, deli, seafood, or any label with NET WT / LB):
+- Extract UNIT PRICE as the price field.
+- Set price_unit to "price_per_lb" when the label shows lb or /lb.
+- Do NOT use TOTAL PRICE as the price when UNIT PRICE is present.
+- If TOTAL PRICE is also visible, return it as total_price.
+- NET WT should be returned as size_value and size_unit.
+
+Example — label shows:
+  NET WT / LB: 0.97 lb
+  UNIT PRICE: $20.17
+  TOTAL PRICE: $19.56
+Return:
+  price: 20.17, price_unit: "price_per_lb", total_price: 19.56, size_value: "0.97", size_unit: "lb"
 
 Important:
 Return JSON only. No markdown. No explanation.`;
@@ -124,6 +141,7 @@ const JSON_SCHEMA = {
       enum: ["unknown", "each", "price_per_lb", "price_per_oz", "price_per_kg", "price_per_pack"],
     },
     price_confidence: { type: "number" },
+    total_price: { type: ["number", "null"] },
     confidence: { type: "number" },
     raw_text: { type: "string" },
   },
@@ -139,6 +157,7 @@ const JSON_SCHEMA = {
     "price",
     "price_unit",
     "price_confidence",
+    "total_price",
     "confidence",
     "raw_text",
   ],
@@ -232,6 +251,7 @@ const normalizeParsedResult = (parsed: Record<string, unknown>): IdentifyProduct
     price,
     price_unit: price == null ? "unknown" : (price_unit as IdentifyProductResult["price_unit"]),
     price_confidence: price == null ? 0 : normalizeConfidence(parsed.price_confidence),
+    total_price: normalizePrice(parsed.total_price),
     confidence: normalizeConfidence(parsed.confidence),
     raw_text: typeof parsed.raw_text === "string" ? parsed.raw_text.trim() : "",
   };
@@ -259,10 +279,11 @@ const SAFE_FALLBACK = {
   quantity: "1",
   price: null,
   price_unit: "unknown",
+  price_confidence: 0,
+  total_price: null,
   confidence: 0,
   size_confidence: 0,
   quantity_confidence: 0,
-  price_confidence: 0,
   raw_text: "",
   error: "AI could not confidently identify the product",
 };
@@ -436,10 +457,11 @@ serve(async (req) => {
       quantity: normalizedResult.quantity || "1",
       price: normalizedResult.price ?? null,
       price_unit: normalizedResult.price_unit || "unknown",
+      price_confidence: normalizedResult.price_confidence || 0,
+      total_price: normalizedResult.total_price ?? null,
       confidence: normalizedResult.confidence || 0,
       size_confidence: normalizedResult.size_confidence || 0,
       quantity_confidence: normalizedResult.quantity_confidence || 0,
-      price_confidence: normalizedResult.price_confidence || 0,
       raw_text: normalizedResult.raw_text || "",
       debug_version: debugVersion,
     };

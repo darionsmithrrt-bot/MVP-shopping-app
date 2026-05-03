@@ -122,6 +122,26 @@ const normalizeImageRole = (role, index) => {
   return getRoleByPhotoIndex(index);
 };
 
+const formatStoreAddress = (store) => {
+  return [
+    store?.address,
+    store?.city,
+    store?.state,
+    store?.zip || store?.postal_code,
+  ]
+    .filter(Boolean)
+    .join(", ");
+};
+
+const getStoreAddressSubtitle = (store) => {
+  if (store?.address) {
+    return formatStoreAddress(store);
+  }
+
+  const cityState = [store?.city, store?.state].filter(Boolean).join(", ");
+  return cityState || "Address unavailable";
+};
+
 const identifyProductFromPhoto = async (imageUrls, barcode, imageRoles = []) => {
   const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls].filter(Boolean);
   const normalizedRoles = urls.map((_, index) => normalizeImageRole(imageRoles[index], index));
@@ -256,8 +276,61 @@ const normalizeDetectedPriceToNumber = (value) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+const extractWeightedLabelPriceFromText = (rawText) => {
+  const text = String(rawText || "");
+
+  const unitPriceMatch =
+    text.match(/unit\s*price[^$0-9]*\$?\s*(\d+(?:\.\d{1,2})?)/i) ||
+    text.match(/\bunit\s*price\b[\s\S]{0,20}?\$?\s*(\d+(?:\.\d{1,2})?)/i);
+
+  const totalPriceMatch =
+    text.match(/total\s*price[^$0-9]*\$?\s*(\d+(?:\.\d{1,2})?)/i) ||
+    text.match(/\btotal\b[\s\S]{0,20}?\$?\s*(\d+(?:\.\d{1,2})?)/i);
+
+  const netWeightLbMatch =
+    text.match(/net\s*wt\.?\s*\/?\s*lb[^0-9]*(\d+(?:\.\d+)?)/i) ||
+    text.match(/(\d+(?:\.\d+)?)\s*lb\b/i);
+
+  if (unitPriceMatch) {
+    return {
+      amount: Number(unitPriceMatch[1]),
+      unit: netWeightLbMatch ? "price_per_lb" : "each",
+      source: "unit_price_label",
+      matched_total_price: totalPriceMatch ? Number(totalPriceMatch[1]) : null,
+      matched_weight_lb: netWeightLbMatch ? Number(netWeightLbMatch[1]) : null,
+    };
+  }
+
+  return null;
+};
+
 const extractDetectedPriceFromAi = (aiPayload, aiResponse) => {
   const responseData = aiResponse?.data || {};
+
+  // Collect raw text from all available sources for weighted label detection
+  const rawTextSources = [
+    aiPayload?.raw_text,
+    aiPayload?.detected_text,
+    aiPayload?.ocr_text,
+    responseData?.raw_text,
+    responseData?.detected_text,
+    responseData?.result?.raw_text,
+  ].filter(Boolean);
+  const combinedRawText = rawTextSources.join(" ");
+
+  // Prefer UNIT PRICE over generic price fields for weighted items
+  if (combinedRawText) {
+    const weightedLabelPrice = extractWeightedLabelPriceFromText(combinedRawText);
+    if (weightedLabelPrice) {
+      return {
+        amount: weightedLabelPrice.amount,
+        cents: String(Math.round(weightedLabelPrice.amount * 100)),
+        unit: weightedLabelPrice.unit,
+        source: "photo_sign",
+        price_label_source: "unit_price",
+      };
+    }
+  }
 
   const candidatePrice =
     aiPayload?.price ??
@@ -270,6 +343,20 @@ const extractDetectedPriceFromAi = (aiPayload, aiResponse) => {
 
   const detectedPrice = normalizeDetectedPriceToNumber(candidatePrice);
   if (!detectedPrice) return null;
+
+  // Guard: if the generic price matches total_price AND raw text has weighted signals,
+  // reject it — the edge function returned total price instead of unit price.
+  const knownTotalPrice = normalizeDetectedPriceToNumber(
+    aiPayload?.total_price ?? responseData?.total_price ?? responseData?.result?.total_price
+  );
+  const hasWeightedSignal = /net\s*wt|\blb\b|\/lb/i.test(combinedRawText);
+  if (
+    knownTotalPrice &&
+    detectedPrice === knownTotalPrice &&
+    hasWeightedSignal
+  ) {
+    return null;
+  }
 
   const candidateUnit =
     aiPayload?.price_unit ??
@@ -1181,7 +1268,7 @@ export default function App() {
 
   const filteredStores = storeSearchQuery
     ? combinedStoreOptions.filter((s) =>
-        `${s.name || ""} ${s.address || ""} ${s.city || ""} ${s.state || ""}`
+        `${s.name || ""} ${s.address || ""} ${s.city || ""} ${s.state || ""} ${s.zip || ""} ${s.postal_code || ""}`
           .toLowerCase()
           .includes(storeSearchQuery)
       )
@@ -1447,8 +1534,21 @@ export default function App() {
         }
       }
 
-      setSelectedStore(resolvedStore);
-      localStorage.setItem("selectedStore", JSON.stringify(resolvedStore));
+      const storeWithAddressDetails = {
+        ...store,
+        ...resolvedStore,
+        address: resolvedStore?.address ?? store?.address ?? null,
+        city: resolvedStore?.city ?? store?.city ?? null,
+        state: resolvedStore?.state ?? store?.state ?? null,
+        zip: resolvedStore?.zip ?? store?.zip ?? null,
+        postal_code: resolvedStore?.postal_code ?? store?.postal_code ?? null,
+        latitude: resolvedStore?.latitude ?? store?.latitude ?? null,
+        longitude: resolvedStore?.longitude ?? store?.longitude ?? null,
+        google_place_id: resolvedStore?.google_place_id ?? store?.google_place_id ?? null,
+      };
+
+      setSelectedStore(storeWithAddressDetails);
+      localStorage.setItem("selectedStore", JSON.stringify(storeWithAddressDetails));
       setManualStoreName("");
       setSearchResults([]);
       setError("");
@@ -1478,6 +1578,7 @@ export default function App() {
       console.info("STORE INSERT SUCCESS:", data);
       setStores((prev) => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)));
       setSelectedStore(data);
+      localStorage.setItem("selectedStore", JSON.stringify(data));
       setManualStoreName("");
       setError("");
     } catch (err) {
@@ -2368,6 +2469,12 @@ export default function App() {
             rawAiResult?.price_confidence ??
             0
           ),
+        total_price:
+          extractedPayload?.total_price ??
+          rawAiData?.total_price ??
+          rawAiNestedData?.total_price ??
+          rawAiResult?.total_price ??
+          null,
         raw_text:
           extractedPayload?.raw_text ||
           rawAiData?.raw_text ||
@@ -6402,7 +6509,12 @@ export default function App() {
         {effectiveScreen === "store" && selectedStore ? (
           <div style={{ marginBottom: 14 }}>
             <div style={styles.storeBadgeRow}>
-              <div style={styles.storeBadge}>Store: {selectedStore.name}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <div style={styles.storeBadge}>Store: {selectedStore.name}</div>
+                <div style={{ fontSize: 12, color: "#475569", fontWeight: 600 }}>
+                  {getStoreAddressSubtitle(selectedStore)}
+                </div>
+              </div>
               <button
                 onClick={() => {
                   setSelectedStore(null);
@@ -6462,6 +6574,8 @@ export default function App() {
                           address: s.address ?? null,
                           city: s.city ?? "Honolulu",
                           state: s.state ?? "HI",
+                          zip: s.zip ?? null,
+                          postal_code: s.postal_code ?? null,
                           latitude: s.latitude ?? null,
                           longitude: s.longitude ?? null,
                           google_place_id: s.google_place_id ?? null,
@@ -6474,8 +6588,7 @@ export default function App() {
                     >
                       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', flex: 1, gap: 2 }}>
                         <span style={{ fontWeight: 700 }}>{s.name}</span>
-                        {s.address ? <span style={{ fontSize: 12, color: '#64748b' }}>{s.address}</span> : null}
-                        {s.city ? <span style={{ fontSize: 12, color: '#94a3b8' }}>{s.city}{s.state ? `, ${s.state}` : ''}</span> : null}
+                        <span style={{ fontSize: 12, color: '#64748b' }}>{getStoreAddressSubtitle(s)}</span>
                       </div>
                       {s.distance_miles != null ? (
                         <span style={{ fontSize: 13, color: '#3b82f6', fontWeight: 700, whiteSpace: 'nowrap', marginLeft: 8 }}>
@@ -6491,16 +6604,14 @@ export default function App() {
             {suggestedStore && (
               <div style={styles.suggestedStoreCard}>
                 <div style={styles.suggestedStoreTitle}>Are you at {suggestedStore.name}?</div>
-                {suggestedStore.city && suggestedStore.city !== 'Unknown' && (
-                  <div style={{ fontSize: 13, color: '#64748b', marginBottom: 12 }}>
-                    {suggestedStore.city}{suggestedStore.state ? `, ${suggestedStore.state}` : ''}
-                  </div>
-                )}
+                <div style={{ fontSize: 13, color: '#64748b', marginBottom: 12 }}>
+                  {getStoreAddressSubtitle(suggestedStore)}
+                </div>
                 <div style={{ display: 'flex', gap: 10 }}>
                   <button
                     onClick={() => {
                       console.info("STORE DETECT: confirmed suggested store", suggestedStore);
-                      setSelectedStore(suggestedStore);
+                      handlePickStore(suggestedStore);
                       setSuggestedStore(null);
                     }}
                     style={{ ...styles.confirmButton, flex: 1, minHeight: 44 }}
@@ -6550,6 +6661,8 @@ export default function App() {
                         address: s.address ?? null,
                         city: s.city ?? "Honolulu",
                         state: s.state ?? "HI",
+                        zip: s.zip ?? null,
+                        postal_code: s.postal_code ?? null,
                         latitude: s.latitude ?? null,
                         longitude: s.longitude ?? null,
                         google_place_id: s.google_place_id ?? null,
@@ -6560,12 +6673,12 @@ export default function App() {
                     }}
                     style={styles.storeOptionButton}
                   >
-                    <span style={{ fontWeight: 700 }}>{s.name}</span>
-                    {s.city || s.address ? (
-                      <span style={{ fontSize: 13, color: '#64748b', marginLeft: 8 }}>
-                        {s.city ? `${s.city}${s.state ? `, ${s.state}` : ""}` : s.address}
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}>
+                      <span style={{ fontWeight: 700 }}>{s.name}</span>
+                      <span style={{ fontSize: 13, color: '#64748b' }}>
+                        {getStoreAddressSubtitle(s)}
                       </span>
-                    ) : null}
+                    </div>
                     {s.distance_miles != null ? (
                       <span style={{ fontSize: 13, color: '#3b82f6', fontWeight: 700, marginLeft: "auto" }}>
                         {s.distance_miles.toFixed(1)} mi
@@ -6596,8 +6709,13 @@ export default function App() {
         ) : (
           <div style={{ display: effectiveScreen === "identify" ? "block" : "none" }}>
             <div style={styles.storeBadgeRow}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <div style={styles.storeBadge}>
               Store: {selectedStore.name}
+              </div>
+              <div style={{ fontSize: 12, color: "#475569", fontWeight: 600 }}>
+                {getStoreAddressSubtitle(selectedStore)}
+              </div>
               </div>
               <button
                 onClick={() => {
