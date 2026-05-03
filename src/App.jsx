@@ -1372,48 +1372,50 @@ export default function App() {
   }, [currentUserProfile]);
 
   useEffect(() => {
-    if (!currentUserProfile || activePanel !== "location") return;
-    try {
-      window.history.pushState({ mvpInApp: true, screen: "location" }, "");
-    } catch (_) {}
-  }, [currentUserProfile, activePanel]);
-
-  useEffect(() => {
     if (!currentUserProfile) return;
 
-    const handlePopState = () => {
-      const screen = activeScreenRef.current;
-      const panel = activePanelRef.current;
+    if (!window.location.hash) {
+      window.history.replaceState(null, "", "#store");
+    }
 
-      if (panel === "location") {
+    const handleHashChange = () => {
+      const hash = window.location.hash.replace("#", "");
+
+      if (activePanelRef.current === "location" && hash !== "location") {
         setActivePanel(null);
         setActiveScreen("identify");
-        window.history.pushState({ mvpInApp: true, screen: "identify" }, "");
         return;
       }
 
-      if (showItemRequestModal) {
-        setShowItemRequestModal(false);
-        window.history.pushState({ mvpInApp: true, screen }, "");
-        return;
-      }
-
-      if (screen === "cart" || screen === "identify") {
+      if (hash === "store") {
+        setActivePanel(null);
         setActiveScreen("store");
-        window.history.pushState({ mvpInApp: true, screen: "store" }, "");
         return;
       }
 
-      if (screen === "store") {
-        window.history.pushState({ mvpInApp: true, screen: "store" }, "");
-        setToast({ message: "You are already on Home.", type: "success" });
+      if (hash === "identify") {
+        setActivePanel(null);
+        setActiveScreen("identify");
+        return;
+      }
+
+      if (hash === "cart") {
+        setActivePanel(null);
+        setActiveScreen("cart");
         return;
       }
     };
 
-    window.addEventListener("popstate", handlePopState);
-    return () => window.removeEventListener("popstate", handlePopState);
-  }, [currentUserProfile, showItemRequestModal]);
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, [currentUserProfile]);
+
+  useEffect(() => {
+    if (activePanel !== "location") return;
+    try {
+      window.location.hash = "location";
+    } catch (_) {}
+  }, [activePanel]);
 
   const storeSearchQuery = manualStoreName.trim().toLowerCase();
   const setStoreSearchQuery = setManualStoreName;
@@ -3879,12 +3881,8 @@ export default function App() {
     }
   };
 
-  const handleBackToHome = async () => {
-    try {
-      await stopScanner();
-    } catch (err) {
-      console.warn("HOME STOP SCANNER WARNING:", err);
-    }
+  const handleBackToHome = () => {
+    console.log("HOME BUTTON CLICKED");
 
     setActivePanel(null);
     setShowLoginModal(false);
@@ -3894,9 +3892,23 @@ export default function App() {
     setError("");
     setStatus("Ready");
     setActiveScreen("store");
+    setToast({ message: "Back to Home", type: "success" });
 
     try {
-      window.history.pushState({ mvpInApp: true, screen: "store" }, "");
+      window.location.hash = "store";
+    } catch (_) {}
+
+    stopScanner().catch((err) => {
+      console.warn("HOME STOP SCANNER WARNING:", err);
+    });
+  };
+
+  const navigateToScreen = (screen) => {
+    setError("");
+    setActivePanel(null);
+    setActiveScreen(screen);
+    try {
+      window.location.hash = screen;
     } catch (_) {}
   };
 
@@ -5791,9 +5803,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
-              setError("");
-              setActiveScreen("store");
-              window.history.pushState({ mvpInApp: true, screen: "store" }, "");
+              navigateToScreen("store");
             }}
             style={{
               ...styles.secondaryButton,
@@ -5811,13 +5821,10 @@ export default function App() {
             onClick={() => {
               if (!selectedStore) {
                 setError("Select a store first.");
-                setActiveScreen("store");
-                window.history.pushState({ mvpInApp: true, screen: "store" }, "");
+                navigateToScreen("store");
                 return;
               }
-              setError("");
-              setActiveScreen("identify");
-              window.history.pushState({ mvpInApp: true, screen: "identify" }, "");
+              navigateToScreen("identify");
             }}
             style={{
               ...styles.secondaryButton,
@@ -5833,9 +5840,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
-              setError("");
-              setActiveScreen("cart");
-              window.history.pushState({ mvpInApp: true, screen: "cart" }, "");
+              navigateToScreen("cart");
             }}
             style={{
               ...styles.secondaryButton,
