@@ -581,6 +581,9 @@ export default function App() {
   const priceInputRef = useRef(null);
   const priceConfirmationCardRef = useRef(null);
   const aisleInputRef = useRef(null);
+  const activeScreenRef = useRef("store");
+  const activePanelRef = useRef(null);
+  const cameraLoadPromiseRef = useRef(null);
 
   // ============================================================================
   // STATE - Scanner & Camera
@@ -758,6 +761,8 @@ export default function App() {
 
     if (!saved) {
       setCurrentUserProfile(null);
+      setIsAuthLoading(false);
+      setIsCheckingProfile(false);
       return;
     }
 
@@ -767,6 +772,8 @@ export default function App() {
         if (guestOnly && !parsed?.is_guest) {
           localStorage.removeItem("currentUserProfile");
           setCurrentUserProfile(null);
+          setIsAuthLoading(false);
+          setIsCheckingProfile(false);
           return;
         }
         if (parsed?.is_guest) {
@@ -776,17 +783,85 @@ export default function App() {
             localStorage.setItem("currentUserProfile", JSON.stringify(normalizedGuestProfile));
           }
           setCurrentUserProfile(normalizedGuestProfile);
+          setIsAuthLoading(false);
+          setIsCheckingProfile(false);
           return;
         }
         setCurrentUserProfile(parsed);
+        setIsAuthLoading(false);
+        setIsCheckingProfile(false);
         return;
       }
       localStorage.removeItem("currentUserProfile");
       setCurrentUserProfile(null);
+      setIsAuthLoading(false);
+      setIsCheckingProfile(false);
     } catch {
       localStorage.removeItem("currentUserProfile");
       setCurrentUserProfile(null);
+      setIsAuthLoading(false);
+      setIsCheckingProfile(false);
     }
+  };
+
+  const resetAppSession = async () => {
+    try {
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.warn("RESET APP SESSION SIGNOUT WARNING:", err);
+    }
+
+    localStorage.removeItem("currentUserProfile");
+    localStorage.removeItem("selectedStore");
+
+    setAuthUser(null);
+    setCurrentUserProfile(null);
+    setSelectedStore(null);
+    setIsAuthLoading(false);
+    setIsCheckingProfile(false);
+    setShowLoginModal(false);
+    setActiveScreen("store");
+    setError("");
+    setStatus("Ready");
+  };
+
+  const ensureCamerasLoaded = async () => {
+    if (availableCameras.length > 0) {
+      return availableCameras;
+    }
+
+    if (cameraLoadPromiseRef.current) {
+      return cameraLoadPromiseRef.current;
+    }
+
+    cameraLoadPromiseRef.current = (async () => {
+      try {
+        setStatus("Loading cameras...");
+        const devices = await BrowserMultiFormatReader.listVideoInputDevices();
+        setAvailableCameras(devices);
+
+        const rearCamera =
+          devices.find((d) => /back|rear|environment|camera 2/gi.test(d.label)) ||
+          devices.find((d) => !/front|user|selfie/gi.test(d.label)) ||
+          devices[0];
+
+        if (rearCamera?.deviceId) {
+          setSelectedDeviceId(rearCamera.deviceId);
+        }
+
+        setStatus("Ready");
+        return devices;
+      } catch (err) {
+        console.error("CAMERA LOAD ERROR:", err);
+        setError("Unable to load cameras");
+        setStatus("Camera load failed");
+        return [];
+      } finally {
+        cameraLoadPromiseRef.current = null;
+      }
+    })();
+
+    return cameraLoadPromiseRef.current;
   };
 
   const loadOrCreateSupabaseProfile = async (user) => {
@@ -1008,31 +1083,6 @@ export default function App() {
   // ============================================================================
 
   useEffect(() => {
-    const loadCameras = async () => {
-      try {
-        setStatus("Loading cameras...");
-        const devices = await BrowserMultiFormatReader.listVideoInputDevices();
-        setAvailableCameras(devices);
-
-        const rearCamera =
-          devices.find((d) => /back|rear|environment|camera 2/gi.test(d.label)) ||
-          devices.find((d) => !/front|user|selfie/gi.test(d.label)) ||
-          devices[0];
-
-        if (rearCamera?.deviceId) {
-          setSelectedDeviceId(rearCamera.deviceId);
-        }
-
-        setStatus("Ready");
-      } catch (err) {
-        console.error("CAMERA LOAD ERROR:", err);
-        setError("Unable to load cameras");
-        setStatus("Camera load failed");
-      }
-    };
-
-    loadCameras();
-
     return () => {
       if (transitionTimeoutRef.current) {
         clearTimeout(transitionTimeoutRef.current);
@@ -1076,10 +1126,25 @@ export default function App() {
 
     const bootstrapAuth = async () => {
       setIsAuthLoading(true);
+      let didTimeout = false;
+
+      const bootstrapTimeout = setTimeout(() => {
+        if (!isMounted) return;
+        didTimeout = true;
+        console.warn("AUTH BOOTSTRAP TIMEOUT");
+        setIsAuthLoading(false);
+        setIsCheckingProfile(false);
+        loadProfileFromLocalStorage({ guestOnly: true });
+        setToast({
+          message: "Session took too long to load. Try signing in again.",
+          type: "error",
+        });
+      }, 8000);
 
       try {
         const { data, error: sessionError } = await supabase.auth.getSession();
         if (sessionError) throw sessionError;
+        if (!isMounted || didTimeout) return;
 
         const user = data?.session?.user || null;
 
@@ -1094,10 +1159,12 @@ export default function App() {
         }
       } catch (err) {
         console.error("AUTH SESSION BOOTSTRAP ERROR:", err);
+        if (!isMounted || didTimeout) return;
         setError(err?.message || "Unable to initialize authentication.");
         loadProfileFromLocalStorage({ guestOnly: true });
       } finally {
-        if (isMounted) {
+        clearTimeout(bootstrapTimeout);
+        if (isMounted && !didTimeout) {
           setIsAuthLoading(false);
           setIsCheckingProfile(false);
         }
@@ -1134,8 +1201,14 @@ export default function App() {
       const parsedShoppingList = JSON.parse(savedShoppingList);
       if (Array.isArray(parsedShoppingList)) {
         setShoppingListItems(parsedShoppingList);
+      } else {
+        localStorage.removeItem("shoppingListItems");
       }
-    } catch (_) {}
+    } catch (_) {
+      localStorage.removeItem("shoppingListItems");
+      setIsAuthLoading(false);
+      setIsCheckingProfile(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -1247,9 +1320,49 @@ export default function App() {
       const parsedStore = JSON.parse(savedStore);
       if (parsedStore && typeof parsedStore === "object") {
         setSelectedStore(parsedStore);
+      } else {
+        localStorage.removeItem("selectedStore");
+        setSelectedStore(null);
       }
-    } catch (_) {}
+    } catch (_) {
+      localStorage.removeItem("selectedStore");
+      setSelectedStore(null);
+      setIsAuthLoading(false);
+      setIsCheckingProfile(false);
+    }
   }, []);
+
+  useEffect(() => {
+    activeScreenRef.current = activeScreen;
+    activePanelRef.current = activePanel;
+  }, [activeScreen, activePanel]);
+
+  useEffect(() => {
+    if (!currentUserProfile) return;
+    window.history.pushState({ mvpInApp: true, screen: activeScreen }, "");
+  }, [currentUserProfile, activeScreen]);
+
+  useEffect(() => {
+    if (!currentUserProfile) return;
+
+    const handlePopState = () => {
+      if (activePanelRef.current === "location") {
+        setActivePanel(null);
+        window.history.pushState({ mvpInApp: true, screen: activeScreenRef.current }, "");
+        return;
+      }
+
+      if (activeScreenRef.current === "cart" || activeScreenRef.current === "identify") {
+        setActiveScreen("store");
+        window.history.pushState({ mvpInApp: true, screen: "store" }, "");
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, [currentUserProfile]);
 
   const storeSearchQuery = manualStoreName.trim().toLowerCase();
   const setStoreSearchQuery = setManualStoreName;
@@ -1794,6 +1907,7 @@ export default function App() {
   const startLivePreview = async () => {
     try {
       await stopScanner();
+      await ensureCamerasLoaded();
 
       const constraints = {
         video: selectedDeviceId
@@ -1974,6 +2088,7 @@ export default function App() {
     resetContributionFlow();
 
     await stopScanner();
+    await ensureCamerasLoaded();
 
     try {
       if (!videoRef.current) {
@@ -5076,7 +5191,32 @@ export default function App() {
   // RENDER - Main UI
   // ============================================================================
 
-  if (isCheckingProfile || isAuthLoading) return null;
+  if (isCheckingProfile || isAuthLoading) {
+    return (
+      <div style={styles.introPage}>
+        <div style={styles.introHeroCard}>
+          <img
+            src={mvpLogo}
+            alt="MVP logo"
+            style={styles.introHeaderLogo}
+          />
+          <h2 style={{ margin: "10px 0 6px", fontSize: 24, fontWeight: 900, color: "#0f172a" }}>
+            MVP - Most Valuable Purchase
+          </h2>
+          <p style={{ margin: "0 0 18px", color: "#475569", fontSize: 15 }}>
+            Loading your shopping session...
+          </p>
+          <button
+            type="button"
+            style={styles.secondaryButton}
+            onClick={resetAppSession}
+          >
+            Reset App Session
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!currentUserProfile && showOnboarding) {
     return (
