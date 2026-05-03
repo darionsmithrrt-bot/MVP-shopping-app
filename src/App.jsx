@@ -657,7 +657,7 @@ export default function App() {
     setItemRequestSuggestions([]);
   };
 
-  const loadProfileFromLocalStorage = () => {
+  const loadProfileFromLocalStorage = ({ guestOnly = false } = {}) => {
     const saved = localStorage.getItem("currentUserProfile");
 
     if (!saved) {
@@ -668,6 +668,11 @@ export default function App() {
     try {
       const parsed = JSON.parse(saved);
       if (parsed?.display_name) {
+        if (guestOnly && !parsed?.is_guest) {
+          localStorage.removeItem("currentUserProfile");
+          setCurrentUserProfile(null);
+          return;
+        }
         setCurrentUserProfile(parsed);
         return;
       }
@@ -787,10 +792,19 @@ export default function App() {
           password,
         });
         if (signInError) throw signInError;
-        if (data?.user) {
+        if (data?.user && data?.session) {
           setAuthUser(data.user);
-          await loadOrCreateSupabaseProfile(data.user);
+          localStorage.removeItem("currentUserProfile");
+          setCurrentUserProfile(null);
+          const profile = await loadOrCreateSupabaseProfile(data.user);
+          if (profile) {
+            const normalizedProfile = { ...profile, is_guest: false };
+            setCurrentUserProfile(normalizedProfile);
+            localStorage.setItem("currentUserProfile", JSON.stringify(normalizedProfile));
+          }
           shouldCloseModal = true;
+        } else {
+          throw new Error("Unable to authenticate right now.");
         }
       }
 
@@ -807,11 +821,11 @@ export default function App() {
       console.error("SUPABASE AUTH ERROR:", err);
       const errorMessage = String(err?.message || "");
       const lowerErrorMessage = errorMessage.toLowerCase();
-      if (errorMessage.includes("Email not confirmed")) {
+      if (loginMode === "signIn" && errorMessage === "Email not confirmed") {
         setAuthError("Email not confirmed. Check your inbox for the confirmation link, or continue as guest for now.");
       } else if (errorMessage.includes("Invalid login credentials")) {
         console.log("LOGIN FAILED: user may not exist, password may be wrong, or email may be unconfirmed:", email);
-        setAuthError("Invalid login. If you just created your account, confirm your email first. If you deleted this test user, create the account again.");
+        setAuthError("Invalid login. Check your email and password. If you deleted this test user, create the account again.");
       } else if (lowerErrorMessage.includes("rate limit") || lowerErrorMessage.includes("email rate limit exceeded")) {
         setAuthError("Too many email attempts. Please wait a few minutes before trying again, or continue as guest for now.");
       } else {
@@ -940,15 +954,17 @@ export default function App() {
 
         if (user) {
           setAuthUser(user);
+          localStorage.removeItem("currentUserProfile");
+          setCurrentUserProfile(null);
           await loadOrCreateSupabaseProfile(user);
         } else {
           setAuthUser(null);
-          loadProfileFromLocalStorage();
+          loadProfileFromLocalStorage({ guestOnly: true });
         }
       } catch (err) {
         console.error("AUTH SESSION BOOTSTRAP ERROR:", err);
         setError(err?.message || "Unable to initialize authentication.");
-        loadProfileFromLocalStorage();
+        loadProfileFromLocalStorage({ guestOnly: true });
       } finally {
         if (isMounted) {
           setIsAuthLoading(false);
@@ -966,9 +982,11 @@ export default function App() {
       setAuthUser(user);
 
       if (user) {
+        localStorage.removeItem("currentUserProfile");
+        setCurrentUserProfile(null);
         await loadOrCreateSupabaseProfile(user);
       } else {
-        loadProfileFromLocalStorage();
+        loadProfileFromLocalStorage({ guestOnly: true });
       }
     });
 
@@ -3436,37 +3454,30 @@ export default function App() {
 
   const handleStartShoppingSmarter = async () => {
     const isGuestMode = Boolean(currentUserProfile?.is_guest);
-    const hasAuthenticatedProfile = Boolean(currentUserProfile && !isGuestMode);
-
-    if (hasAuthenticatedProfile) {
-      setShowOnboarding(false);
-      setShowLoginModal(false);
-      return;
-    }
-
-    if (authUser && !currentUserProfile && !isGuestMode) {
+    if (authUser) {
+      localStorage.removeItem("currentUserProfile");
+      setCurrentUserProfile(null);
       const profile = await loadOrCreateSupabaseProfile(authUser);
       if (profile) {
+        const normalizedProfile = { ...profile, is_guest: false };
+        setCurrentUserProfile(normalizedProfile);
+        localStorage.setItem("currentUserProfile", JSON.stringify(normalizedProfile));
         setShowOnboarding(false);
         setShowLoginModal(false);
         return;
       }
     }
 
-    const guestProfile = {
-      id: `guest-${Date.now()}`,
-      display_name: "Guest",
-      email: null,
-      trust_score: 0,
-      points: 0,
-      total_points: 0,
-      is_guest: true,
-      created_at: new Date().toISOString(),
-    };
-    localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
-    setCurrentUserProfile(guestProfile);
+    if (currentUserProfile && !isGuestMode) {
+      setShowOnboarding(false);
+      setShowLoginModal(false);
+      return;
+    }
+
+    setLoginMode("signIn");
+    setAuthError("");
+    setShowLoginModal(true);
     setShowOnboarding(false);
-    setShowLoginModal(false);
   };
 
   const handleCreateProfile = () => {
@@ -5024,21 +5035,18 @@ export default function App() {
 
             <button
               style={styles.introCommunityButton}
-              onClick={() => {
-                if (!currentUserProfile) {
-                  const guestProfile = {
-                    id: `guest-${Date.now()}`,
-                    display_name: "Guest",
-                    email: null,
-                    trust_score: 0,
-                    points: 0,
-                    total_points: 0,
-                    is_guest: true,
-                    created_at: new Date().toISOString(),
-                  };
-                  localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
-                  setCurrentUserProfile(guestProfile);
+              onClick={async () => {
+                if (authUser && !currentUserProfile) {
+                  await loadOrCreateSupabaseProfile(authUser);
                 }
+
+                if (!authUser && !currentUserProfile) {
+                  setAuthError("Sign in or continue as guest to request help finding an item.");
+                  setShowOnboarding(false);
+                  setShowLoginModal(true);
+                  return;
+                }
+
                 setShowOnboarding(false);
                 setShowLoginModal(false);
                 setShowItemRequestModal(true);
@@ -5219,7 +5227,16 @@ export default function App() {
 
                 <button
                   style={styles.modalSecondaryButton}
-                  onClick={() => {
+                  onClick={async () => {
+                    try {
+                      if (authUser) {
+                        await supabase.auth.signOut();
+                      }
+                    } catch (err) {
+                      console.error("AUTH SIGN OUT ERROR:", err);
+                    }
+
+                    localStorage.removeItem("currentUserProfile");
                     const guestProfile = {
                       id: `guest-${Date.now()}`,
                       display_name: "Guest",
@@ -5231,7 +5248,9 @@ export default function App() {
                       created_at: new Date().toISOString(),
                     };
                     localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
+                    setAuthUser(null);
                     setCurrentUserProfile(guestProfile);
+                    setAuthError("");
                     setShowLoginModal(false);
                     setShowOnboarding(false);
                   }}
