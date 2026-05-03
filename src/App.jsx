@@ -76,6 +76,14 @@ const LOCAL_ITEM_REQUEST_PATTERNS = {
   ],
 };
 
+const isUuidString = (value) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value || "")
+  );
+
+const toSafeUserId = (candidateId) =>
+  isUuidString(candidateId) ? String(candidateId) : crypto.randomUUID();
+
 const toTitleCase = (value) =>
   String(value || "")
     .trim()
@@ -583,6 +591,7 @@ export default function App() {
   const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showLoginModal, setShowLoginModal] = useState(false);
+  const [activeScreen, setActiveScreen] = useState("store");
   const [loginForm, setLoginForm] = useState({
     username: "",
     password: "",
@@ -671,6 +680,15 @@ export default function App() {
         if (guestOnly && !parsed?.is_guest) {
           localStorage.removeItem("currentUserProfile");
           setCurrentUserProfile(null);
+          return;
+        }
+        if (parsed?.is_guest) {
+          const safeUserId = toSafeUserId(parsed?.id);
+          const normalizedGuestProfile = { ...parsed, id: safeUserId };
+          if (parsed?.id !== safeUserId) {
+            localStorage.setItem("currentUserProfile", JSON.stringify(normalizedGuestProfile));
+          }
+          setCurrentUserProfile(normalizedGuestProfile);
           return;
         }
         setCurrentUserProfile(parsed);
@@ -788,9 +806,10 @@ export default function App() {
         }
       } else {
         const { data, error: signInError } = await supabase.auth.signInWithPassword({
-          email,
+          email: email.trim().toLowerCase(),
           password,
         });
+        console.log("LOGIN RESULT:", data, signInError);
         if (signInError) throw signInError;
         if (data?.user && data?.session) {
           setAuthUser(data.user);
@@ -810,6 +829,7 @@ export default function App() {
 
       if (shouldCloseModal) {
         setAuthError("");
+        setActiveScreen("store");
         setShowLoginModal(false);
         setLoginForm({ username: "", password: "" });
         setToast({
@@ -821,8 +841,10 @@ export default function App() {
       console.error("SUPABASE AUTH ERROR:", err);
       const errorMessage = String(err?.message || "");
       const lowerErrorMessage = errorMessage.toLowerCase();
-      if (loginMode === "signIn" && errorMessage === "Email not confirmed") {
-        setAuthError("Email not confirmed. Check your inbox for the confirmation link, or continue as guest for now.");
+      if (loginMode === "signIn" && errorMessage.includes("Invalid login credentials")) {
+        setAuthError("Incorrect email or password");
+      } else if (loginMode === "signIn" && errorMessage.includes("Email not confirmed")) {
+        setAuthError("Please confirm your email before logging in");
       } else if (errorMessage.includes("Invalid login credentials")) {
         console.log("LOGIN FAILED: user may not exist, password may be wrong, or email may be unconfirmed:", email);
         setAuthError("Invalid login. Check your email and password. If you deleted this test user, create the account again.");
@@ -867,6 +889,28 @@ export default function App() {
       } else {
         setAuthError(err?.message || "Could not resend confirmation email.");
       }
+    } finally {
+      setIsSubmittingAuth(false);
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    const email = loginForm.username.trim().toLowerCase();
+
+    if (!email) {
+      setAuthError("Enter your email first to reset your password.");
+      return;
+    }
+
+    setIsSubmittingAuth(true);
+    setAuthError("");
+
+    try {
+      await supabase.auth.resetPasswordForEmail(email);
+      setAuthError("Password reset email sent. Check your inbox and spam folder.");
+    } catch (err) {
+      console.error("PASSWORD RESET ERROR:", err);
+      setAuthError(err?.message || "Unable to send password reset email.");
     } finally {
       setIsSubmittingAuth(false);
     }
@@ -1328,6 +1372,7 @@ export default function App() {
       store_id: currentProductStoreId,
     })
   );
+  const effectiveScreen = activePanel === "location" ? "location" : activeScreen;
 
   const isUuid = (value) =>
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
@@ -3404,7 +3449,11 @@ export default function App() {
         store_name: selectedStore.name,
       });
 
-      setStatus("Location saved. Item added to Smart Cart.");
+      setAwaitingProductConfirmation(false);
+      setShowAiSummaryCard(false);
+      setStatus("Item added to cart");
+      setToast({ message: "Item added to cart", type: "success" });
+      setShowNextItemPrompt(true);
     } catch (err) {
       console.error("LOCATION SAVE ERROR:", err);
       const rawMessage = String(err?.message || err || "");
@@ -3462,6 +3511,7 @@ export default function App() {
         const normalizedProfile = { ...profile, is_guest: false };
         setCurrentUserProfile(normalizedProfile);
         localStorage.setItem("currentUserProfile", JSON.stringify(normalizedProfile));
+        setActiveScreen("store");
         setShowOnboarding(false);
         setShowLoginModal(false);
         return;
@@ -3469,6 +3519,7 @@ export default function App() {
     }
 
     if (currentUserProfile && !isGuestMode) {
+      setActiveScreen("store");
       setShowOnboarding(false);
       setShowLoginModal(false);
       return;
@@ -5208,6 +5259,17 @@ export default function App() {
                       : "Login"}
                 </button>
 
+                {loginMode === "signIn" ? (
+                  <button
+                    type="button"
+                    style={styles.modalSecondaryButton}
+                    disabled={isSubmittingAuth}
+                    onClick={handleForgotPassword}
+                  >
+                    Forgot Password?
+                  </button>
+                ) : null}
+
                 {authError ? (
                   <div style={styles.errorText}>{authError}</div>
                 ) : null}
@@ -5237,8 +5299,9 @@ export default function App() {
                     }
 
                     localStorage.removeItem("currentUserProfile");
+                    const safeUserId = authUser?.id || crypto.randomUUID();
                     const guestProfile = {
-                      id: `guest-${Date.now()}`,
+                      id: safeUserId,
                       display_name: "Guest",
                       email: null,
                       trust_score: 0,
@@ -5251,6 +5314,7 @@ export default function App() {
                     setAuthUser(null);
                     setCurrentUserProfile(guestProfile);
                     setAuthError("");
+                    setActiveScreen("store");
                     setShowLoginModal(false);
                     setShowOnboarding(false);
                   }}
@@ -5382,6 +5446,62 @@ export default function App() {
           deli, and store-labeled items.
         </p>
 
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginBottom: 14 }}>
+          <button
+            type="button"
+            onClick={() => {
+              setError("");
+              setActiveScreen("store");
+            }}
+            style={{
+              ...styles.secondaryButton,
+              minHeight: 40,
+              background: activeScreen === "store" ? "#dbeafe" : styles.secondaryButton.background,
+              borderColor: activeScreen === "store" ? "#93c5fd" : undefined,
+              color: activeScreen === "store" ? "#1e3a8a" : undefined,
+            }}
+          >
+            Store
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (!selectedStore) {
+                setError("Select a store first.");
+                setActiveScreen("store");
+                return;
+              }
+              setError("");
+              setActiveScreen("identify");
+            }}
+            style={{
+              ...styles.secondaryButton,
+              minHeight: 40,
+              background: activeScreen === "identify" ? "#dbeafe" : styles.secondaryButton.background,
+              borderColor: activeScreen === "identify" ? "#93c5fd" : undefined,
+              color: activeScreen === "identify" ? "#1e3a8a" : undefined,
+            }}
+          >
+            Identify Item
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setError("");
+              setActiveScreen("cart");
+            }}
+            style={{
+              ...styles.secondaryButton,
+              minHeight: 40,
+              background: activeScreen === "cart" ? "#dbeafe" : styles.secondaryButton.background,
+              borderColor: activeScreen === "cart" ? "#93c5fd" : undefined,
+              color: activeScreen === "cart" ? "#1e3a8a" : undefined,
+            }}
+          >
+            Cart
+          </button>
+        </div>
+
         {/* ================= PROFILE STATUS ================= */}
         <div style={{ ...styles.infoBox, marginBottom: 14, borderRadius: 14, boxShadow: "0 6px 18px rgba(15, 23, 42, 0.08)", background: "#f0fdf4", border: "1px solid #bbf7d0" }}>
           <div style={{ fontSize: 14, fontWeight: 800, color: "#166534" }}>
@@ -5390,6 +5510,7 @@ export default function App() {
         </div>
 
         {/* ================= SMART CART ================= */}
+        {effectiveScreen === "cart" && (
         <div style={{ ...styles.infoBox, marginBottom: 14, borderRadius: 14, boxShadow: "0 6px 18px rgba(15, 23, 42, 0.08)" }}>
           {/* Header */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 10 }}>
@@ -5867,8 +5988,10 @@ export default function App() {
             </>
           )}
         </div>
+        )}
 
-        <div style={styles.rewardsSection}>
+        {effectiveScreen === "cart" && (
+        <div style={{ ...styles.rewardsSection }}>
           <div style={styles.rewardsSectionHeader}>Shopping List / Smart Cart</div>
           <button
             type="button"
@@ -6271,9 +6394,40 @@ export default function App() {
             )
           ) : null}
         </div>
+        )}
+
+        {effectiveScreen === "store" && selectedStore ? (
+          <div style={{ marginBottom: 14 }}>
+            <div style={styles.storeBadgeRow}>
+              <div style={styles.storeBadge}>Store: {selectedStore.name}</div>
+              <button
+                onClick={() => {
+                  setSelectedStore(null);
+                  localStorage.removeItem("selectedStore");
+                }}
+                style={styles.changeStoreButton}
+              >
+                Change Store
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveScreen("identify")}
+              style={{ ...styles.primaryButton, width: "100%", minHeight: 44, marginTop: 10 }}
+            >
+              Continue to Item Identification
+            </button>
+          </div>
+        ) : null}
+
+        {effectiveScreen === "identify" && !selectedStore ? (
+          <div style={styles.infoBox}>
+            Choose a store first to start identifying items.
+          </div>
+        ) : null}
 
         {!selectedStore ? (
-          <div style={styles.card}>
+          <div style={{ ...styles.card, display: effectiveScreen === "store" ? "block" : "none" }}>
             <div style={styles.sectionTitle}>Choose Your Store</div>
             <p style={{ fontSize: 15, color: '#475569', marginBottom: 16, lineHeight: 1.5 }}>
               Select the store before scanning so item locations stay accurate.
@@ -6437,7 +6591,7 @@ export default function App() {
             {error ? <div style={styles.errorBox}>{error}</div> : null}
           </div>
         ) : (
-          <>
+          <div style={{ display: effectiveScreen === "identify" ? "block" : "none" }}>
             <div style={styles.storeBadgeRow}>
               <div style={styles.storeBadge}>
               Store: {selectedStore.name}
@@ -6831,13 +6985,6 @@ export default function App() {
               </button>
             </div>
           ) : null}
-
-          {activePanel === "location" && (
-            <div style={{ ...styles.sectionBox, marginTop: 12 }}>
-              <div style={styles.sectionTitle}>Add Store Location</div>
-              {renderLocationWizardStep()}
-            </div>
-          )}
 
           {awaitingProductConfirmation ? (
             <div style={{ ...styles.sectionBox, marginTop: 12 }}>
@@ -7611,10 +7758,10 @@ export default function App() {
           )}
         </div>
 
-          </>
+          </div>
         )}
 
-        <div style={styles.rewardsSection}>
+        <div style={{ ...styles.rewardsSection, display: effectiveScreen === "cart" ? "block" : "none" }}>
           <div style={styles.rewardsSectionHeader}>
             Available Rewards
           </div>
@@ -7699,17 +7846,18 @@ export default function App() {
             }}
           >
             <h2 style={{ fontSize: 24, fontWeight: 900, marginBottom: 10 }}>
-              Item saved
+              Item added to cart. What next?
             </h2>
 
             <p style={{ color: "#64748b", fontSize: 16, lineHeight: 1.5, marginBottom: 20 }}>
-              Ready to scan the next product?
+              Choose your next step.
             </p>
 
             <button
               type="button"
               onClick={() => {
                 setShowNextItemPrompt(false);
+                setActiveScreen("identify");
 
                 setProduct(null);
                 setBarcode("");
@@ -7732,7 +7880,7 @@ export default function App() {
                 marginBottom: 12
               }}
             >
-              Scan Next Item
+              Add Next Item
             </button>
 
             <button
@@ -7745,6 +7893,7 @@ export default function App() {
                 setBestKnownLocation(null);
                 resetContributionFlow();
 
+                setActiveScreen("cart");
                 setStatus("Ready");
               }}
               style={{
@@ -7758,13 +7907,13 @@ export default function App() {
                 fontWeight: 800
               }}
             >
-              Done for Now
+              View Cart / Checkout
             </button>
           </div>
         </div>
       )}
 
-      {activePanel === "location" && (
+      {effectiveScreen === "location" && (
         <div
           style={{
             position: "fixed",
