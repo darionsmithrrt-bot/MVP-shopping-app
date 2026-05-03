@@ -864,6 +864,14 @@ export default function App() {
     return cameraLoadPromiseRef.current;
   };
 
+  const withTimeout = (promise, ms, label) =>
+    Promise.race([
+      promise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`${label} timed out`)), ms)
+      ),
+    ]);
+
   const loadOrCreateSupabaseProfile = async (user) => {
     if (!user?.id) return null;
 
@@ -977,13 +985,20 @@ export default function App() {
           setAuthUser(data.user);
           localStorage.removeItem("currentUserProfile");
           setCurrentUserProfile(null);
-          const profile = await loadOrCreateSupabaseProfile(data.user);
-          if (profile) {
-            const normalizedProfile = { ...profile, is_guest: false };
-            setCurrentUserProfile(normalizedProfile);
-            localStorage.setItem("currentUserProfile", JSON.stringify(normalizedProfile));
-          }
-          shouldCloseModal = true;
+          setAuthError("");
+          setActiveScreen("store");
+          setShowLoginModal(false);
+          setLoginForm({ username: "", password: "" });
+          setToast({ message: "Signed in successfully.", type: "success" });
+          setIsSubmittingAuth(false);
+
+          withTimeout(loadOrCreateSupabaseProfile(data.user), 6000, "Profile load")
+            .catch((err) => {
+              console.error("BACKGROUND PROFILE LOAD ERROR:", err);
+              setError("Signed in, but profile took too long to load. Tap Reset App Session if needed.");
+            });
+
+          return;
         } else {
           throw new Error("Unable to authenticate right now.");
         }
@@ -1338,14 +1353,38 @@ export default function App() {
   }, [activeScreen, activePanel]);
 
   useEffect(() => {
+    if (!showLoginModal) return;
+    window.history.pushState({ mvpModal: "login" }, "");
+  }, [showLoginModal]);
+
+  useEffect(() => {
+    if (!showOnboarding) return;
+    window.history.pushState({ mvpModal: "onboarding" }, "");
+  }, [showOnboarding]);
+
+  useEffect(() => {
     if (!currentUserProfile) return;
     window.history.pushState({ mvpInApp: true, screen: activeScreen }, "");
   }, [currentUserProfile, activeScreen]);
 
   useEffect(() => {
-    if (!currentUserProfile) return;
-
     const handlePopState = () => {
+      if (showLoginModal) {
+        setShowLoginModal(false);
+        window.history.pushState({ mvpInApp: true, modal: "closed" }, "");
+        return;
+      }
+
+      if (showOnboarding) {
+        setShowOnboarding(false);
+        window.history.pushState({ mvpInApp: true, modal: "closed" }, "");
+        return;
+      }
+
+      if (!currentUserProfile) {
+        return;
+      }
+
       if (activePanelRef.current === "location") {
         setActivePanel(null);
         window.history.pushState({ mvpInApp: true, screen: activeScreenRef.current }, "");
@@ -1362,7 +1401,7 @@ export default function App() {
     return () => {
       window.removeEventListener("popstate", handlePopState);
     };
-  }, [currentUserProfile]);
+  }, [currentUserProfile, showLoginModal, showOnboarding]);
 
   const storeSearchQuery = manualStoreName.trim().toLowerCase();
   const setStoreSearchQuery = setManualStoreName;
@@ -3828,6 +3867,16 @@ export default function App() {
     }
   };
 
+  const handleBackToHome = async () => {
+    await stopScanner();
+    setActivePanel(null);
+    setShowLoginModal(false);
+    setShowOnboarding(false);
+    setShowItemRequestModal(false);
+    setError("");
+    setActiveScreen("store");
+  };
+
   const handleUpdateProfilePoints = async (earnedPoints) => {
     if (!currentUserProfile || earnedPoints <= 0) return;
 
@@ -5570,6 +5619,17 @@ export default function App() {
                 </button>
 
                 <button
+                  type="button"
+                  style={styles.modalSecondaryButton}
+                  onClick={() => {
+                    setShowLoginModal(false);
+                    setShowOnboarding(false);
+                  }}
+                >
+                  Back
+                </button>
+
+                <button
                   style={styles.modalClose}
                   onClick={() => setShowLoginModal(false)}
                 >
@@ -5667,6 +5727,17 @@ export default function App() {
           )}
 
           <div style={styles.profileHeader}>
+            <button
+              type="button"
+              style={{
+                ...styles.secondaryButton,
+                minHeight: 34,
+                padding: "6px 12px",
+              }}
+              onClick={handleBackToHome}
+            >
+              ← Home
+            </button>
             <span>{currentUserProfile.display_name}</span>
             <span>{currentUserProfile.total_points || 0} pts</span>
             <span>Level 1 Contributor</span>
