@@ -1353,43 +1353,14 @@ export default function App() {
   }, [activeScreen, activePanel]);
 
   useEffect(() => {
-    if (!showLoginModal) return;
-    window.history.pushState({ mvpModal: "login" }, "");
-  }, [showLoginModal]);
-
-  useEffect(() => {
-    if (!showOnboarding) return;
-    window.history.pushState({ mvpModal: "onboarding" }, "");
-  }, [showOnboarding]);
-
-  useEffect(() => {
     if (!currentUserProfile) return;
 
-    try {
-      window.history.replaceState({ mvpRoot: true, screen: "store" }, "");
-      window.history.pushState({ mvpInApp: true, screen: activeScreen || "store" }, "");
-    } catch (_) {}
-  }, [currentUserProfile]);
+    const syncFromHash = () => {
+      const hash = window.location.hash.replace("#", "") || "store";
 
-  useEffect(() => {
-    if (!currentUserProfile) return;
-
-    if (!window.location.hash) {
-      window.history.replaceState(null, "", "#store");
-    }
-
-    const handleHashChange = () => {
-      const hash = window.location.hash.replace("#", "");
-
-      if (activePanelRef.current === "location" && hash !== "location") {
-        setActivePanel(null);
+      if (hash === "location") {
+        setActivePanel("location");
         setActiveScreen("identify");
-        return;
-      }
-
-      if (hash === "store") {
-        setActivePanel(null);
-        setActiveScreen("store");
         return;
       }
 
@@ -1404,10 +1375,23 @@ export default function App() {
         setActiveScreen("cart");
         return;
       }
+
+      setActivePanel(null);
+      setActiveScreen("store");
+
+      if (window.location.hash !== "#store") {
+        window.history.replaceState(null, "", "#store");
+      }
     };
 
-    window.addEventListener("hashchange", handleHashChange);
-    return () => window.removeEventListener("hashchange", handleHashChange);
+    if (!window.location.hash) {
+      window.history.replaceState(null, "", "#store");
+    }
+
+    syncFromHash();
+
+    window.addEventListener("hashchange", syncFromHash);
+    return () => window.removeEventListener("hashchange", syncFromHash);
   }, [currentUserProfile]);
 
   useEffect(() => {
@@ -3894,9 +3878,11 @@ export default function App() {
     setActiveScreen("store");
     setToast({ message: "Back to Home", type: "success" });
 
-    try {
+    if (window.location.hash !== "#store") {
       window.location.hash = "store";
-    } catch (_) {}
+    } else {
+      window.history.replaceState(null, "", "#store");
+    }
 
     stopScanner().catch((err) => {
       console.warn("HOME STOP SCANNER WARNING:", err);
@@ -3907,9 +3893,13 @@ export default function App() {
     setError("");
     setActivePanel(null);
     setActiveScreen(screen);
-    try {
+
+    const nextHash = `#${screen}`;
+    if (window.location.hash !== nextHash) {
       window.location.hash = screen;
-    } catch (_) {}
+    } else {
+      window.history.replaceState(null, "", nextHash);
+    }
   };
 
   const handleUpdateProfilePoints = async (earnedPoints) => {
