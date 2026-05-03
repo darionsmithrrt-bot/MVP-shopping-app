@@ -5456,9 +5456,10 @@ export default function App() {
             style={{
               ...styles.secondaryButton,
               minHeight: 40,
-              background: activeScreen === "store" ? "#dbeafe" : styles.secondaryButton.background,
-              borderColor: activeScreen === "store" ? "#93c5fd" : undefined,
-              color: activeScreen === "store" ? "#1e3a8a" : undefined,
+              background: activeScreen === "store" ? "#dbeafe" : "#f8fafc",
+              border: activeScreen === "store" ? "1px solid #93c5fd" : "1px solid #cbd5e1",
+              color: activeScreen === "store" ? "#1e3a8a" : "#0f172a",
+              fontWeight: 800,
             }}
           >
             Store
@@ -5477,9 +5478,10 @@ export default function App() {
             style={{
               ...styles.secondaryButton,
               minHeight: 40,
-              background: activeScreen === "identify" ? "#dbeafe" : styles.secondaryButton.background,
-              borderColor: activeScreen === "identify" ? "#93c5fd" : undefined,
-              color: activeScreen === "identify" ? "#1e3a8a" : undefined,
+              background: activeScreen === "identify" ? "#dbeafe" : "#f8fafc",
+              border: activeScreen === "identify" ? "1px solid #93c5fd" : "1px solid #cbd5e1",
+              color: activeScreen === "identify" ? "#1e3a8a" : "#0f172a",
+              fontWeight: 800,
             }}
           >
             Identify Item
@@ -5493,9 +5495,10 @@ export default function App() {
             style={{
               ...styles.secondaryButton,
               minHeight: 40,
-              background: activeScreen === "cart" ? "#dbeafe" : styles.secondaryButton.background,
-              borderColor: activeScreen === "cart" ? "#93c5fd" : undefined,
-              color: activeScreen === "cart" ? "#1e3a8a" : undefined,
+              background: activeScreen === "cart" ? "#dbeafe" : "#f8fafc",
+              border: activeScreen === "cart" ? "1px solid #93c5fd" : "1px solid #cbd5e1",
+              color: activeScreen === "cart" ? "#1e3a8a" : "#0f172a",
+              fontWeight: 800,
             }}
           >
             Cart
@@ -6627,10 +6630,10 @@ export default function App() {
                   <div style={styles.overlay}>
                     <div style={styles.overlayIcon}>[ ]</div>
                     <div style={styles.overlayText}>
-                      Ready to scan barcodes
+                      Start with a product photo
                     </div>
                     <div style={styles.overlaySubtext}>
-                      Hold barcode anywhere inside the box. Try good lighting and keep the label flat.
+                      Take or upload clear photos of the front label, size or weight, and shelf price when available. Barcode is optional.
                     </div>
                   </div>
                 )}
@@ -6669,7 +6672,10 @@ export default function App() {
                   <div style={{ ...styles.infoBox, marginTop: 10 }}>
                     Photo-first flow: take or upload a product photo, confirm the AI result, then add location and price.
                   </div>
-                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #e2e8f0" }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 8 }}>
+                      Optional barcode tools
+                    </div>
                     <button
                       onClick={() => {
                         if (awaitingProductConfirmation) {
@@ -6679,23 +6685,34 @@ export default function App() {
                         }
                         startScanner();
                       }}
-                      style={{ ...styles.secondaryButton, minHeight: 46, flex: "0 0 auto", padding: "0 14px" }}
+                      style={{
+                        ...styles.secondaryButton,
+                        minHeight: 44,
+                        width: "100%",
+                        marginBottom: 8,
+                        background: "#f8fafc",
+                        color: "#334155",
+                        border: "1px solid #cbd5e1",
+                        fontWeight: 700,
+                      }}
                     >
                       Add/Scan Barcode (Optional)
                     </button>
-                    <input
-                      type="text"
-                      value={manualBarcode}
-                      onChange={(e) => setManualBarcode(e.target.value)}
-                      placeholder="Optional barcode entry"
-                      style={{ ...styles.input, marginBottom: 0, flex: 1 }}
-                    />
-                    <button
-                      onClick={handleManualBarcodeSubmit}
-                      style={{ ...styles.secondaryButton, minHeight: 46, flex: "0 0 auto", padding: "0 14px" }}
-                    >
-                      Attach
-                    </button>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        type="text"
+                        value={manualBarcode}
+                        onChange={(e) => setManualBarcode(e.target.value)}
+                        placeholder="Optional barcode entry"
+                        style={{ ...styles.input, marginBottom: 0, flex: 1 }}
+                      />
+                      <button
+                        onClick={handleManualBarcodeSubmit}
+                        style={{ ...styles.secondaryButton, minHeight: 44, flex: "0 0 auto", padding: "0 14px" }}
+                      >
+                        Attach
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (
