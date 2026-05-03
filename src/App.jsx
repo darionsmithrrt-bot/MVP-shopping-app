@@ -234,7 +234,7 @@ const formatDetectedUnitLabel = (detectedUnit) => {
 const getPriceSourceMeta = (priceSource) => {
   if (priceSource === "photo_sign") {
     return {
-      icon: "📷",
+      icon: "??",
       label: "Price from shelf photo",
       color: "#166534",
       background: "#dcfce7",
@@ -244,7 +244,7 @@ const getPriceSourceMeta = (priceSource) => {
 
   if (priceSource === "user_corrected") {
     return {
-      icon: "✏️",
+      icon: "??",
       label: "User edited price",
       color: "#92400e",
       background: "#fef3c7",
@@ -345,7 +345,7 @@ const extractDetectedPriceFromAi = (aiPayload, aiResponse) => {
   if (!detectedPrice) return null;
 
   // Guard: if the generic price matches total_price AND raw text has weighted signals,
-  // reject it — the edge function returned total price instead of unit price.
+  // reject it ? the edge function returned total price instead of unit price.
   const knownTotalPrice = normalizeDetectedPriceToNumber(
     aiPayload?.total_price ?? responseData?.total_price ?? responseData?.result?.total_price
   );
@@ -1355,12 +1355,89 @@ export default function App() {
   useEffect(() => {
     if (!currentUserProfile) return;
 
+    const pushState = (screen) => {
+      try {
+        window.history.pushState(
+          { screen, protected: true },
+          "",
+          `#${screen}`
+        );
+      } catch (e) {
+        console.warn("History push failed:", e);
+      }
+    };
+
+    const handlePopState = (event) => {
+      const screen = activeScreenRef.current || "store";
+      const panel = activePanelRef.current;
+
+      console.log("POPSTATE:", { screen, panel, state: event?.state });
+
+      // STEP 1: LOCATION -> IDENTIFY
+      if (panel === "location") {
+        setActivePanel(null);
+        setActiveScreen("identify");
+        pushState("identify");
+        return;
+      }
+
+      // STEP 2: IDENTIFY or CART -> STORE
+      if (screen === "identify" || screen === "cart") {
+        setActivePanel(null);
+        setActiveScreen("store");
+        pushState("store");
+        return;
+      }
+
+      // STEP 3: STORE -> PREVENT EXIT
+      if (screen === "store") {
+        pushState("store");
+        setToast({
+          message: "You are already on Home.",
+          type: "info",
+        });
+        return;
+      }
+
+      // FAILSAFE
+      setActivePanel(null);
+      setActiveScreen("store");
+      pushState("store");
+    };
+
+    // INITIAL HISTORY LOCK (prevents exit on first back press)
+    try {
+      window.history.replaceState(
+        { screen: activeScreenRef.current || "store", protected: true },
+        "",
+        window.location.hash || "#store"
+      );
+
+      window.history.pushState(
+        { screen: activeScreenRef.current || "store", protected: true },
+        "",
+        window.location.hash || "#store"
+      );
+    } catch (e) {
+      console.warn("Initial history setup failed:", e);
+    }
+
+    window.addEventListener("popstate", handlePopState);
+
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, [currentUserProfile]);
+
+  useEffect(() => {
+    if (!currentUserProfile) return;
+
     const syncFromHash = () => {
       const hash = window.location.hash.replace("#", "") || "store";
 
       if (hash === "location") {
-        setActivePanel("location");
         setActiveScreen("identify");
+        setActivePanel("location");
         return;
       }
 
@@ -2186,7 +2263,7 @@ export default function App() {
               const addResult = handleAddToShoppingList(knownProduct, knownLocation);
 
               if (!knownLocation && !addResult?.updated) {
-                setActivePanel("location");
+                setAppScreen("location");
                 setLocationPanelMode("quick");
                 setLocationStep("aisle");
               }
@@ -2389,7 +2466,7 @@ export default function App() {
       const images = await Promise.all(files.map(readFileAsDataURL));
       console.info("Prepared image payloads for analysis", { imageCount: images.length });
 
-      // â”€â”€ Upload all captured photos â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // -- Upload all captured photos ------------------------------------------
       const uploadedUrls = [];
 
       for (let i = 0; i < files.length; i++) {
@@ -2421,7 +2498,7 @@ export default function App() {
 
       const firstImageUrl = uploadedUrls[0];
 
-      // â”€â”€ Save initial product record using first photo URL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // -- Save initial product record using first photo URL -------------------
       setStatus("Saving initial product to database...");
 
       let savedRow = null;
@@ -2450,7 +2527,7 @@ export default function App() {
 
       if (saveError) throw new Error(`Database save failed: ${saveError.message}`);
 
-      // â”€â”€ Call AI with all uploaded URLs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // -- Call AI with all uploaded URLs --------------------------------------
       setPhotoAnalysisStatus('analyzing');
       setStatus(`Analyzing ${uploadedUrls.length} photo${uploadedUrls.length > 1 ? "s" : ""} with AI...`);
 
@@ -2819,7 +2896,7 @@ export default function App() {
       setAiDetectedPriceEdited(false);
 
       setProduct(finalProduct);
-      setActivePanel("location");
+      setAppScreen("location");
       setLocationPanelMode("quick");
       setLocationStep("aisle");
       setLocationSaved(false);
@@ -3074,9 +3151,9 @@ export default function App() {
       // TODO: Future Google Maps directions hook.
 
       setStatus(
-        `Location confirmed and added to your cart memory • ${strongConfirmationCount} ${
+        `Location confirmed and added to your cart memory ? ${strongConfirmationCount} ${
           strongConfirmationCount === 1 ? "confirmation" : "confirmations"
-        } • confidence ${confidenceScore}%`
+        } ? confidence ${confidenceScore}%`
       );
       setToast({ message: 'Location confirmed and added to cart memory!', type: 'success' });
     } catch (err) {
@@ -3226,7 +3303,7 @@ export default function App() {
     setError("");
 
     const guideToPriceConfirmation = () => {
-      setActivePanel("location");
+      setAppScreen("location");
       setLocationStep("price");
 
       setTimeout(() => {
@@ -3865,24 +3942,54 @@ export default function App() {
     }
   };
 
-  const handleBackToHome = () => {
+  const setAppScreen = (screen, options = {}) => {
+    const { replace = false } = options;
+
+    setError("");
+
+    if (screen === "location") {
+      setActiveScreen("identify");
+      setActivePanel("location");
+    } else {
+      setActivePanel(null);
+      setActiveScreen(screen);
+    }
+
+    const hash = `#${screen}`;
+
+    try {
+      if (replace) {
+        window.history.replaceState({ mvpScreen: screen }, "", hash);
+      } else {
+        window.history.pushState({ mvpScreen: screen }, "", hash);
+      }
+    } catch (err) {
+      console.warn("NAVIGATION STATE WARNING:", err);
+    }
+  };
+
+  const handleBackToHome = (event) => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+
     console.log("HOME BUTTON CLICKED");
 
-    setActivePanel(null);
     setShowLoginModal(false);
     setShowOnboarding(false);
     setShowItemRequestModal(false);
     setShowNextItemPrompt(false);
+    setShoppingMode(false);
+    setActiveAisleView(null);
+    setActivePanel(null);
+    setActiveScreen("store");
+    try {
+      window.history.replaceState({ mvpScreen: "store" }, "", "#store");
+    } catch (err) {
+      console.warn("HOME HASH RESET WARNING:", err);
+    }
     setError("");
     setStatus("Ready");
-    setActiveScreen("store");
     setToast({ message: "Back to Home", type: "success" });
-
-    if (window.location.hash !== "#store") {
-      window.location.hash = "store";
-    } else {
-      window.history.replaceState(null, "", "#store");
-    }
 
     stopScanner().catch((err) => {
       console.warn("HOME STOP SCANNER WARNING:", err);
@@ -3890,16 +3997,13 @@ export default function App() {
   };
 
   const navigateToScreen = (screen) => {
-    setError("");
-    setActivePanel(null);
-    setActiveScreen(screen);
-
-    const nextHash = `#${screen}`;
-    if (window.location.hash !== nextHash) {
-      window.location.hash = screen;
-    } else {
-      window.history.replaceState(null, "", nextHash);
+    if (screen === "identify" && !selectedStore) {
+      setError("Select a store first.");
+      setAppScreen("store");
+      return;
     }
+
+    setAppScreen(screen);
   };
 
   const handleUpdateProfilePoints = async (earnedPoints) => {
@@ -4159,7 +4263,7 @@ export default function App() {
       : "";
 
     setError("");
-    setActivePanel("location");
+    setAppScreen("location");
     setLocationPanelMode("quick");
     setLocationStep("aisle");
     setShowAiSummaryCard(false);
@@ -4213,7 +4317,7 @@ export default function App() {
 
     setBarcode(item.barcode || "");
     setError("");
-    setActivePanel("location");
+    setAppScreen("location");
     setLocationPanelMode("quick");
     setLocationStep("aisle");
     setShowAiSummaryCard(false);
@@ -4381,7 +4485,7 @@ export default function App() {
     setShowAiSummaryCard(false);
     setError("");
 
-    setActivePanel("location");
+    setAppScreen("location");
     setLocationPanelMode("quick");
     setLocationStep("aisle");
     setLocationSaved(false);
@@ -4415,7 +4519,7 @@ export default function App() {
     setShowAiSummaryCard(false);
     setError("");
 
-    setActivePanel("location");
+    setAppScreen("location");
     setLocationPanelMode("quick");
     setLocationStep("aisle");
     setLocationSaved(false);
@@ -4489,7 +4593,7 @@ export default function App() {
     if (priceType === "per_oz") return price * 16;
     if (priceType === "per_kg") return price / 2.20462;
 
-    // price_type = "each" — try to normalize by size
+    // price_type = "each" ? try to normalize by size
     if (!Number.isNaN(sizeValue) && sizeValue > 0) {
       if (sizeUnit === "oz") return price / sizeValue;
       if (sizeUnit === "lb") return price / sizeValue;
@@ -4672,7 +4776,7 @@ export default function App() {
       const addResult = handleAddToShoppingList(knownProduct, knownLocation);
 
       if (!knownLocation && !addResult?.updated) {
-        setActivePanel("location");
+        setAppScreen("location");
         setLocationPanelMode("quick");
         setLocationStep("aisle");
       }
@@ -4690,7 +4794,7 @@ export default function App() {
     if (!product || locationSaved) return;
 
     setError("");
-    setActivePanel("location");
+    setAppScreen("location");
     setLocationPanelMode("quick");
     setLocationStep("aisle");
   };
@@ -4893,7 +4997,7 @@ export default function App() {
             </div>
           )}
 
-          {/* â”€â”€ Size / Quantity â”€â”€ */}
+          {/* -- Size / Quantity -- */}
           <label style={styles.label}>Product Size / Quantity</label>
           <input
             style={{
@@ -4948,7 +5052,7 @@ export default function App() {
             {sizeIndicator.text}
           </div>
 
-          {/* â”€â”€ Egg package sizes â”€â”€ */}
+          {/* -- Egg package sizes -- */}
           {shouldShowEggQuantities && (
             <>
               <label style={styles.label}>Egg Package Size</label>
@@ -5027,10 +5131,10 @@ export default function App() {
             {quantityIndicator.text}
           </div>
 
-          {/* â”€â”€ Price confirmation card â”€â”€ */}
+          {/* -- Price confirmation card -- */}
           <label style={styles.label}>Price</label>
 
-          {/* Source badge — always visible */}
+          {/* Source badge ? always visible */}
           <div
             style={{
               ...styles.priceSourceBadge,
@@ -5046,7 +5150,7 @@ export default function App() {
             ) : null}
           </div>
 
-          {/* AI price card — shown when AI detected a price and user hasn't confirmed yet */}
+          {/* AI price card ? shown when AI detected a price and user hasn't confirmed yet */}
           {aiDetectedPrice && !priceConfirmed ? (
             <div ref={priceConfirmationCardRef} style={styles.aiPriceConfirmationCard}>
               <div style={styles.aiPriceConfirmationTitle}>
@@ -5103,7 +5207,7 @@ export default function App() {
             </div>
           ) : null}
 
-          {/* Green confirmation bar — shown after price is confirmed */}
+          {/* Green confirmation bar ? shown after price is confirmed */}
           {priceConfirmed && locationForm.price ? (
             <div style={styles.aiPriceConfirmedBar}>
               Confirmed price: ${formatCentsToDollars(locationForm.price)}
@@ -5111,7 +5215,7 @@ export default function App() {
             </div>
           ) : null}
 
-          {/* Price input — always visible; disabled when AI price exists and not yet editing */}
+          {/* Price input ? always visible; disabled when AI price exists and not yet editing */}
           <input
             ref={priceInputRef}
             style={{
@@ -5172,7 +5276,7 @@ export default function App() {
             ))}
           </div>
 
-          {/* Manual confirm button — shown when no AI price, or after editing */}
+          {/* Manual confirm button ? shown when no AI price, or after editing */}
           {(!aiDetectedPrice || isEditingDetectedPrice) && !priceConfirmed ? (
             <button
               type="button"
@@ -5234,14 +5338,14 @@ export default function App() {
         <div style={styles.reviewBox}>
           <div><strong>Product:</strong> {product?.name || "Unknown product"}</div>
           <div><strong>Store:</strong> {selectedStore?.name || "No store selected"}</div>
-          <div><strong>Aisle / Area:</strong> {locationForm.aisle || "—"}</div>
-          <div><strong>Section:</strong> {locationForm.section || "—"}</div>
-          <div><strong>Shelf:</strong> {locationForm.shelf || "—"}</div>
-          <div><strong>Size:</strong> {locationForm.size_value || "—"} {locationForm.size_unit || ""}</div>
-          <div><strong>Package Size:</strong> {locationForm.quantity || "—"}</div>
+          <div><strong>Aisle / Area:</strong> {locationForm.aisle || "?"}</div>
+          <div><strong>Section:</strong> {locationForm.section || "?"}</div>
+          <div><strong>Shelf:</strong> {locationForm.shelf || "?"}</div>
+          <div><strong>Size:</strong> {locationForm.size_value || "?"} {locationForm.size_unit || ""}</div>
+          <div><strong>Package Size:</strong> {locationForm.quantity || "?"}</div>
           <div><strong>Price:</strong> ${formatCentsToDollars(locationForm.price)} {formatPriceType(locationForm.price_type)}</div>
           {locationForm.price_source === "missing" ? (
-            <div><strong>Price note:</strong> Price skipped — add later</div>
+            <div><strong>Price note:</strong> Price skipped ? add later</div>
           ) : null}
         </div>
 
@@ -5379,7 +5483,7 @@ export default function App() {
               style={styles.loginIconButton}
               onClick={() => setShowLoginModal(true)}
             >
-              👤
+              ??
             </button>
           </div>
 
@@ -5403,7 +5507,7 @@ export default function App() {
           </button>
 
           <div style={styles.introCommunityCard}>
-            <div style={styles.introCommunityTitle}>🔎 Can’t find an item?</div>
+            <div style={styles.introCommunityTitle}>?? Can?t find an item?</div>
 
             <button
               style={styles.introCommunityButton}
@@ -5428,7 +5532,7 @@ export default function App() {
             </button>
 
             <p style={styles.introCommunityText}>
-              Tell the community what you’re looking for. If another shopper sees it, they can submit the aisle, shelf, price, or store location.
+              Tell the community what you?re looking for. If another shopper sees it, they can submit the aisle, shelf, price, or store location.
             </p>
           </div>
 
@@ -5658,7 +5762,7 @@ export default function App() {
                   style={styles.modalClose}
                   onClick={() => setShowLoginModal(false)}
                 >
-                  ✕
+                  ?
                 </button>
               </div>
             </div>
@@ -5761,7 +5865,7 @@ export default function App() {
               }}
               onClick={handleBackToHome}
             >
-              ← Home
+              ? Home
             </button>
             <span>{currentUserProfile.display_name}</span>
             <span>{currentUserProfile.total_points || 0} pts</span>
@@ -5933,7 +6037,7 @@ export default function App() {
                             e.stopPropagation();
                             console.log("ADD LOCATION BUTTON CLICKED");
                             setError("");
-                            setActivePanel("location");
+                            setAppScreen("location");
                             setLocationPanelMode("quick");
                             setLocationStep("aisle");
 
@@ -6016,7 +6120,7 @@ export default function App() {
                               fontSize: 11,
                               fontWeight: 800,
                             }}>
-                              {group.aisleConfidence}% • {aisleBadge.label}
+                              {group.aisleConfidence}% ? {aisleBadge.label}
                             </div>
                           </div>
                           <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>
@@ -6050,7 +6154,7 @@ export default function App() {
                                   ) : null}
                                   {(smartItem.section || smartItem.shelf) ? (
                                     <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3 }}>
-                                      {[smartItem.section && `Section: ${smartItem.section}`, smartItem.shelf && `Shelf: ${smartItem.shelf}`].filter(Boolean).join(" · ")}
+                                      {[smartItem.section && `Section: ${smartItem.section}`, smartItem.shelf && `Shelf: ${smartItem.shelf}`].filter(Boolean).join(" ? ")}
                                     </div>
                                   ) : null}
                                   {smartItem.price ? (
@@ -6069,7 +6173,7 @@ export default function App() {
                                       fontWeight: 800,
                                       display: "inline-block",
                                     }}>
-                                      {score}% • {itemBadge.label}
+                                      {score}% ? {itemBadge.label}
                                     </div>
                                     <div style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>{confidenceText}</div>
                                     {isTrustedContributor ? (
@@ -6125,7 +6229,7 @@ export default function App() {
                                           price_source: "",
                                           detected_price_unit: "unknown",
                                         });
-                                        setActivePanel("location");
+                                        setAppScreen("location");
                                         setLocationPanelMode("quick");
                                         setLocationStep("aisle");
                                         setStatus("Update this item location");
@@ -6198,7 +6302,7 @@ export default function App() {
                               fontSize: 11,
                               fontWeight: 800,
                             }}>
-                              {group.aisleConfidence}% • {aisleBadge.label}
+                              {group.aisleConfidence}% ? {aisleBadge.label}
                             </div>
                           </div>
                           <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>
@@ -6234,7 +6338,7 @@ export default function App() {
                                   ) : null}
                                   {(smartItem.section || smartItem.shelf) ? (
                                     <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3 }}>
-                                      {[smartItem.section && `Section: ${smartItem.section}`, smartItem.shelf && `Shelf: ${smartItem.shelf}`].filter(Boolean).join(" · ")}
+                                      {[smartItem.section && `Section: ${smartItem.section}`, smartItem.shelf && `Shelf: ${smartItem.shelf}`].filter(Boolean).join(" ? ")}
                                     </div>
                                   ) : null}
                                   {smartItem.price ? (
@@ -6253,7 +6357,7 @@ export default function App() {
                                       fontWeight: 800,
                                       display: "inline-block",
                                     }}>
-                                      {score}% • {itemBadge.label}
+                                      {score}% ? {itemBadge.label}
                                     </div>
                                     <div style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>{confidenceText}</div>
                                     {isTrustedContributor ? (
@@ -6309,7 +6413,7 @@ export default function App() {
                                           price_source: "",
                                           detected_price_unit: "unknown",
                                         });
-                                        setActivePanel("location");
+                                        setAppScreen("location");
                                         setLocationPanelMode("quick");
                                         setLocationStep("aisle");
                                         setStatus("Update this item location");
@@ -6430,24 +6534,24 @@ export default function App() {
                   <div style={styles.rewardDescription}>
                     {item.brand || "Unknown brand"}
                     {item.size_value || item.size_unit
-                      ? ` • ${item.size_value || ""}${item.size_unit ? ` ${item.size_unit}` : ""}`
+                      ? ` ? ${item.size_value || ""}${item.size_unit ? ` ${item.size_unit}` : ""}`
                       : ""}
-                    {item.quantity ? ` • qty ${item.quantity}` : ""}
+                    {item.quantity ? ` ? qty ${item.quantity}` : ""}
                     {itemPrice != null
-                      ? ` • $${Number(itemPrice).toFixed(2)} ${priceTypeLabel}`
+                      ? ` ? $${Number(itemPrice).toFixed(2)} ${priceTypeLabel}`
                       : item.price_source === "missing"
-                        ? " • Price not added yet"
+                        ? " ? Price not added yet"
                         : ""}
-                    {item.notes ? ` • note: ${item.notes}` : ""}
+                    {item.notes ? ` ? note: ${item.notes}` : ""}
                   </div>
 
                   <div style={{ ...styles.rewardDescription, marginTop: -2 }}>
                     Confidence: {Number(smartItem.confidence_score || 0)}%
-                    {smartItem.needsContribution ? " • Needs contribution" : " • Known location"}
+                    {smartItem.needsContribution ? " ? Needs contribution" : " ? Known location"}
                   </div>
 
                   <div style={{ ...styles.rewardDescription, marginTop: -2 }}>
-                    {item.price_badge_source === "manual" ? "🟡 User edited" : "🟢 AI detected"}
+                    {item.price_badge_source === "manual" ? "?? User edited" : "?? AI detected"}
                   </div>
 
                   {isEditing && cartEditForm ? (
@@ -6701,17 +6805,17 @@ export default function App() {
                     Cart Coverage: {cartComparison[0].coverage}%
                   </div>
                   <div style={styles.rewardDescription}>
-                    Brand Match: {cartComparison[0].brand_match_pct ?? "—"}%
+                    Brand Match: {cartComparison[0].brand_match_pct ?? "?"}%
                   </div>
                   <div style={styles.rewardDescription}>
-                    Price Confidence: {cartComparison[0].avg_confidence ?? "—"}%
+                    Price Confidence: {cartComparison[0].avg_confidence ?? "?"}%
                   </div>
                   <div style={styles.rewardDescription}>
                     Brand mode: {brandComparisonMode === "brand_match" ? "Exact brand preferred" : "Flexible"}
                   </div>
                   {cartComparison[0].is_estimate ? (
                     <div style={{ fontSize: 12, color: "#92400e", background: "#fef3c7", borderRadius: 8, padding: "4px 8px", marginTop: 6 }}>
-                      Comparison estimate — more scans improve accuracy.
+                      Comparison estimate ? more scans improve accuracy.
                     </div>
                   ) : null}
                 </div>
@@ -6724,7 +6828,7 @@ export default function App() {
                         key={`${result.store_id || "store-alt"}-${index}`}
                         style={{ ...styles.rewardDescription, marginBottom: 6 }}
                       >
-                        {`${index + 2}. ${result.store?.name || "Unknown store"} — $${Number(result.total_price || 0).toFixed(2)} • ${result.coverage}% coverage • ${result.brand_match_pct ?? "—"}% brand match`}
+                        {`${index + 2}. ${result.store?.name || "Unknown store"} ? $${Number(result.total_price || 0).toFixed(2)} ? ${result.coverage}% coverage ? ${result.brand_match_pct ?? "?"}% brand match`}
                       </div>
                     ))}
                   </div>
@@ -6876,7 +6980,7 @@ export default function App() {
                   handleStoreSearch(value);
                 }, 500);
               }}
-              placeholder="e.g. Target, Walmart, Safeway…"
+              placeholder="e.g. Target, Walmart, Safeway?"
               style={{ ...styles.input, marginBottom: 12 }}
             />
 
@@ -6925,13 +7029,13 @@ export default function App() {
                     onClick={handleCreateManualStore}
                     style={{ ...styles.storeOptionButton, borderStyle: 'dashed', color: '#2563eb' }}
                   >
-                    <span style={{ fontWeight: 700 }}>âž• Use "{manualStoreName.trim()}" as my store</span>
+                    <span style={{ fontWeight: 700 }}>? Use "{manualStoreName.trim()}" as my store</span>
                   </button>
                 )}
 
                 {storeSearchQuery && filteredStores.length === 0 && (
                   <div style={{ fontSize: 14, color: '#94a3b8', marginTop: 4 }}>
-                    No matching stores found. Tap “Find Nearby Stores” or use the option above to add it manually.
+                    No matching stores found. Tap ?Find Nearby Stores? or use the option above to add it manually.
                   </div>
                 )}
               </div>
@@ -7001,7 +7105,7 @@ export default function App() {
                     textAlign: "center",
                     padding: 20
                   }}>
-                    <div style={{ fontSize: 48, marginBottom: 12 }}>📸</div>
+                    <div style={{ fontSize: 48, marginBottom: 12 }}>??</div>
                     <div style={{ fontSize: 22, fontWeight: 800, color: "#fff", marginBottom: 8 }}>
                       Photo Required
                     </div>
@@ -7076,7 +7180,7 @@ export default function App() {
 
           {awaitingPhoto && (
             <div style={styles.photoPromptBox}>
-              {/* â”€â”€ Header â”€â”€ */}
+              {/* -- Header -- */}
               <div style={{
                 ...styles.infoBox,
                 border: "2px solid #f59e0b",
@@ -7093,9 +7197,9 @@ export default function App() {
               {capturedPhotos.length < MAX_PHOTOS && (() => {
                 const nextRole = PHOTO_ROLE_SEQUENCE[capturedPhotos.length];
                 const roleInstructions = [
-                  "Point camera at the product front label — ensure name and brand are clearly visible.",
-                  "Point camera at the net weight or size label — usually found on the side or back.",
-                  "Point camera at the shelf price tag — include the unit price if visible.",
+                  "Point camera at the product front label ? ensure name and brand are clearly visible.",
+                  "Point camera at the net weight or size label ? usually found on the side or back.",
+                  "Point camera at the shelf price tag ? include the unit price if visible.",
                 ];
                 return (
                   <div style={{
@@ -7118,16 +7222,16 @@ export default function App() {
                 );
               })()}
 
-              {/* â”€â”€ Photo count progress â”€â”€ */}
+              {/* -- Photo count progress -- */}
               <div style={{ fontSize: 14, color: "#475569", marginBottom: 12, fontWeight: 600 }}>
                 {capturedPhotos.length === 0
                   ? "Take up to 3 photos: front label, size/weight label, price sign"
                   : capturedPhotos.length < MAX_PHOTOS
-                  ? `${capturedPhotos.length} of ${MAX_PHOTOS} photos captured — keep going!`
+                  ? `${capturedPhotos.length} of ${MAX_PHOTOS} photos captured ? keep going!`
                   : `All ${MAX_PHOTOS} photos captured`}
               </div>
 
-              {/* â”€â”€ Captured photo thumbnails with remove buttons â”€â”€ */}
+              {/* -- Captured photo thumbnails with remove buttons -- */}
               {capturedPhotos.length > 0 && (
                 <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
                   {capturedPhotos.map((p, i) => (
@@ -7171,7 +7275,7 @@ export default function App() {
                           padding: 0,
                         }}
                       >
-                        ×
+                        ?
                       </button>
                       <div style={{ position: "absolute", bottom: 2, left: 2, fontSize: 10, color: "#fff", background: "rgba(0,0,0,0.55)", borderRadius: 4, padding: "1px 4px" }}>
                         {`#${i + 1}`}
@@ -7184,7 +7288,7 @@ export default function App() {
                 </div>
               )}
 
-              {/* â”€â”€ Analyze button (shown after â‰¥1 photo) â”€â”€ */}
+              {/* -- Analyze button (shown after =1 photo) -- */}
               {capturedPhotos.length > 0 && (
                 <button
                   onClick={() => analyzeAllPhotos(selectedFiles)}
@@ -7199,7 +7303,7 @@ export default function App() {
                 </button>
               )}
 
-              {/* â”€â”€ Capture / Upload controls (shown when < MAX_PHOTOS) â”€â”€ */}
+              {/* -- Capture / Upload controls (shown when < MAX_PHOTOS) -- */}
               {capturedPhotos.length < MAX_PHOTOS && (
                 <>
                   <button
@@ -7241,7 +7345,7 @@ export default function App() {
               )}
 
               <div style={styles.photoHelpText}>
-                Suggested: Photo 1 = front label, Photo 2 = net weight/size, Photo 3 = price sign. Barcode is optional — add it after AI identifies the product.
+                Suggested: Photo 1 = front label, Photo 2 = net weight/size, Photo 3 = price sign. Barcode is optional ? add it after AI identifies the product.
               </div>
             </div>
           )}
@@ -7344,7 +7448,7 @@ export default function App() {
                 type="button"
                 style={{ ...styles.primaryButton, width: "100%" }}
                 onClick={() => {
-                  setActivePanel("location");
+                  setAppScreen("location");
                   setLocationPanelMode("quick");
                   setLocationStep("aisle");
                 }}
@@ -7430,7 +7534,7 @@ export default function App() {
                           type="button"
                           style={{ ...styles.primaryButton, width: "100%", marginTop: 8 }}
                           onClick={() => {
-                            setActivePanel("location");
+                            setAppScreen("location");
                             setLocationPanelMode("quick");
                             setLocationStep("aisle");
                           }}
@@ -7500,7 +7604,7 @@ export default function App() {
                           type="button"
                           style={{ ...styles.primaryButton, width: "100%", marginTop: 8, fontWeight: 800 }}
                           onClick={() => {
-                            setActivePanel("location");
+                            setAppScreen("location");
                             setLocationPanelMode("quick");
                             setLocationStep("aisle");
                             setStatus("Add item location.");
@@ -7527,7 +7631,7 @@ export default function App() {
                 type="button"
                 style={{ ...styles.primaryButton, width: "100%", marginTop: 0, marginBottom: 12, fontWeight: 800 }}
                 onClick={() => {
-                  setActivePanel("location");
+                  setAppScreen("location");
                   setLocationPanelMode("quick");
                   setLocationStep("aisle");
                 }}
@@ -7889,13 +7993,13 @@ export default function App() {
                 <div style={{ fontSize: 12, color: "#1e40af", marginBottom: 8 }}>
                   Price source: {locationForm.price_source}
                   {locationForm.detected_price_unit && locationForm.detected_price_unit !== "unknown"
-                    ? ` • unit: ${locationForm.detected_price_unit}`
+                    ? ` ? unit: ${locationForm.detected_price_unit}`
                     : ""}
                 </div>
               ) : null}
 
               {locationForm.price_source === "missing" ? (
-                <div style={styles.inlineWarning}>Price skipped — add later</div>
+                <div style={styles.inlineWarning}>Price skipped ? add later</div>
               ) : null}
 
               {!priceConfirmed && locationForm.price ? (
@@ -7976,7 +8080,7 @@ export default function App() {
                 onClick={() => {
                   setAwaitingProductConfirmation(false);
                   setShowAiSummaryCard(false);
-                  setActivePanel("location");
+                  setAppScreen("location");
                   setLocationPanelMode("quick");
                   setLocationStep("aisle");
                   setStatus("Add this item location in the store.");
@@ -8047,9 +8151,9 @@ export default function App() {
                           ${Number(bestKnownLocation.price).toFixed(2)} {formatPriceType(bestKnownLocation.price_type)}
                         </div>
                         <div style={{ fontSize: 14, color: "#475569", lineHeight: 1.5, marginBottom: 10 }}>
-                          • {Number(bestKnownLocation.price_count || 0)} {Number(bestKnownLocation.price_count || 0) === 1 ? "confirmation" : "confirmations"}
+                          ? {Number(bestKnownLocation.price_count || 0)} {Number(bestKnownLocation.price_count || 0) === 1 ? "confirmation" : "confirmations"}
                           <br />
-                          • {Number(bestKnownLocation.price_confidence || 0)}% confidence
+                          ? {Number(bestKnownLocation.price_confidence || 0)}% confidence
                         </div>
                         <button
                           type="button"
@@ -8062,7 +8166,7 @@ export default function App() {
                   })()
                 ) : (
                   <div style={{ fontSize: 14, color: "#64748b" }}>
-                    No price data yet — be the first to add
+                    No price data yet ? be the first to add
                   </div>
                 )}
               </div>
@@ -8070,15 +8174,15 @@ export default function App() {
               <div style={styles.locationDetailsGrid}>
                 <div style={styles.locationDetail}>
                   <div style={styles.locationDetailLabel}>Aisle</div>
-                  <div style={styles.locationDetailValue}>{bestKnownLocation.aisle || "—"}</div>
+                  <div style={styles.locationDetailValue}>{bestKnownLocation.aisle || "?"}</div>
                 </div>
                 <div style={styles.locationDetail}>
                   <div style={styles.locationDetailLabel}>Section</div>
-                  <div style={styles.locationDetailValue}>{bestKnownLocation.section || "—"}</div>
+                  <div style={styles.locationDetailValue}>{bestKnownLocation.section || "?"}</div>
                 </div>
                 <div style={styles.locationDetail}>
                   <div style={styles.locationDetailLabel}>Shelf</div>
-                  <div style={styles.locationDetailValue}>{bestKnownLocation.shelf || "—"}</div>
+                  <div style={styles.locationDetailValue}>{bestKnownLocation.shelf || "?"}</div>
                 </div>
               </div>
 
@@ -9944,6 +10048,7 @@ const styles = {
     marginBottom: 10,
   },
 };
+
 
 
 
