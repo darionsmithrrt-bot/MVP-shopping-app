@@ -54,6 +54,12 @@ const PRODUCT_KEYWORD_MAP = {
     { product_name: "Whole Wheat Bread", brand: "Dave's Killer Bread", category: "bread" },
     { product_name: "Sourdough Bread", brand: "Boudin", category: "bread" },
   ],
+  dove: [
+    { product_name: "Dove Body Wash", brand: "Dove", category: "personal care" },
+    { product_name: "Dove Sensitive Skin Body Wash", brand: "Dove", category: "personal care" },
+    { product_name: "Dove Bar Soap", brand: "Dove", category: "personal care" },
+    { product_name: "Dove Deodorant", brand: "Dove", category: "personal care" },
+  ],
 };
 const LOCAL_ITEM_REQUEST_PATTERNS = {
   dove: [
@@ -92,23 +98,59 @@ const toTitleCase = (value) =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
     .join(" ");
 
+const normalizeSuggestionRow = (row) => ({
+  product_name: String(row?.product_name || "").trim(),
+  brand: String(row?.brand || "").trim(),
+});
+
+const dedupeSuggestions = (suggestions) => {
+  const seen = new Set();
+  const unique = [];
+
+  for (const suggestion of suggestions || []) {
+    const normalized = normalizeSuggestionRow(suggestion);
+    if (!normalized.product_name) continue;
+    const key = `${normalized.product_name.toLowerCase()}|${normalized.brand.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(normalized);
+  }
+
+  return unique;
+};
+
 const getLocalItemRequestSuggestions = (term) => {
   const query = String(term || "").trim().toLowerCase();
   if (!query) return [];
 
+  const keywordMatches = [];
+
+  for (const [key, suggestions] of Object.entries(PRODUCT_KEYWORD_MAP)) {
+    if (query.includes(key)) {
+      keywordMatches.push(...suggestions.map((s) => ({
+        product_name: s.product_name,
+        brand: s.brand || "",
+      })));
+    }
+  }
+
   for (const [key, suggestions] of Object.entries(LOCAL_ITEM_REQUEST_PATTERNS)) {
     if (query.includes(key)) {
-      return suggestions;
+      keywordMatches.push(...suggestions);
     }
+  }
+
+  if (keywordMatches.length > 0) {
+    return dedupeSuggestions(keywordMatches).slice(0, 10);
   }
 
   const titled = toTitleCase(query);
   if (!titled) return [];
-  return [
+  return dedupeSuggestions([
     { product_name: titled, brand: "" },
     { product_name: `${titled} Family Size`, brand: "" },
     { product_name: `${titled} Organic`, brand: "" },
-  ];
+  ]).slice(0, 10);
 };
 
 const getRoleByPhotoIndex = (index) => {
@@ -581,6 +623,7 @@ export default function App() {
   const priceInputRef = useRef(null);
   const priceConfirmationCardRef = useRef(null);
   const aisleInputRef = useRef(null);
+  const fileInputRef = useRef(null);
   const activeScreenRef = useRef("store");
   const activePanelRef = useRef(null);
   const cameraLoadPromiseRef = useRef(null);
@@ -594,6 +637,7 @@ export default function App() {
   const [manualBarcode, setManualBarcode] = useState("");
   const [awaitingPhoto, setAwaitingPhoto] = useState(false);
   const [isCapturingPhoto, setIsCapturingPhoto] = useState(false);
+  const [cameraDebug, setCameraDebug] = useState({});
 
   // ============================================================================
   // STATE - Barcode & Status
@@ -820,7 +864,7 @@ export default function App() {
     setIsAuthLoading(false);
     setIsCheckingProfile(false);
     setShowLoginModal(false);
-    setActiveScreen("store");
+    setAppScreen("store");
     setError("");
     setStatus("Ready");
   };
@@ -986,7 +1030,7 @@ export default function App() {
           localStorage.removeItem("currentUserProfile");
           setCurrentUserProfile(null);
           setAuthError("");
-          setActiveScreen("store");
+          setAppScreen("store");
           setShowLoginModal(false);
           setLoginForm({ username: "", password: "" });
           setToast({ message: "Signed in successfully.", type: "success" });
@@ -1006,7 +1050,7 @@ export default function App() {
 
       if (shouldCloseModal) {
         setAuthError("");
-        setActiveScreen("store");
+        setAppScreen("store");
         setShowLoginModal(false);
         setLoginForm({ username: "", password: "" });
         setToast({
@@ -1244,50 +1288,66 @@ export default function App() {
 
     const timeoutId = setTimeout(async () => {
       try {
-        const { data, error: catalogError } = await supabase
-          .from("catalog_products")
-          .select("product_name, brand")
-          .ilike("product_name", `%${term}%`)
-          .limit(6);
+        const safeTerm = term.replace(/,/g, " ").trim();
+        const wildcardTerm = `%${safeTerm}%`;
 
-        if (catalogError) throw catalogError;
+        let catalogRows = [];
+        try {
+          const { data, error: catalogError } = await supabase
+            .from("catalog_products")
+            .select("product_name, brand")
+            .or(`product_name.ilike.%${safeTerm}%,brand.ilike.%${safeTerm}%`)
+            .limit(8);
 
-        const dbSuggestions = (data || [])
-          .map((row) => ({
-            product_name: String(row.product_name || "").trim(),
-            brand: String(row.brand || "").trim(),
-          }))
-          .filter((row) => row.product_name);
+          if (catalogError) throw catalogError;
+          catalogRows = data || [];
+        } catch (catalogSearchErr) {
+          console.warn("ITEM REQUEST CATALOG LOOKUP FALLBACK:", catalogSearchErr);
+          const { data, error: fallbackCatalogError } = await supabase
+            .from("catalog_products")
+            .select("product_name, brand")
+            .ilike("product_name", wildcardTerm)
+            .limit(8);
 
-        if (dbSuggestions.length > 0) {
-          setItemRequestSuggestions(dbSuggestions);
-          return;
+          if (fallbackCatalogError) throw fallbackCatalogError;
+          catalogRows = data || [];
         }
 
-        const { data: seedData, error: seedError } = await supabase
-          .from("seed_products")
-          .select("product_name, brand")
-          .ilike("category", `%${term}%`)
-          .or(`product_name.ilike.%${term}%`)
-          .limit(6);
+        let seedRows = [];
+        try {
+          const { data, error: seedError } = await supabase
+            .from("seed_products")
+            .select("product_name, brand")
+            .or(`product_name.ilike.%${safeTerm}%,brand.ilike.%${safeTerm}%,category.ilike.%${safeTerm}%`)
+            .limit(8);
 
-        if (seedError) {
-          console.warn("ITEM REQUEST SEED LOOKUP FAILED", seedError);
+          if (seedError) throw seedError;
+          seedRows = data || [];
+        } catch (seedSearchErr) {
+          console.warn("ITEM REQUEST SEED LOOKUP FALLBACK:", seedSearchErr);
+          const { data, error: fallbackSeedError } = await supabase
+            .from("seed_products")
+            .select("product_name, brand")
+            .or(`product_name.ilike.%${safeTerm}%,category.ilike.%${safeTerm}%`)
+            .limit(8);
+
+          if (fallbackSeedError) {
+            console.warn("ITEM REQUEST SEED LOOKUP FAILED", fallbackSeedError);
+          }
+          seedRows = data || [];
         }
 
-        const seedSuggestions = (seedData || [])
-          .map((row) => ({
-            product_name: String(row.product_name || "").trim(),
-            brand: String(row.brand || "").trim(),
-          }))
-          .filter((row) => row.product_name);
+        const catalogSuggestions = dedupeSuggestions(catalogRows.map(normalizeSuggestionRow));
+        const seedSuggestions = dedupeSuggestions(seedRows.map(normalizeSuggestionRow));
+        const localSuggestions = getLocalItemRequestSuggestions(term);
 
-        if (seedSuggestions.length > 0) {
-          setItemRequestSuggestions(seedSuggestions);
-          return;
-        }
+        const mergedSuggestions = dedupeSuggestions([
+          ...catalogSuggestions,
+          ...seedSuggestions,
+          ...localSuggestions,
+        ]).slice(0, 10);
 
-        setItemRequestSuggestions(getLocalItemRequestSuggestions(term));
+        setItemRequestSuggestions(mergedSuggestions);
       } catch (err) {
         console.warn("ITEM REQUEST CATALOG LOOKUP FAILED", err);
         setItemRequestSuggestions(getLocalItemRequestSuggestions(term));
@@ -1353,130 +1413,28 @@ export default function App() {
   }, [activeScreen, activePanel]);
 
   useEffect(() => {
-    if (!currentUserProfile) return;
-
-    const pushState = (screen) => {
-      try {
-        window.history.pushState(
-          { screen, protected: true },
-          "",
-          `#${screen}`
-        );
-      } catch (e) {
-        console.warn("History push failed:", e);
-      }
-    };
-
-    const handlePopState = (event) => {
-      const screen = activeScreenRef.current || "store";
-      const panel = activePanelRef.current;
-
-      console.log("POPSTATE:", { screen, panel, state: event?.state });
-
-      // STEP 1: LOCATION -> IDENTIFY
-      if (panel === "location") {
+    const handleBack = () => {
+      if (activePanel === "location") {
         setActivePanel(null);
         setActiveScreen("identify");
-        pushState("identify");
         return;
       }
 
-      // STEP 2: IDENTIFY or CART -> STORE
-      if (screen === "identify" || screen === "cart") {
-        setActivePanel(null);
+      if (activeScreen === "identify" || activeScreen === "cart") {
         setActiveScreen("store");
-        pushState("store");
         return;
       }
 
-      // STEP 3: STORE -> PREVENT EXIT
-      if (screen === "store") {
-        pushState("store");
-        setToast({
-          message: "You are already on Home.",
-          type: "info",
-        });
-        return;
-      }
-
-      // FAILSAFE
-      setActivePanel(null);
-      setActiveScreen("store");
-      pushState("store");
-    };
-
-    // INITIAL HISTORY LOCK (prevents exit on first back press)
-    try {
-      window.history.replaceState(
-        { screen: activeScreenRef.current || "store", protected: true },
-        "",
-        window.location.hash || "#store"
-      );
-
-      window.history.pushState(
-        { screen: activeScreenRef.current || "store", protected: true },
-        "",
-        window.location.hash || "#store"
-      );
-    } catch (e) {
-      console.warn("Initial history setup failed:", e);
-    }
-
-    window.addEventListener("popstate", handlePopState);
-
-    return () => {
-      window.removeEventListener("popstate", handlePopState);
-    };
-  }, [currentUserProfile]);
-
-  useEffect(() => {
-    if (!currentUserProfile) return;
-
-    const syncFromHash = () => {
-      const hash = window.location.hash.replace("#", "") || "store";
-
-      if (hash === "location") {
-        setActiveScreen("identify");
-        setActivePanel("location");
-        return;
-      }
-
-      if (hash === "identify") {
-        setActivePanel(null);
-        setActiveScreen("identify");
-        return;
-      }
-
-      if (hash === "cart") {
-        setActivePanel(null);
-        setActiveScreen("cart");
-        return;
-      }
-
-      setActivePanel(null);
-      setActiveScreen("store");
-
-      if (window.location.hash !== "#store") {
-        window.history.replaceState(null, "", "#store");
+      if (activeScreen === "store") {
+        // prevent app exit behavior
+        window.history.pushState(null, "", window.location.href);
       }
     };
 
-    if (!window.location.hash) {
-      window.history.replaceState(null, "", "#store");
-    }
+    window.addEventListener("popstate", handleBack);
 
-    syncFromHash();
-
-    window.addEventListener("hashchange", syncFromHash);
-    return () => window.removeEventListener("hashchange", syncFromHash);
-  }, [currentUserProfile]);
-
-  useEffect(() => {
-    if (activePanel !== "location") return;
-    try {
-      window.location.hash = "location";
-    } catch (_) {}
-  }, [activePanel]);
+    return () => window.removeEventListener("popstate", handleBack);
+  }, [activeScreen, activePanel]);
 
   const storeSearchQuery = manualStoreName.trim().toLowerCase();
   const setStoreSearchQuery = setManualStoreName;
@@ -2019,46 +1977,121 @@ export default function App() {
   };
 
   const startLivePreview = async () => {
+    const baseConstraints = {
+      video: selectedDeviceId
+        ? { deviceId: { exact: selectedDeviceId } }
+        : { facingMode: { ideal: "environment" } },
+      audio: false,
+    };
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraDebug({
+        errorName: "NotSupportedError",
+        errorMessage: "navigator.mediaDevices.getUserMedia is unavailable",
+        constraintsAttempted: baseConstraints,
+        fallbackAttempted: false,
+      });
+      setError("Camera is not supported in this browser. Use Upload from Gallery instead.");
+      setStatus("Use Gallery Instead to continue.");
+      return;
+    }
+
     try {
       await stopScanner();
       await ensureCamerasLoaded();
 
-      const constraints = {
-        video: selectedDeviceId
-          ? { deviceId: { exact: selectedDeviceId } }
-          : { facingMode: { ideal: "environment" } },
-        audio: false,
-      };
+      const attempts = [];
+      if (selectedDeviceId) {
+        attempts.push({
+          label: "selectedDeviceId",
+          constraints: {
+            video: { deviceId: { exact: selectedDeviceId } },
+            audio: false,
+          },
+        });
+      }
+      attempts.push(
+        {
+          label: "facingMode-ideal-environment",
+          constraints: {
+            video: { facingMode: { ideal: "environment" } },
+            audio: false,
+          },
+        },
+        {
+          label: "facingMode-environment",
+          constraints: {
+            video: { facingMode: "environment" },
+            audio: false,
+          },
+        },
+        {
+          label: "video-true",
+          constraints: {
+            video: true,
+            audio: false,
+          },
+        }
+      );
 
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      let stream = null;
+      let successfulAttempt = null;
+
+      for (let i = 0; i < attempts.length; i += 1) {
+        const attempt = attempts[i];
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(attempt.constraints);
+          successfulAttempt = attempt;
+          break;
+        } catch (attemptErr) {
+          console.error(`LIVE PREVIEW ATTEMPT FAILED [${attempt.label}]`, attemptErr);
+          setCameraDebug({
+            errorName: String(attemptErr?.name || "UnknownError"),
+            errorMessage: String(attemptErr?.message || "Unknown camera error"),
+            constraintsAttempted: attempt.constraints,
+            fallbackAttempted: i > 0,
+          });
+        }
+      }
+
+      if (!stream) {
+        setError("Camera could not start. Use Gallery instead.");
+        setStatus("Use Gallery Instead to continue.");
+        return;
+      }
 
       if (!videoRef.current) {
+        if (typeof stream.getTracks === "function") {
+          stream.getTracks().forEach((track) => track.stop());
+        }
         throw new Error("Video element not ready");
       }
 
       videoRef.current.srcObject = stream;
-
-      try {
-        await videoRef.current.play();
-      } catch (err) {
-        if (!isIgnorablePlayInterruption(err)) {
-          throw err;
-        }
-      }
+      videoRef.current.setAttribute("playsinline", true);
+      videoRef.current.muted = true;
+      await videoRef.current.play();
 
       setIsScanning(true);
+      setAwaitingPhoto(true);
       setStatus("Camera live. Capture a product photo.");
+      setError("");
+      setCameraDebug({
+        errorName: "",
+        errorMessage: "",
+        constraintsAttempted: successfulAttempt?.constraints || baseConstraints,
+        fallbackAttempted: attempts.indexOf(successfulAttempt) > 0,
+      });
     } catch (err) {
-      if (isIgnorablePlayInterruption(err)) {
-        console.warn("Ignored camera transition warning:", err);
-        setStatus("Camera live. Capture a product photo.");
-        setError("");
-        return;
-      }
-
       console.error("LIVE PREVIEW ERROR:", err);
-      setError(err.message || "Unable to start camera preview");
-      setStatus("Camera preview failed");
+      setCameraDebug({
+        errorName: String(err?.name || "UnknownError"),
+        errorMessage: String(err?.message || "Unknown camera error"),
+        constraintsAttempted: baseConstraints,
+        fallbackAttempted: Boolean(selectedDeviceId),
+      });
+      setError("Camera could not start. Use Gallery instead.");
+      setStatus("Use Gallery Instead to continue.");
     }
   };
 
@@ -2263,7 +2296,7 @@ export default function App() {
               const addResult = handleAddToShoppingList(knownProduct, knownLocation);
 
               if (!knownLocation && !addResult?.updated) {
-                setAppScreen("location");
+                openLocationPanel();
                 setLocationPanelMode("quick");
                 setLocationStep("aisle");
               }
@@ -2421,15 +2454,17 @@ export default function App() {
     setStatus(nextRoleLabel ? `Photo added. Next: ${nextRoleLabel}.` : "Photo added. Tap Analyze now.");
   };
 
-  const handleImageUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) {
-      alert("Camera failed. Please try again or upload from your gallery.");
-      return;
-    }
+  const handleImageUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
 
-    console.log("Uploading file:", file);
-    handlePhotoSelected(e, "library");
+    try {
+      setStatus("Processing image...");
+      handlePhotoSelected(event, "library");
+    } catch (err) {
+      console.error("Image upload error:", err);
+      setError("Failed to process image");
+    }
   };
 
   const readFileAsDataURL = (file) =>
@@ -2896,7 +2931,7 @@ export default function App() {
       setAiDetectedPriceEdited(false);
 
       setProduct(finalProduct);
-      setAppScreen("location");
+      openLocationPanel();
       setLocationPanelMode("quick");
       setLocationStep("aisle");
       setLocationSaved(false);
@@ -3303,7 +3338,7 @@ export default function App() {
     setError("");
 
     const guideToPriceConfirmation = () => {
-      setAppScreen("location");
+      openLocationPanel();
       setLocationStep("price");
 
       setTimeout(() => {
@@ -3847,7 +3882,7 @@ export default function App() {
         const normalizedProfile = { ...profile, is_guest: false };
         setCurrentUserProfile(normalizedProfile);
         localStorage.setItem("currentUserProfile", JSON.stringify(normalizedProfile));
-        setActiveScreen("store");
+        setAppScreen("store");
         setShowOnboarding(false);
         setShowLoginModal(false);
         return;
@@ -3855,7 +3890,7 @@ export default function App() {
     }
 
     if (currentUserProfile && !isGuestMode) {
-      setActiveScreen("store");
+      setAppScreen("store");
       setShowOnboarding(false);
       setShowLoginModal(false);
       return;
@@ -3942,58 +3977,53 @@ export default function App() {
     }
   };
 
-  const setAppScreen = (screen, options = {}) => {
-    const { replace = false } = options;
-
+  function setAppScreen(screen) {
+    setActiveScreen(screen);
+    setActivePanel(null);
     setError("");
 
-    if (screen === "location") {
-      setActiveScreen("identify");
-      setActivePanel("location");
-    } else {
-      setActivePanel(null);
-      setActiveScreen(screen);
+    try {
+      window.history.pushState({ screen, protected: true }, "", `#${screen}`);
+    } catch (err) {
+      console.warn("NAVIGATION STATE WARNING:", err);
     }
+  }
 
-    const hash = `#${screen}`;
+  const openLocationPanel = () => {
+    setActiveScreen("identify");
+    setActivePanel("location");
+    setError("");
 
     try {
-      if (replace) {
-        window.history.replaceState({ mvpScreen: screen }, "", hash);
-      } else {
-        window.history.pushState({ mvpScreen: screen }, "", hash);
-      }
+      window.history.pushState({ screen: "location", protected: true }, "", "#location");
     } catch (err) {
       console.warn("NAVIGATION STATE WARNING:", err);
     }
   };
 
-  const handleBackToHome = (event) => {
+  const handleBackToHome = async (event) => {
     event?.preventDefault?.();
     event?.stopPropagation?.();
-
-    console.log("HOME BUTTON CLICKED");
 
     setShowLoginModal(false);
     setShowOnboarding(false);
     setShowItemRequestModal(false);
     setShowNextItemPrompt(false);
-    setShoppingMode(false);
-    setActiveAisleView(null);
-    setActivePanel(null);
-    setActiveScreen("store");
-    try {
-      window.history.replaceState({ mvpScreen: "store" }, "", "#store");
-    } catch (err) {
-      console.warn("HOME HASH RESET WARNING:", err);
-    }
-    setError("");
-    setStatus("Ready");
-    setToast({ message: "Back to Home", type: "success" });
 
-    stopScanner().catch((err) => {
+    setActivePanel(null);
+    setAppScreen("store");
+
+    setActiveAisleView(null);
+    setError(null);
+    setStatus("Ready");
+
+    try {
+      if (isScanning || scanningRef.current) {
+        await stopScanner();
+      }
+    } catch (err) {
       console.warn("HOME STOP SCANNER WARNING:", err);
-    });
+    }
   };
 
   const navigateToScreen = (screen) => {
@@ -4263,7 +4293,7 @@ export default function App() {
       : "";
 
     setError("");
-    setAppScreen("location");
+    openLocationPanel();
     setLocationPanelMode("quick");
     setLocationStep("aisle");
     setShowAiSummaryCard(false);
@@ -4317,7 +4347,7 @@ export default function App() {
 
     setBarcode(item.barcode || "");
     setError("");
-    setAppScreen("location");
+    openLocationPanel();
     setLocationPanelMode("quick");
     setLocationStep("aisle");
     setShowAiSummaryCard(false);
@@ -4485,7 +4515,7 @@ export default function App() {
     setShowAiSummaryCard(false);
     setError("");
 
-    setAppScreen("location");
+    openLocationPanel();
     setLocationPanelMode("quick");
     setLocationStep("aisle");
     setLocationSaved(false);
@@ -4519,7 +4549,7 @@ export default function App() {
     setShowAiSummaryCard(false);
     setError("");
 
-    setAppScreen("location");
+    openLocationPanel();
     setLocationPanelMode("quick");
     setLocationStep("aisle");
     setLocationSaved(false);
@@ -4776,7 +4806,7 @@ export default function App() {
       const addResult = handleAddToShoppingList(knownProduct, knownLocation);
 
       if (!knownLocation && !addResult?.updated) {
-        setAppScreen("location");
+        openLocationPanel();
         setLocationPanelMode("quick");
         setLocationStep("aisle");
       }
@@ -4794,7 +4824,7 @@ export default function App() {
     if (!product || locationSaved) return;
 
     setError("");
-    setAppScreen("location");
+    openLocationPanel();
     setLocationPanelMode("quick");
     setLocationStep("aisle");
   };
@@ -5739,7 +5769,7 @@ export default function App() {
                     setAuthUser(null);
                     setCurrentUserProfile(guestProfile);
                     setAuthError("");
-                    setActiveScreen("store");
+                    setAppScreen("store");
                     setShowLoginModal(false);
                     setShowOnboarding(false);
                   }}
@@ -6037,7 +6067,7 @@ export default function App() {
                             e.stopPropagation();
                             console.log("ADD LOCATION BUTTON CLICKED");
                             setError("");
-                            setAppScreen("location");
+                            openLocationPanel();
                             setLocationPanelMode("quick");
                             setLocationStep("aisle");
 
@@ -6229,7 +6259,7 @@ export default function App() {
                                           price_source: "",
                                           detected_price_unit: "unknown",
                                         });
-                                        setAppScreen("location");
+                                        openLocationPanel();
                                         setLocationPanelMode("quick");
                                         setLocationStep("aisle");
                                         setStatus("Update this item location");
@@ -6413,7 +6443,7 @@ export default function App() {
                                           price_source: "",
                                           detected_price_unit: "unknown",
                                         });
-                                        setAppScreen("location");
+                                        openLocationPanel();
                                         setLocationPanelMode("quick");
                                         setLocationStep("aisle");
                                         setStatus("Update this item location");
@@ -6864,7 +6894,7 @@ export default function App() {
             </div>
             <button
               type="button"
-              onClick={() => setActiveScreen("identify")}
+              onClick={() => setAppScreen("identify")}
               style={{ ...styles.primaryButton, width: "100%", minHeight: 44, marginTop: 10 }}
             >
               Continue to Item Identification
@@ -7066,7 +7096,47 @@ export default function App() {
             </div>
 
         <div style={styles.card}>
-          <div style={{ ...styles.scannerContainer, opacity: availableCameras.length > 0 ? 1 : 0, transform: availableCameras.length > 0 ? 'translateY(0)' : 'translateY(10px)', transition: 'opacity 0.6s ease, transform 0.6s ease' }}>
+          <div style={styles.sectionTitle}>Identify Item</div>
+          <div style={{ display: "flex", gap: 10, marginTop: 8, marginBottom: 10 }}>
+            <button
+              type="button"
+              onClick={handleStartPhotoFirst}
+              style={{ ...styles.primaryButton, flex: 1 }}
+            >
+              Start Camera
+            </button>
+            <button
+              type="button"
+              style={{ ...styles.libraryButton, flex: 1 }}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              Upload from Gallery
+            </button>
+          </div>
+          <button
+            type="button"
+            style={{ ...styles.libraryButton, width: "100%", marginBottom: 10 }}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            Use Gallery Instead
+          </button>
+          <div style={styles.rewardDescription}>Status: {status}</div>
+          {error ? <div style={styles.errorBox}>{error}</div> : null}
+          <div style={{ ...styles.infoBox, marginTop: 8 }}>
+            <div><strong>Camera Diagnostics</strong></div>
+            <div>isSecureContext: {String(window.isSecureContext)}</div>
+            <div>mediaDevices: {String(Boolean(navigator.mediaDevices))}</div>
+            <div>getUserMedia: {String(Boolean(navigator.mediaDevices?.getUserMedia))}</div>
+            <div>protocol: {String(window.location.protocol || "")}</div>
+            <div>selectedDeviceId: {selectedDeviceId || "(none)"}</div>
+            <div>availableCameras: {availableCameras.length}</div>
+            <div>lastCameraErrorName: {cameraDebug.errorName || "(none)"}</div>
+            <div>lastCameraErrorMessage: {cameraDebug.errorMessage || "(none)"}</div>
+          </div>
+        </div>
+
+        <div style={styles.card}>
+          <div style={styles.scannerContainer}>
             <div style={styles.scannerFrame}>
               <div style={styles.scannerCornerTopLeft}></div>
               <div style={styles.scannerCornerTopRight}></div>
@@ -7115,14 +7185,28 @@ export default function App() {
                   </div>
                 )}
               </div>
-              <canvas ref={canvasRef} style={styles.hiddenCanvas} />
+              <canvas ref={canvasRef} style={{ display: "none" }} />
             </div>
 
             <div style={styles.scannerControls}>
               {!awaitingPhoto ? (!isScanning ? (
                 <div style={{ width: "100%" }}>
                   <button onClick={handleStartPhotoFirst} style={styles.scanButton}>
-                    Identify Item with Photo
+                    Start Camera
+                  </button>
+                  <button
+                    type="button"
+                    style={{ ...styles.libraryButton, width: "100%", marginTop: 10 }}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    Upload from Gallery
+                  </button>
+                  <button
+                    type="button"
+                    style={{ ...styles.libraryButton, width: "100%", marginTop: 10 }}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    Use Gallery Instead
                   </button>
                   <div style={{ ...styles.infoBox, marginTop: 10 }}>
                     Photo-first flow: take or upload a product photo, confirm the AI result, then add location and price.
@@ -7175,6 +7259,16 @@ export default function App() {
                   Stop Scanner
                 </button>
               )) : null}
+
+              {(isScanning || awaitingPhoto) && (
+                <button
+                  type="button"
+                  onClick={capturePhotoFromLiveCamera}
+                  style={{ ...styles.photoButtonSolid, width: "100%", marginBottom: 10 }}
+                >
+                  Capture Photo
+                </button>
+              )}
             </div>
           </div>
 
@@ -7291,15 +7385,11 @@ export default function App() {
               {/* -- Analyze button (shown after =1 photo) -- */}
               {capturedPhotos.length > 0 && (
                 <button
-                  onClick={() => analyzeAllPhotos(selectedFiles)}
+                  onClick={() => analyzeAllPhotos()}
                   style={{ ...styles.confirmButton, width: "100%", minHeight: 56, fontSize: 17, fontWeight: 800, marginBottom: 10 }}
                   disabled={photoAnalysisStatus === 'uploading' || photoAnalysisStatus === 'analyzing' || processingRef.current}
                 >
-                  {photoAnalysisStatus === 'uploading'
-                    ? "Uploading..."
-                    : photoAnalysisStatus === 'analyzing'
-                    ? "Analyzing with AI..."
-                    : `Analyze ${capturedPhotos.length} Photo${capturedPhotos.length > 1 ? "s" : ""} Now`}
+                  Analyze Photos
                 </button>
               )}
 
@@ -7326,20 +7416,27 @@ export default function App() {
                     type="button"
                     style={{ ...styles.libraryButton, marginBottom: 10 }}
                     onClick={() => {
-                      document.getElementById("cameraInput")?.click();
+                      fileInputRef.current?.click();
                     }}
                   >
                     {capturedPhotos.length === 0
-                      ? "Upload Photo 1 of 3: Product front label"
-                      : `Upload Photo ${capturedPhotos.length + 1} of ${MAX_PHOTOS}: ${PHOTO_ROLE_SEQUENCE[capturedPhotos.length]?.label || "Additional photo"}`}
+                      ? "Take Photo 1 of 3 (Camera/Gallery): Product front label"
+                      : `Take Photo ${capturedPhotos.length + 1} of ${MAX_PHOTOS} (Camera/Gallery): ${PHOTO_ROLE_SEQUENCE[capturedPhotos.length]?.label || "Additional photo"}`}
                   </button>
                   <input
+                    ref={fileInputRef}
                     id="cameraInput"
                     type="file"
                     accept="image/*"
                     capture="environment"
                     onChange={handleImageUpload}
-                    style={{ display: "none" }}
+                    style={{
+                      position: "absolute",
+                      width: 1,
+                      height: 1,
+                      opacity: 0,
+                      pointerEvents: "none",
+                    }}
                   />
                 </>
               )}
@@ -7448,7 +7545,7 @@ export default function App() {
                 type="button"
                 style={{ ...styles.primaryButton, width: "100%" }}
                 onClick={() => {
-                  setAppScreen("location");
+                  openLocationPanel();
                   setLocationPanelMode("quick");
                   setLocationStep("aisle");
                 }}
@@ -7534,7 +7631,7 @@ export default function App() {
                           type="button"
                           style={{ ...styles.primaryButton, width: "100%", marginTop: 8 }}
                           onClick={() => {
-                            setAppScreen("location");
+                            openLocationPanel();
                             setLocationPanelMode("quick");
                             setLocationStep("aisle");
                           }}
@@ -7604,7 +7701,7 @@ export default function App() {
                           type="button"
                           style={{ ...styles.primaryButton, width: "100%", marginTop: 8, fontWeight: 800 }}
                           onClick={() => {
-                            setAppScreen("location");
+                            openLocationPanel();
                             setLocationPanelMode("quick");
                             setLocationStep("aisle");
                             setStatus("Add item location.");
@@ -7631,7 +7728,7 @@ export default function App() {
                 type="button"
                 style={{ ...styles.primaryButton, width: "100%", marginTop: 0, marginBottom: 12, fontWeight: 800 }}
                 onClick={() => {
-                  setAppScreen("location");
+                  openLocationPanel();
                   setLocationPanelMode("quick");
                   setLocationStep("aisle");
                 }}
@@ -8080,7 +8177,7 @@ export default function App() {
                 onClick={() => {
                   setAwaitingProductConfirmation(false);
                   setShowAiSummaryCard(false);
-                  setAppScreen("location");
+                  openLocationPanel();
                   setLocationPanelMode("quick");
                   setLocationStep("aisle");
                   setStatus("Add this item location in the store.");
@@ -8329,7 +8426,7 @@ export default function App() {
               type="button"
               onClick={() => {
                 setShowNextItemPrompt(false);
-                setActiveScreen("identify");
+                setAppScreen("identify");
 
                 setProduct(null);
                 setBarcode("");
@@ -8365,7 +8462,7 @@ export default function App() {
                 setBestKnownLocation(null);
                 resetContributionFlow();
 
-                setActiveScreen("cart");
+                setAppScreen("cart");
                 setStatus("Ready");
               }}
               style={{
@@ -10048,6 +10145,7 @@ const styles = {
     marginBottom: 10,
   },
 };
+
 
 
 
