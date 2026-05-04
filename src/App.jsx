@@ -724,7 +724,7 @@ export default function App() {
   const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showLoginModal, setShowLoginModal] = useState(false);
-  const [activeScreen, setActiveScreen] = useState("store");
+  const [activeScreen, setActiveScreen] = useState("landing");
   const [loginForm, setLoginForm] = useState({
     username: "",
     password: "",
@@ -915,6 +915,22 @@ export default function App() {
       ),
     ]);
 
+  const createTemporarySupabaseProfile = (user) => {
+    const username = user?.email?.split("@")[0] || "mvp_shopper";
+    const displayName = user?.email?.split("@")[0] || "MVP Shopper";
+
+    return {
+      id: user?.id,
+      username,
+      display_name: displayName,
+      email: user?.email || null,
+      trust_score: 0,
+      points: 0,
+      total_points: 0,
+      is_guest: false,
+    };
+  };
+
   const loadOrCreateSupabaseProfile = async (user) => {
     if (!user?.id) return null;
 
@@ -1006,22 +1022,41 @@ export default function App() {
           },
         });
         if (signUpError) throw signUpError;
-        if (data?.user) {
-          await loadOrCreateSupabaseProfile(data.user);
-        }
         if (data?.user && data?.session) {
           setAuthUser(data.user);
           shouldCloseModal = true;
           successMessage = "Account created. Welcome to MVP.";
+
+          // Never block the auth modal flow on profile bootstrap.
+          withTimeout(loadOrCreateSupabaseProfile(data.user), 8000, "Profile load")
+            .then((profile) => {
+              if (!profile) {
+                setToast({
+                  message: "Signed in, but your profile is still loading in the background.",
+                  type: "error",
+                });
+              }
+            })
+            .catch((err) => {
+              console.error("BACKGROUND PROFILE LOAD ERROR:", err);
+              setToast({
+                message: "Signed in, but your profile is still loading in the background.",
+                type: "error",
+              });
+            });
         } else if (data?.user && !data?.session) {
           setAuthError("Account created. Check your inbox and spam folder to confirm your email before signing in. If no email arrives, tap Resend Confirmation Email or continue as guest for now.");
           return;
         }
       } else {
-        const { data, error: signInError } = await supabase.auth.signInWithPassword({
-          email: email.trim().toLowerCase(),
-          password,
-        });
+        const { data, error: signInError } = await withTimeout(
+          supabase.auth.signInWithPassword({
+            email: email.trim().toLowerCase(),
+            password,
+          }),
+          10000,
+          "Login"
+        );
         console.log("LOGIN RESULT:", data, signInError);
         if (signInError) throw signInError;
         if (data?.user && data?.session) {
@@ -1033,12 +1068,22 @@ export default function App() {
           setShowLoginModal(false);
           setLoginForm({ username: "", password: "" });
           setToast({ message: "Signed in successfully.", type: "success" });
-          setIsSubmittingAuth(false);
 
-          withTimeout(loadOrCreateSupabaseProfile(data.user), 6000, "Profile load")
+          withTimeout(loadOrCreateSupabaseProfile(data.user), 8000, "Profile load")
+            .then((profile) => {
+              if (!profile) {
+                setToast({
+                  message: "Signed in, but your profile is still loading in the background.",
+                  type: "error",
+                });
+              }
+            })
             .catch((err) => {
               console.error("BACKGROUND PROFILE LOAD ERROR:", err);
-              setError("Signed in, but profile took too long to load. Tap Reset App Session if needed.");
+              setToast({
+                message: "Signed in, but your profile is still loading in the background.",
+                type: "error",
+              });
             });
 
           return;
@@ -1061,6 +1106,13 @@ export default function App() {
       console.error("SUPABASE AUTH ERROR:", err);
       const errorMessage = String(err?.message || "");
       const lowerErrorMessage = errorMessage.toLowerCase();
+      if (lowerErrorMessage.includes("login timed out")) {
+        setAuthError("Login is taking too long. Please try again or continue as guest.");
+        setToast({
+          message: "Login is taking too long. Please try again or continue as guest.",
+          type: "error",
+        });
+      } else
       if (loginMode === "signIn" && errorMessage.includes("Invalid login credentials")) {
         setAuthError("Incorrect email or password");
       } else if (loginMode === "signIn" && errorMessage.includes("Email not confirmed")) {
@@ -1182,27 +1234,46 @@ export default function App() {
   useEffect(() => {
     let isMounted = true;
 
-    const bootstrapAuth = async () => {
-      setIsAuthLoading(true);
-      let didTimeout = false;
-
-      const bootstrapTimeout = setTimeout(() => {
-        if (!isMounted) return;
-        didTimeout = true;
-        console.warn("AUTH BOOTSTRAP TIMEOUT");
-        setIsAuthLoading(false);
-        setIsCheckingProfile(false);
-        loadProfileFromLocalStorage({ guestOnly: true });
-        setToast({
-          message: "Session took too long to load. Try signing in again.",
-          type: "error",
-        });
-      }, 8000);
+    const loadAuthProfileWithRecovery = async (user) => {
+      if (!user?.id) return null;
 
       try {
-        const { data, error: sessionError } = await supabase.auth.getSession();
+        return await withTimeout(loadOrCreateSupabaseProfile(user), 8000, "Profile load");
+      } catch (err) {
+        const didProfileTimeout = String(err?.message || "")
+          .toLowerCase()
+          .includes("profile load timed out");
+
+        if (!isMounted) return null;
+
+        if (didProfileTimeout) {
+          const temporaryProfile = createTemporarySupabaseProfile(user);
+          setCurrentUserProfile(temporaryProfile);
+          localStorage.setItem("currentUserProfile", JSON.stringify(temporaryProfile));
+          setIsAuthLoading(false);
+          setIsCheckingProfile(false);
+          setToast({
+            message: "Signed in. Profile is still syncing.",
+            type: "success",
+          });
+          return temporaryProfile;
+        }
+
+        throw err;
+      }
+    };
+
+    const bootstrapAuth = async () => {
+      setIsAuthLoading(true);
+
+      try {
+        const { data, error: sessionError } = await withTimeout(
+          supabase.auth.getSession(),
+          8000,
+          "Session load"
+        );
         if (sessionError) throw sessionError;
-        if (!isMounted || didTimeout) return;
+        if (!isMounted) return;
 
         const user = data?.session?.user || null;
 
@@ -1210,19 +1281,31 @@ export default function App() {
           setAuthUser(user);
           localStorage.removeItem("currentUserProfile");
           setCurrentUserProfile(null);
-          await loadOrCreateSupabaseProfile(user);
+          await loadAuthProfileWithRecovery(user);
         } else {
           setAuthUser(null);
           loadProfileFromLocalStorage({ guestOnly: true });
         }
       } catch (err) {
         console.error("AUTH SESSION BOOTSTRAP ERROR:", err);
-        if (!isMounted || didTimeout) return;
-        setError(err?.message || "Unable to initialize authentication.");
-        loadProfileFromLocalStorage({ guestOnly: true });
+        if (!isMounted) return;
+
+        const didSessionTimeout = String(err?.message || "")
+          .toLowerCase()
+          .includes("session load timed out");
+
+        if (didSessionTimeout) {
+          loadProfileFromLocalStorage({ guestOnly: true });
+          setToast({
+            message: "Session took too long to load. Try signing in again.",
+            type: "error",
+          });
+        } else {
+          setError(err?.message || "Unable to initialize authentication.");
+          loadProfileFromLocalStorage({ guestOnly: true });
+        }
       } finally {
-        clearTimeout(bootstrapTimeout);
-        if (isMounted && !didTimeout) {
+        if (isMounted) {
           setIsAuthLoading(false);
           setIsCheckingProfile(false);
         }
@@ -1240,7 +1323,9 @@ export default function App() {
       if (user) {
         localStorage.removeItem("currentUserProfile");
         setCurrentUserProfile(null);
-        await loadOrCreateSupabaseProfile(user);
+        loadAuthProfileWithRecovery(user).catch((err) => {
+          console.error("AUTH STATE PROFILE LOAD ERROR:", err);
+        });
       } else {
         loadProfileFromLocalStorage({ guestOnly: true });
       }
@@ -3871,6 +3956,13 @@ export default function App() {
       return;
     }
 
+    if (currentUserProfile && isGuestMode) {
+      setAppScreen("store");
+      setShowOnboarding(false);
+      setShowLoginModal(false);
+      return;
+    }
+
     setLoginMode("signIn");
     setAuthError("");
     setShowLoginModal(true);
@@ -3986,8 +4078,9 @@ export default function App() {
     setShowNextItemPrompt(false);
 
     setActivePanel(null);
-    setAppScreen("store");
+    setAppScreen("landing");
 
+    setShoppingMode(false);
     setActiveAisleView(null);
     setError(null);
     setStatus("Ready");
@@ -5401,7 +5494,7 @@ export default function App() {
     );
   }
 
-  if (!currentUserProfile && showOnboarding) {
+  if ((activeScreen === "landing" || !currentUserProfile) && showOnboarding) {
     return (
       <div style={styles.introPage}>
         <div style={styles.introHeroCard}>
@@ -5466,7 +5559,7 @@ export default function App() {
     );
   }
 
-  if (!currentUserProfile) {
+  if (activeScreen === "landing" || !currentUserProfile) {
     return (
       <div style={styles.introPage}>
         <div style={styles.introHeroCard}>
@@ -5760,7 +5853,7 @@ export default function App() {
                     setShowOnboarding(false);
                   }}
                 >
-                  Back
+                  Cancel / Back
                 </button>
 
                 <button
@@ -8747,14 +8840,19 @@ const styles = {
     zIndex: 10,
   },
   loginIconButton: {
-    fontSize: 22,
-    background: "white",
+    fontSize: 18,
+    fontWeight: 800,
+    color: "#0f172a",
+    background: "#ffffff",
     borderRadius: "50%",
     width: 44,
     height: 44,
-    border: "none",
-    boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+    border: "1px solid #cbd5e1",
+    boxShadow: "0 6px 16px rgba(15, 23, 42, 0.12)",
     cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
   },
   modalOverlay: {
     position: "fixed",
