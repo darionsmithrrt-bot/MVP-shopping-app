@@ -4675,6 +4675,35 @@ export default function App() {
     setAiFieldConfidence((prev) => ({ ...prev, [field]: 0 }));
   };
 
+  const getUserLevelTitle = () => {
+    const points = Number(userPoints || currentUserProfile?.total_points || 0);
+    if (points >= 500) return "Store Mapping Pro";
+    if (points >= 250) return "Aisle Expert";
+    if (points >= 100) return "Location Scout";
+    if (points >= 25) return "Helpful Shopper";
+    return "New Contributor";
+  };
+
+  const getNextLevelProgress = () => {
+    const points = Number(userPoints || currentUserProfile?.total_points || 0);
+    const thresholds = [25, 100, 250, 500];
+    const next = thresholds.find((t) => points < t) || 500;
+    const previous = points >= 500 ? 500 : [...thresholds].reverse().find((t) => points >= t) || 0;
+    const progress = next === previous ? 100 : Math.min(100, Math.round(((points - previous) / (next - previous)) * 100));
+    return { points, next, progress };
+  };
+
+  const getProfileInitials = () => {
+    const email =
+      authUser?.email ||
+      currentUserProfile?.email ||
+      loginForm?.username ||
+      "";
+    const cleaned = String(email).trim();
+    if (!cleaned) return "Me";
+    return cleaned.slice(0, 2).toUpperCase();
+  };
+
   const getAiFieldIndicator = (field, hasValue) => {
     if (aiUserEditedFields[field]) {
       return {
@@ -5612,7 +5641,7 @@ export default function App() {
               style={styles.loginIconButton}
               onClick={() => setShowLoginModal(true)}
             >
-              Me
+              {getProfileInitials()}
             </button>
           </div>
 
@@ -5627,6 +5656,35 @@ export default function App() {
           >
             Start Shopping Smarter
           </button>
+
+          {(() => {
+            const { points, next, progress } = getNextLevelProgress();
+            return (
+              <div style={{
+                background: "#f8fafc",
+                border: "1px solid #e2e8f0",
+                borderRadius: 14,
+                padding: "14px 16px",
+                margin: "12px 0",
+                textAlign: "left",
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#64748b", marginBottom: 4 }}>Your MVP Progress</div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{ fontSize: 15, fontWeight: 800, color: "#0f172a" }}>{getUserLevelTitle()}</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: "#14b8a6" }}>{points} pts</span>
+                </div>
+                <div style={{ background: "#e2e8f0", borderRadius: 999, height: 8, overflow: "hidden", marginBottom: 6 }}>
+                  <div style={{ width: `${progress}%`, background: "linear-gradient(90deg, #14b8a6, #6366f1)", height: "100%", borderRadius: 999, transition: "width 0.4s ease" }} />
+                </div>
+                <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>
+                  {progress}% toward next level{points < 500 ? ` (${next} pts)` : " — Max level reached!"}
+                </div>
+                <div style={{ fontSize: 11, color: "#94a3b8", lineHeight: 1.5 }}>
+                  Earn points by adding item locations, confirming locations, and improving product details.
+                </div>
+              </div>
+            );
+          })()}
 
           <button
             style={styles.introSecondaryButton}
@@ -5663,6 +5721,38 @@ export default function App() {
             <p style={styles.introCommunityText}>
               Tell the community what you’re looking for. If another shopper sees it, they can submit the aisle, shelf, price, or store location.
             </p>
+          </div>
+
+          <div style={{ width: "100%", marginTop: 12, marginBottom: 6 }}>
+            <div style={{ fontSize: 16, fontWeight: 900, color: "#0f172a", marginBottom: 10 }}>
+              Today’s Missions
+            </div>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "12px 14px", textAlign: "left" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: "#0f172a" }}>Map 1 item location</div>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#14b8a6" }}>+10 pts</div>
+                </div>
+                <div style={{ fontSize: 12, color: "#64748b" }}>Add aisle, section, and shelf.</div>
+              </div>
+
+              <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "12px 14px", textAlign: "left" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: "#0f172a" }}>Confirm a location</div>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#14b8a6" }}>+3 pts</div>
+                </div>
+                <div style={{ fontSize: 12, color: "#64748b" }}>Help verify another shopper’s find.</div>
+              </div>
+
+              <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "12px 14px", textAlign: "left" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: "#0f172a" }}>Improve product details</div>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#14b8a6" }}>+5 pts</div>
+                </div>
+                <div style={{ fontSize: 12, color: "#64748b" }}>Correct name, brand, size, or quantity.</div>
+              </div>
+            </div>
           </div>
 
           <p style={styles.introFooter}>
