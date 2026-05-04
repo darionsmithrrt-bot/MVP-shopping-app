@@ -4684,6 +4684,15 @@ export default function App() {
     return "New Contributor";
   };
 
+  const getUserLevelEmoji = () => {
+    const points = Number(userPoints || currentUserProfile?.total_points || 0);
+    if (points >= 500) return "🏆";
+    if (points >= 250) return "🥇";
+    if (points >= 100) return "🗺️";
+    if (points >= 25) return "🛒";
+    return "🌱";
+  };
+
   const getNextLevelProgress = () => {
     const points = Number(userPoints || currentUserProfile?.total_points || 0);
     const thresholds = [25, 100, 250, 500];
@@ -4991,14 +5000,14 @@ export default function App() {
 
           <div style={styles.quickButtonRow}>
             {[
-              { label: "Numbered Aisle (Manual Input)", aisle: null, manual: true },
-              { label: "Produce Area (Fruit / Vegetables)", aisle: "Produce Area" },
-              { label: "Meat / Poultry Area", aisle: "Meat / Poultry Area" },
-              { label: "Dairy Area", aisle: "Dairy Area" },
-              { label: "Bakery Area", aisle: "Bakery Area" },
-              { label: "Deli Area", aisle: "Deli Area" },
-              { label: "Open Freezer Area", aisle: "Open Freezer Area" },
-              { label: "Other / Manual", aisle: null, manual: true },
+              { label: "🔢 Numbered Aisle", aisle: null, manual: true },
+              { label: "🥦 Produce Area", aisle: "Produce Area" },
+              { label: "🥩 Meat & Poultry", aisle: "Meat / Poultry Area" },
+              { label: "🥛 Dairy", aisle: "Dairy Area" },
+              { label: "🍞 Bakery", aisle: "Bakery Area" },
+              { label: "🧀 Deli", aisle: "Deli Area" },
+              { label: "🧊 Frozen", aisle: "Open Freezer Area" },
+              { label: "📍 Other", aisle: null, manual: true },
             ].map((option) => (
               <button
                 key={`wizard-quick-area-${option.label}`}
@@ -5022,7 +5031,8 @@ export default function App() {
                   }, 0);
                 }}
               >
-                {option.label}
+                <span style={{ fontSize: 18, lineHeight: 1 }}>{option.label.split(" ")[0]}</span>
+                <span>{option.label.split(" ").slice(1).join(" ")}</span>
               </button>
             ))}
           </div>
@@ -5661,26 +5671,30 @@ export default function App() {
             const { points, next, progress } = getNextLevelProgress();
             return (
               <div style={{
-                background: "#f8fafc",
-                border: "1px solid #e2e8f0",
-                borderRadius: 14,
-                padding: "14px 16px",
+                background: "linear-gradient(135deg, #f0fdfa 0%, #eff6ff 100%)",
+                border: "1.5px solid #c7f3ed",
+                borderRadius: 16,
+                padding: "16px 16px 14px",
                 margin: "12px 0",
                 textAlign: "left",
               }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: "#64748b", marginBottom: 4 }}>Your MVP Progress</div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-                  <span style={{ fontSize: 15, fontWeight: 800, color: "#0f172a" }}>{getUserLevelTitle()}</span>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: "#14b8a6" }}>{points} pts</span>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 28, lineHeight: 1 }}>{getUserLevelEmoji()}</span>
+                    <div>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em" }}>Your Rank</div>
+                      <div style={{ fontSize: 15, fontWeight: 900, color: "#0f172a", lineHeight: 1.2 }}>{getUserLevelTitle()}</div>
+                    </div>
+                  </div>
+                  <div style={{ background: "linear-gradient(90deg, #14b8a6, #6366f1)", borderRadius: 20, padding: "4px 12px" }}>
+                    <span style={{ fontSize: 14, fontWeight: 800, color: "#ffffff" }}>{points} pts</span>
+                  </div>
                 </div>
-                <div style={{ background: "#e2e8f0", borderRadius: 999, height: 8, overflow: "hidden", marginBottom: 6 }}>
-                  <div style={{ width: `${progress}%`, background: "linear-gradient(90deg, #14b8a6, #6366f1)", height: "100%", borderRadius: 999, transition: "width 0.4s ease" }} />
+                <div style={{ background: "#dbeafe", borderRadius: 999, height: 10, overflow: "hidden", marginBottom: 6 }}>
+                  <div style={{ width: `${progress}%`, background: "linear-gradient(90deg, #14b8a6, #6366f1)", height: "100%", borderRadius: 999, transition: "width 0.5s ease" }} />
                 </div>
-                <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>
-                  {progress}% toward next level{points < 500 ? ` (${next} pts)` : " — Max level reached!"}
-                </div>
-                <div style={{ fontSize: 11, color: "#94a3b8", lineHeight: 1.5 }}>
-                  Earn points by adding item locations, confirming locations, and improving product details.
+                <div style={{ fontSize: 12, color: "#475569", fontWeight: 600 }}>
+                  {progress}% toward next level{points < 500 ? ` — ${next - points} pts to go` : " — Max level reached! 🎉"}
                 </div>
               </div>
             );
@@ -5724,33 +5738,43 @@ export default function App() {
           </div>
 
           <div style={{ width: "100%", marginTop: 12, marginBottom: 6 }}>
-            <div style={{ fontSize: 16, fontWeight: 900, color: "#0f172a", marginBottom: 10 }}>
-              Today’s Missions
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+              <span style={{ fontSize: 18 }}>&#x1F3AF;</span>
+              <div style={{ fontSize: 16, fontWeight: 900, color: "#0f172a" }}>Today’s Missions</div>
             </div>
 
             <div style={{ display: "grid", gap: 10 }}>
               <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "12px 14px", textAlign: "left" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                  <div style={{ fontSize: 14, fontWeight: 800, color: "#0f172a" }}>Map 1 item location</div>
-                  <div style={{ fontSize: 12, fontWeight: 800, color: "#14b8a6" }}>+10 pts</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 18 }}>&#x1F4CD;</span>
+                    <div style={{ fontSize: 14, fontWeight: 800, color: "#0f172a" }}>Map 1 item location</div>
+                  </div>
+                  <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 20, padding: "2px 10px", fontSize: 12, fontWeight: 800, color: "#16a34a" }}>+10 pts</div>
                 </div>
-                <div style={{ fontSize: 12, color: "#64748b" }}>Add aisle, section, and shelf.</div>
+                <div style={{ fontSize: 12, color: "#64748b", paddingLeft: 26 }}>Add aisle, section, and shelf.</div>
               </div>
 
               <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "12px 14px", textAlign: "left" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                  <div style={{ fontSize: 14, fontWeight: 800, color: "#0f172a" }}>Confirm a location</div>
-                  <div style={{ fontSize: 12, fontWeight: 800, color: "#14b8a6" }}>+3 pts</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 18 }}>&#x2705;</span>
+                    <div style={{ fontSize: 14, fontWeight: 800, color: "#0f172a" }}>Confirm a location</div>
+                  </div>
+                  <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 20, padding: "2px 10px", fontSize: 12, fontWeight: 800, color: "#16a34a" }}>+3 pts</div>
                 </div>
-                <div style={{ fontSize: 12, color: "#64748b" }}>Help verify another shopper’s find.</div>
+                <div style={{ fontSize: 12, color: "#64748b", paddingLeft: 26 }}>Help verify another shopper’s find.</div>
               </div>
 
               <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "12px 14px", textAlign: "left" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                  <div style={{ fontSize: 14, fontWeight: 800, color: "#0f172a" }}>Improve product details</div>
-                  <div style={{ fontSize: 12, fontWeight: 800, color: "#14b8a6" }}>+5 pts</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 18 }}>&#x270F;&#xFE0F;</span>
+                    <div style={{ fontSize: 14, fontWeight: 800, color: "#0f172a" }}>Improve product details</div>
+                  </div>
+                  <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 20, padding: "2px 10px", fontSize: 12, fontWeight: 800, color: "#16a34a" }}>+5 pts</div>
                 </div>
-                <div style={{ fontSize: 12, color: "#64748b" }}>Correct name, brand, size, or quantity.</div>
+                <div style={{ fontSize: 12, color: "#64748b", paddingLeft: 26 }}>Correct name, brand, size, or quantity.</div>
               </div>
             </div>
           </div>
@@ -9604,6 +9628,10 @@ const styles = {
     cursor: "pointer",
     padding: "0 12px",
     transition: "all 0.15s ease",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    textAlign: "left",
   },
   quickButtonActive: {
     background: MVP_GRADIENT,
