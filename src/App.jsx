@@ -184,13 +184,17 @@ const getStoreAddressSubtitle = (store) => {
   return cityState || "Address unavailable";
 };
 
-const identifyProductFromPhoto = async (imageUrls, barcode, imageRoles = []) => {
+const identifyProductFromPhoto = async (imageUrls, barcode, imageRoles = [], visionContext = null) => {
   const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls].filter(Boolean);
   const normalizedRoles = urls.map((_, index) => normalizeImageRole(imageRoles[index], index));
   const payload = {
     imageUrls: urls,
     imageRoles: normalizedRoles,
     barcode,
+    visionText: visionContext?.text || "",
+    visionLogos: visionContext?.logos || [],
+    visionLabels: visionContext?.labels || [],
+    visionObjects: visionContext?.objects || [],
   };
   console.log("INVOKING identify-product WITH PAYLOAD:", payload);
   const { data, error } = await supabase.functions.invoke("identify-product", {
@@ -2826,10 +2830,25 @@ export default function App() {
       setPhotoAnalysisStatus('analyzing');
       setStatus(`Analyzing ${uploadedUrls.length} photo${uploadedUrls.length > 1 ? "s" : ""} with AI...`);
 
+      const { data: visionResult, error: visionError } = await supabase.functions.invoke("analyze-vision", {
+        body: {
+          imageUrl: uploadedUrls[0],
+        },
+      });
+      console.log("VISION RESULT:", visionResult);
+      console.log("VISION ERROR:", visionError);
+
+      const visionContext = visionError ? null : visionResult;
+
       const imageRoles = capturedPhotos
         .slice(0, files.length)
         .map((photo, index) => normalizeImageRole(photo?.role, index));
-      let aiResponse = await identifyProductFromPhoto(uploadedUrls, normalizedBarcode, imageRoles);
+      let aiResponse = await identifyProductFromPhoto(
+        uploadedUrls,
+        normalizedBarcode,
+        imageRoles,
+        visionContext
+      );
       console.log("FULL AI RESPONSE:", aiResponse);
       
       if (aiResponse?.error) {
