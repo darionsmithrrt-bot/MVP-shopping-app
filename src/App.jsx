@@ -2061,13 +2061,6 @@ export default function App() {
   };
 
   const startLivePreview = async () => {
-    const baseConstraints = {
-      video: selectedDeviceId
-        ? { deviceId: { exact: selectedDeviceId } }
-        : { facingMode: { ideal: "environment" } },
-      audio: false,
-    };
-
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setError("Camera is not supported in this browser. Use Upload from Gallery instead.");
       setStatus("Use Gallery Instead to continue.");
@@ -2076,18 +2069,42 @@ export default function App() {
 
     try {
       await stopScanner();
-      await ensureCamerasLoaded();
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+
+      setError("");
+      setStatus("Opening camera...");
+      setAwaitingPhoto(true);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const devices = await ensureCamerasLoaded();
+      const freshestRearCamera =
+        (devices || []).find((d) => /back|rear|environment|camera 2/gi.test(d.label || "")) ||
+        (devices || []).find((d) => !/front|user|selfie/gi.test(d.label || "")) ||
+        (devices || [])[0] ||
+        null;
+      const rearDeviceId = freshestRearCamera?.deviceId || "";
 
       const attempts = [];
-      if (selectedDeviceId) {
+      if (rearDeviceId) {
         attempts.push({
-          label: "selectedDeviceId",
+          label: "rear-deviceId",
+          constraints: {
+            video: { deviceId: { exact: rearDeviceId } },
+            audio: false,
+          },
+        });
+      }
+      if (selectedDeviceId && selectedDeviceId !== rearDeviceId) {
+        attempts.push({
+          label: "selected-deviceId",
           constraints: {
             video: { deviceId: { exact: selectedDeviceId } },
             audio: false,
           },
         });
       }
+
       attempts.push(
         {
           label: "facingMode-ideal-environment",
@@ -2122,7 +2139,11 @@ export default function App() {
           successfulAttempt = attempt;
           break;
         } catch (attemptErr) {
-          console.error(`LIVE PREVIEW ATTEMPT FAILED [${attempt.label}]`, attemptErr);
+          console.warn(
+            `LIVE PREVIEW ATTEMPT FAILED [${attempt.label}]`,
+            attemptErr?.name,
+            attemptErr?.message
+          );
         }
       }
 
@@ -2132,17 +2153,27 @@ export default function App() {
         return;
       }
 
-      if (!videoRef.current) {
+      let video = videoRef.current;
+      if (!video) {
+        const mountStart = Date.now();
+        while (!video && Date.now() - mountStart < 500) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          video = videoRef.current;
+        }
+      }
+
+      if (!video) {
         if (typeof stream.getTracks === "function") {
           stream.getTracks().forEach((track) => track.stop());
         }
         throw new Error("Video element not ready");
       }
 
-      videoRef.current.srcObject = stream;
-      videoRef.current.setAttribute("playsinline", true);
-      videoRef.current.muted = true;
-      await videoRef.current.play();
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+      video.setAttribute("playsinline", "true");
+      await video.play();
 
       setIsScanning(true);
       setAwaitingPhoto(true);
@@ -4523,8 +4554,8 @@ export default function App() {
     }));
     setProduct(null);
     setBestKnownLocation(null);
-    await startLivePreview();
     setAwaitingPhoto(true);
+    await startLivePreview();
   };
 
   const handleAttachOptionalBarcode = () => {
