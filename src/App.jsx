@@ -318,32 +318,160 @@ const normalizeDetectedPriceToNumber = (value) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+// Returns a clean catalog/placeholder image URL for cart display.
+// Raw user-captured photo upload URLs are intentionally excluded so the
+// Smart Cart never shows a user's personal photo.
+// Priority: (1) existing clean catalog image_url, (2) category placeholder, (3) default MVP placeholder.
+const MVP_PLACEHOLDER_IMAGE = "https://placehold.co/80x80/e2e8f0/64748b?text=Item";
+
+const CATEGORY_PLACEHOLDER_MAP = {
+  produce:    "https://placehold.co/80x80/dcfce7/166534?text=🥦",
+  meat:       "https://placehold.co/80x80/fee2e2/991b1b?text=🥩",
+  poultry:    "https://placehold.co/80x80/fee2e2/991b1b?text=🍗",
+  dairy:      "https://placehold.co/80x80/dbeafe/1d4ed8?text=🥛",
+  bakery:     "https://placehold.co/80x80/fef9c3/854d0e?text=🍞",
+  deli:       "https://placehold.co/80x80/fce7f3/9d174d?text=🧀",
+  frozen:     "https://placehold.co/80x80/e0f2fe/0369a1?text=🧊",
+  beverage:   "https://placehold.co/80x80/e0f2fe/0369a1?text=🥤",
+  snack:      "https://placehold.co/80x80/fef3c7/92400e?text=🍪",
+  cereal:     "https://placehold.co/80x80/fef3c7/92400e?text=🥣",
+  canned:     "https://placehold.co/80x80/f1f5f9/475569?text=🥫",
+  household:  "https://placehold.co/80x80/f1f5f9/475569?text=🧹",
+  personal:   "https://placehold.co/80x80/fdf4ff/7e22ce?text=🧴",
+};
+
+const KEYWORD_PLACEHOLDER_MAP = {
+  dove: "https://placehold.co/80x80/fdf4ff/7e22ce?text=Dove",
+  eggs: "https://placehold.co/80x80/fef9c3/854d0e?text=Eggs",
+  milk: "https://placehold.co/80x80/dbeafe/1d4ed8?text=Milk",
+  bread: "https://placehold.co/80x80/fef3c7/92400e?text=Bread",
+  chicken: "https://placehold.co/80x80/fee2e2/991b1b?text=Chicken",
+  beef: "https://placehold.co/80x80/fee2e2/991b1b?text=Beef",
+  steak: "https://placehold.co/80x80/fee2e2/991b1b?text=Steak",
+  produce: "https://placehold.co/80x80/dcfce7/166534?text=Produce",
+  cereal: "https://placehold.co/80x80/fef3c7/92400e?text=Cereal",
+  snack: "https://placehold.co/80x80/fef3c7/92400e?text=Snack",
+  household: "https://placehold.co/80x80/f1f5f9/475569?text=Home",
+  "personal care": "https://placehold.co/80x80/fdf4ff/7e22ce?text=Care",
+};
+
+const isRawUploadUrl = (url) => {
+  if (!url) return false;
+  const s = String(url);
+  // Supabase storage bucket paths used for AI evidence uploads
+  return (
+    s.includes("/product-images/") ||
+    s.includes("/storage/v1/object/") ||
+    s.includes("supabase.co/storage")
+  );
+};
+
+const getCleanCartImageForProduct = ({
+  existingImageUrl,
+  verifiedImageUrl,
+  category,
+  productName,
+  brand,
+} = {}) => {
+  // Prefer verified catalog image when available and safe
+  if (verifiedImageUrl && !isRawUploadUrl(verifiedImageUrl)) {
+    return verifiedImageUrl;
+  }
+
+  // If there's already a clean catalog image (not a raw user upload), use it
+  if (existingImageUrl && !isRawUploadUrl(existingImageUrl)) {
+    return existingImageUrl;
+  }
+
+  // Use a category-matched placeholder when available
+  if (category) {
+    const cat = String(category).toLowerCase();
+    for (const [key, url] of Object.entries(CATEGORY_PLACEHOLDER_MAP)) {
+      if (cat.includes(key)) return url;
+    }
+  }
+
+  // Brand/product keyword placeholders for common items and manual entries
+  const keywordText = `${String(brand || "")} ${String(productName || "")}`.toLowerCase();
+  if (keywordText) {
+    for (const [key, url] of Object.entries(KEYWORD_PLACEHOLDER_MAP)) {
+      if (keywordText.includes(key)) return url;
+    }
+  }
+
+  return MVP_PLACEHOLDER_IMAGE;
+};
+
 const extractWeightedLabelPriceFromText = (rawText) => {
   const text = String(rawText || "");
 
+  // ── Unit-price patterns (ordered: most specific first) ────────────────────
+  // "PRICE PER LB. $5.29", "PRICE PER LB $5.29", "PRICE/LB $5.29"
+  // "PRICE PER POUND $5.29", "PER LB $5.29"
+  // "$5.29 / LB", "$5.29 PER LB"
+  // "UNIT PRICE $5.29"  (existing behaviour preserved)
+  const perLbUnitPriceMatch =
+    text.match(/price\s+per\s+lb\.?s?\.?\s*\$?\s*(\d+(?:\.\d{1,2})?)/i) ||
+    text.match(/price\s*\/\s*lb\.?s?\.?\s*\$?\s*(\d+(?:\.\d{1,2})?)/i) ||
+    text.match(/price\s+per\s+pound\.?\s*\$?\s*(\d+(?:\.\d{1,2})?)/i) ||
+    text.match(/\bper\s+lb\.?s?\.?\s*\$?\s*(\d+(?:\.\d{1,2})?)/i) ||
+    text.match(/\$\s*(\d+(?:\.\d{1,2})?)\s*\/\s*lb\.?s?/i) ||
+    text.match(/\$\s*(\d+(?:\.\d{1,2})?)\s+per\s+lb\.?s?/i);
+
   const unitPriceMatch =
+    perLbUnitPriceMatch ||
     text.match(/unit\s*price[^$0-9]*\$?\s*(\d+(?:\.\d{1,2})?)/i) ||
     text.match(/\bunit\s*price\b[\s\S]{0,20}?\$?\s*(\d+(?:\.\d{1,2})?)/i);
 
+  const isPerLbPattern = Boolean(perLbUnitPriceMatch);
+
+  // ── Total-price patterns ──────────────────────────────────────────────────
+  // "TOTAL PRICE $12.22", "TOTAL $12.22", "PRICE $12.22" (fallback)
   const totalPriceMatch =
-    text.match(/total\s*price[^$0-9]*\$?\s*(\d+(?:\.\d{1,2})?)/i) ||
-    text.match(/\btotal\b[\s\S]{0,20}?\$?\s*(\d+(?:\.\d{1,2})?)/i);
+    text.match(/total\s+price\s*\$?\s*(\d+(?:\.\d{1,2})?)/i) ||
+    text.match(/\btotal\s*\$?\s*(\d+(?:\.\d{1,2})?)/i) ||
+    text.match(/\bprice\s*\$?\s*(\d+(?:\.\d{1,2})?)/i);
 
+  // ── Weight patterns ───────────────────────────────────────────────────────
+  // "NET WT. LBS. 2.31", "NET WT LBS 2.31", "NET WT. LB 2.31"
+  // "NET WEIGHT 2.31 LB", "WT LBS 2.31", "2.31 LBS"
   const netWeightLbMatch =
-    text.match(/net\s*wt\.?\s*\/?\s*lb[^0-9]*(\d+(?:\.\d+)?)/i) ||
-    text.match(/(\d+(?:\.\d+)?)\s*lb\b/i);
+    text.match(/net\s*wt\.?\s*lb\.?s?\.?\s*(\d+(?:\.\d+)?)/i) ||
+    text.match(/net\s*weight\s+(\d+(?:\.\d+)?)\s*lb/i) ||
+    text.match(/\bwt\.?\s*lb\.?s?\s*(\d+(?:\.\d+)?)/i) ||
+    text.match(/(\d+(?:\.\d+)?)\s*lb\.?s?\b/i);
 
-  if (unitPriceMatch) {
-    return {
-      amount: Number(unitPriceMatch[1]),
-      unit: netWeightLbMatch ? "price_per_lb" : "each",
-      source: "unit_price_label",
-      matched_total_price: totalPriceMatch ? Number(totalPriceMatch[1]) : null,
-      matched_weight_lb: netWeightLbMatch ? Number(netWeightLbMatch[1]) : null,
-    };
-  }
+  if (!unitPriceMatch) return null;
 
-  return null;
+  const unitAmount = Number(unitPriceMatch[1]);
+  const weightLb = netWeightLbMatch ? Number(netWeightLbMatch[1]) : null;
+  const totalAmount = totalPriceMatch ? Number(totalPriceMatch[1]) : null;
+
+  // Sanity check: unit × weight ≈ total (within $0.10)
+  const inferredTotalMatches =
+    unitAmount && weightLb && totalAmount
+      ? Math.abs(unitAmount * weightLb - totalAmount) <= 0.10
+      : false;
+
+  const result = {
+    amount: unitAmount,
+    unit: (isPerLbPattern || weightLb) ? "price_per_lb" : "each",
+    source: "photo_sign",
+    price_label_source: isPerLbPattern ? "price_per_lb_label" : "unit_price_label",
+    matched_total_price: totalAmount,
+    matched_weight_lb: weightLb,
+    inferred_total_matches: inferredTotalMatches,
+  };
+
+  console.info("WEIGHTED PRICE PARSED", {
+    amount: result.amount,
+    unit: result.unit,
+    matched_weight_lb: result.matched_weight_lb,
+    matched_total_price: result.matched_total_price,
+    inferred_total_matches: result.inferred_total_matches,
+  });
+
+  return result;
 };
 
 const extractDetectedPriceFromAi = (aiPayload, aiResponse) => {
@@ -369,7 +497,7 @@ const extractDetectedPriceFromAi = (aiPayload, aiResponse) => {
         cents: String(Math.round(weightedLabelPrice.amount * 100)),
         unit: weightedLabelPrice.unit,
         source: "photo_sign",
-        price_label_source: "unit_price",
+        price_label_source: weightedLabelPrice.price_label_source || "unit_price",
       };
     }
   }
@@ -2275,11 +2403,45 @@ export default function App() {
     if (!scannedBarcode) return null;
 
     try {
-      const { data, error: productError } = await supabase
+      let data = null;
+      let productError = null;
+
+      const isMissingOptionalColumnError = (err) => {
+        const message = String(err?.message || "").toLowerCase();
+        const details = String(err?.details || "").toLowerCase();
+        const hint = String(err?.hint || "").toLowerCase();
+        const code = String(err?.code || "").toLowerCase();
+        const combined = `${message} ${details} ${hint} ${code}`;
+
+        return (
+          combined.includes("column") ||
+          combined.includes("schema cache") ||
+          combined.includes("does not exist") ||
+          combined.includes("could not find") ||
+          combined.includes("pgrst") ||
+          combined.includes("42703")
+        );
+      };
+
+      const preferredResult = await supabase
         .from("catalog_products")
-        .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
+        .select("id, barcode, product_name, image_url, verified_image_url, brand, source, size_value, size_unit, quantity, category")
         .eq("barcode", scannedBarcode)
         .maybeSingle();
+
+      data = preferredResult.data;
+      productError = preferredResult.error;
+
+      if (productError && isMissingOptionalColumnError(productError)) {
+        const fallbackResult = await supabase
+          .from("catalog_products")
+          .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
+          .eq("barcode", scannedBarcode)
+          .maybeSingle();
+
+        data = fallbackResult.data;
+        productError = fallbackResult.error;
+      }
 
       if (productError) {
         throw productError;
@@ -2290,16 +2452,23 @@ export default function App() {
       }
 
       return {
-        catalog_id: data.id || null,
-        name: data.product_name || "Unknown product",
-        image: data.image_url || "",
-        barcode: data.barcode || scannedBarcode,
-        brand: data.brand || "",
-        category: "",
-        size_value: data.size_value || "",
-        size_unit: data.size_unit || "",
-        quantity: data.quantity || "",
-        source: data.source || "catalog",
+        catalog_id: data?.id || null,
+        name: data?.product_name || "Unknown product",
+        image: getCleanCartImageForProduct({
+          verifiedImageUrl: data?.verified_image_url || null,
+          existingImageUrl: data?.image_url || "",
+          category: data?.category || "",
+          productName: data?.product_name || "",
+          brand: data?.brand || "",
+        }),
+        verified_image_url: data?.verified_image_url || null,
+        barcode: data?.barcode || scannedBarcode,
+        brand: data?.brand || "",
+        category: data?.category || "",
+        size_value: data?.size_value || "",
+        size_unit: data?.size_unit || "",
+        quantity: data?.quantity || "",
+        source: data?.source || "catalog",
       };
     } catch (err) {
       console.error("KNOWN PRODUCT LOAD ERROR:", err);
@@ -2634,7 +2803,7 @@ export default function App() {
         const result = await supabase
           .from("catalog_products")
           .upsert(
-            [{ barcode: productKey, product_name: "Unknown product", image_url: firstImageUrl, source: initialSourceValue }],
+            [{ barcode: productKey, product_name: "Unknown product", image_url: null, source: initialSourceValue }],
             { onConflict: "barcode" }
           )
           .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
@@ -2644,7 +2813,7 @@ export default function App() {
       } else {
         const result = await supabase
           .from("catalog_products")
-          .insert([{ barcode: productKey, product_name: "Unknown product", image_url: firstImageUrl, source: initialSourceValue }])
+          .insert([{ barcode: productKey, product_name: "Unknown product", image_url: null, source: initialSourceValue }])
           .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
           .single();
         savedRow = result.data;
@@ -2987,7 +3156,15 @@ export default function App() {
       const finalProduct = {
         catalog_id: finalRow?.id || savedRow?.id || null,
         name: finalResolvedProductName,
-        image: finalRow?.image_url || firstImageUrl,
+        raw_photo_url: firstImageUrl || null,
+        image: getCleanCartImageForProduct({
+          verifiedImageUrl: finalRow?.verified_image_url,
+          existingImageUrl: finalRow?.image_url,
+          category: normalizedCategory || "",
+          productName: finalResolvedProductName,
+          brand: finalRow?.brand || normalizedBrand || "",
+        }),
+        verified_image_url: finalRow?.verified_image_url || null,
         barcode: normalizedBarcode || productKey,
         is_photo_only: isPhotoOnlyProduct,
         brand: finalRow?.brand || normalizedBrand || "",
@@ -3388,7 +3565,15 @@ export default function App() {
 
       const updatedProduct = {
         name: updatedRow.product_name || correctedName,
-        image: updatedRow.image_url || product.image,
+        raw_photo_url: product.raw_photo_url || null,
+        image: getCleanCartImageForProduct({
+          verifiedImageUrl: updatedRow?.verified_image_url || product.verified_image_url,
+          existingImageUrl: updatedRow.image_url,
+          category: updatedRow.category || product.category || "",
+          productName: updatedRow.product_name || correctedName,
+          brand: updatedRow.brand || correctedBrand,
+        }),
+        verified_image_url: updatedRow?.verified_image_url || product.verified_image_url || null,
         barcode: updatedRow.barcode || product.barcode,
         brand: updatedRow.brand || correctedBrand,
         source: updatedRow.source || "user_corrected",
@@ -3968,16 +4153,37 @@ export default function App() {
     if (authUser) {
       localStorage.removeItem("currentUserProfile");
       setCurrentUserProfile(null);
-      const profile = await loadOrCreateSupabaseProfile(authUser);
-      if (profile) {
-        const normalizedProfile = { ...profile, is_guest: false };
-        setCurrentUserProfile(normalizedProfile);
-        localStorage.setItem("currentUserProfile", JSON.stringify(normalizedProfile));
-        setAppScreen("store");
-        setShowOnboarding(false);
-        setShowLoginModal(false);
-        return;
+      try {
+        const profile = await withTimeout(
+          loadOrCreateSupabaseProfile(authUser),
+          8000,
+          "Profile load"
+        );
+
+        if (profile) {
+          const normalizedProfile = { ...profile, is_guest: false };
+          setCurrentUserProfile(normalizedProfile);
+          localStorage.setItem("currentUserProfile", JSON.stringify(normalizedProfile));
+          setAppScreen("store");
+          setShowOnboarding(false);
+          setShowLoginModal(false);
+          return;
+        }
+      } catch (err) {
+        console.error("START SHOPPING PROFILE LOAD ERROR:", err);
       }
+
+      const temporaryProfile = createTemporarySupabaseProfile(authUser);
+      setCurrentUserProfile(temporaryProfile);
+      localStorage.setItem("currentUserProfile", JSON.stringify(temporaryProfile));
+      setAppScreen("store");
+      setShowOnboarding(false);
+      setShowLoginModal(false);
+      setToast({
+        message: "Signed in. Profile is still syncing.",
+        type: "success",
+      });
+      return;
     }
 
     if (currentUserProfile && !isGuestMode) {
@@ -4258,6 +4464,14 @@ export default function App() {
             confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? item.confidence_score ?? 0,
             store_id: itemStoreId || item.store_id || null,
             store_name: locationToUse?.store_name || item.store_name || selectedStore?.name || "",
+            cart_image_url: getCleanCartImageForProduct({
+              verifiedImageUrl: productToAdd.verified_image_url,
+              existingImageUrl: productToAdd.cart_image_url || productToAdd.image,
+              category: productToAdd.category || item.category || "",
+              productName: productToAdd.name || itemProductName,
+              brand: productToAdd.brand || itemBrand,
+            }),
+            category: productToAdd.category || item.category || "",
           };
         })
       );
@@ -4272,6 +4486,7 @@ export default function App() {
       barcode: itemBarcode,
       product_name: itemProductName,
       brand: itemBrand,
+      category: productToAdd.category || "",
       store_id: itemStoreId || null,
       store_name: locationToUse?.store_name || selectedStore?.name || "",
       source: productToAdd.source || "manual",
@@ -4296,6 +4511,13 @@ export default function App() {
       shelf: locationToUse?.shelf || "",
       confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? 0,
       brand_lock: false,
+      cart_image_url: getCleanCartImageForProduct({
+        verifiedImageUrl: productToAdd.verified_image_url,
+        existingImageUrl: productToAdd.cart_image_url || productToAdd.image,
+        category: productToAdd.category || "",
+        productName: productToAdd.name || itemProductName,
+        brand: productToAdd.brand || itemBrand,
+      }),
     };
 
     setShoppingListItems((prev) => [...prev, item]);
@@ -4336,6 +4558,11 @@ export default function App() {
         size_unit: "",
         quantity: "1",
         notes: "",
+        cart_image_url: getCleanCartImageForProduct({
+          productName: trimmed,
+          category: "",
+          brand: "",
+        }),
         price_badge_source: "manual",
         brand_lock: false,
       },
@@ -5141,7 +5368,11 @@ export default function App() {
     }
 
     if (locationStep === "price") {
-      const isWeightedArea = ["Produce", "Meat / Poultry"].includes(locationForm.aisle);
+      const aisleLower = String(locationForm.aisle || "").toLowerCase();
+      const isWeightedArea =
+        aisleLower.includes("produce") ||
+        aisleLower.includes("meat") ||
+        aisleLower.includes("poultry");
       const shouldShowEggQuantities = isEggItem(product, correctionForm);
       const priceSourceMeta = getPriceSourceMeta(locationForm.price_source);
       const detectedUnitLabel = formatDetectedUnitLabel(locationForm.detected_price_unit);
@@ -6773,6 +7004,13 @@ export default function App() {
                             setCartEditError("");
                           }}
                         >
+                  <div style={{ width: "100%", marginBottom: 8 }}>
+                    <img
+                      src={item.cart_image_url || item.image || MVP_PLACEHOLDER_IMAGE}
+                      alt={item.product_name || "Product"}
+                      style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", border: "1px solid #e2e8f0", background: "#f8fafc" }}
+                    />
+                  </div>
                   <div style={styles.rewardTitle}>{item.product_name}</div>
                   <div style={styles.rewardDescription}>
                     {item.brand || "Unknown brand"}
