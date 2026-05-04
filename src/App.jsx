@@ -276,7 +276,7 @@ const formatDetectedUnitLabel = (detectedUnit) => {
 const getPriceSourceMeta = (priceSource) => {
   if (priceSource === "photo_sign") {
     return {
-      icon: "??",
+      icon: "Photo",
       label: "Price from shelf photo",
       color: "#166534",
       background: "#dcfce7",
@@ -286,7 +286,7 @@ const getPriceSourceMeta = (priceSource) => {
 
   if (priceSource === "user_corrected") {
     return {
-      icon: "??",
+      icon: "Edited",
       label: "User edited price",
       color: "#92400e",
       background: "#fef3c7",
@@ -637,7 +637,6 @@ export default function App() {
   const [manualBarcode, setManualBarcode] = useState("");
   const [awaitingPhoto, setAwaitingPhoto] = useState(false);
   const [isCapturingPhoto, setIsCapturingPhoto] = useState(false);
-  const [cameraDebug, setCameraDebug] = useState({});
 
   // ============================================================================
   // STATE - Barcode & Status
@@ -1985,12 +1984,6 @@ export default function App() {
     };
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setCameraDebug({
-        errorName: "NotSupportedError",
-        errorMessage: "navigator.mediaDevices.getUserMedia is unavailable",
-        constraintsAttempted: baseConstraints,
-        fallbackAttempted: false,
-      });
       setError("Camera is not supported in this browser. Use Upload from Gallery instead.");
       setStatus("Use Gallery Instead to continue.");
       return;
@@ -2045,12 +2038,6 @@ export default function App() {
           break;
         } catch (attemptErr) {
           console.error(`LIVE PREVIEW ATTEMPT FAILED [${attempt.label}]`, attemptErr);
-          setCameraDebug({
-            errorName: String(attemptErr?.name || "UnknownError"),
-            errorMessage: String(attemptErr?.message || "Unknown camera error"),
-            constraintsAttempted: attempt.constraints,
-            fallbackAttempted: i > 0,
-          });
         }
       }
 
@@ -2076,20 +2063,8 @@ export default function App() {
       setAwaitingPhoto(true);
       setStatus("Camera live. Capture a product photo.");
       setError("");
-      setCameraDebug({
-        errorName: "",
-        errorMessage: "",
-        constraintsAttempted: successfulAttempt?.constraints || baseConstraints,
-        fallbackAttempted: attempts.indexOf(successfulAttempt) > 0,
-      });
     } catch (err) {
       console.error("LIVE PREVIEW ERROR:", err);
-      setCameraDebug({
-        errorName: String(err?.name || "UnknownError"),
-        errorMessage: String(err?.message || "Unknown camera error"),
-        constraintsAttempted: baseConstraints,
-        fallbackAttempted: Boolean(selectedDeviceId),
-      });
       setError("Camera could not start. Use Gallery instead.");
       setStatus("Use Gallery Instead to continue.");
     }
@@ -2427,7 +2402,7 @@ export default function App() {
     const files = Array.from(event.target.files || []);
     event.target.value = "";
     if (files.length === 0) {
-      alert("Camera failed. Please try again or upload from your gallery.");
+      setStatus("No photo selected.");
       return;
     }
     console.log("FILES RECEIVED:", files);
@@ -3186,9 +3161,9 @@ export default function App() {
       // TODO: Future Google Maps directions hook.
 
       setStatus(
-        `Location confirmed and added to your cart memory ? ${strongConfirmationCount} ${
+        `Location confirmed and added to your cart memory • ${strongConfirmationCount} ${
           strongConfirmationCount === 1 ? "confirmation" : "confirmations"
-        } ? confidence ${confidenceScore}%`
+        } • confidence ${confidenceScore}%`
       );
       setToast({ message: 'Location confirmed and added to cart memory!', type: 'success' });
     } catch (err) {
@@ -5368,14 +5343,14 @@ export default function App() {
         <div style={styles.reviewBox}>
           <div><strong>Product:</strong> {product?.name || "Unknown product"}</div>
           <div><strong>Store:</strong> {selectedStore?.name || "No store selected"}</div>
-          <div><strong>Aisle / Area:</strong> {locationForm.aisle || "?"}</div>
-          <div><strong>Section:</strong> {locationForm.section || "?"}</div>
-          <div><strong>Shelf:</strong> {locationForm.shelf || "?"}</div>
-          <div><strong>Size:</strong> {locationForm.size_value || "?"} {locationForm.size_unit || ""}</div>
-          <div><strong>Package Size:</strong> {locationForm.quantity || "?"}</div>
+          <div><strong>Aisle / Area:</strong> {locationForm.aisle || "Not set"}</div>
+          <div><strong>Section:</strong> {locationForm.section || "Not set"}</div>
+          <div><strong>Shelf:</strong> {locationForm.shelf || "Not set"}</div>
+          <div><strong>Size:</strong> {locationForm.size_value || "Not set"} {locationForm.size_unit || ""}</div>
+          <div><strong>Package Size:</strong> {locationForm.quantity || "Not set"}</div>
           <div><strong>Price:</strong> ${formatCentsToDollars(locationForm.price)} {formatPriceType(locationForm.price_type)}</div>
           {locationForm.price_source === "missing" ? (
-            <div><strong>Price note:</strong> Price skipped ? add later</div>
+            <div><strong>Price note:</strong> Price skipped - add later</div>
           ) : null}
         </div>
 
@@ -5513,7 +5488,7 @@ export default function App() {
               style={styles.loginIconButton}
               onClick={() => setShowLoginModal(true)}
             >
-              ??
+              Me
             </button>
           </div>
 
@@ -5537,7 +5512,7 @@ export default function App() {
           </button>
 
           <div style={styles.introCommunityCard}>
-            <div style={styles.introCommunityTitle}>?? Can?t find an item?</div>
+            <div style={styles.introCommunityTitle}>Can’t find an item?</div>
 
             <button
               style={styles.introCommunityButton}
@@ -5562,7 +5537,7 @@ export default function App() {
             </button>
 
             <p style={styles.introCommunityText}>
-              Tell the community what you?re looking for. If another shopper sees it, they can submit the aisle, shelf, price, or store location.
+              Tell the community what you’re looking for. If another shopper sees it, they can submit the aisle, shelf, price, or store location.
             </p>
           </div>
 
@@ -5792,7 +5767,7 @@ export default function App() {
                   style={styles.modalClose}
                   onClick={() => setShowLoginModal(false)}
                 >
-                  ?
+                  ×
                 </button>
               </div>
             </div>
@@ -5895,7 +5870,7 @@ export default function App() {
               }}
               onClick={handleBackToHome}
             >
-              ? Home
+              Home
             </button>
             <span>{currentUserProfile.display_name}</span>
             <span>{currentUserProfile.total_points || 0} pts</span>
@@ -6150,7 +6125,7 @@ export default function App() {
                               fontSize: 11,
                               fontWeight: 800,
                             }}>
-                              {group.aisleConfidence}% ? {aisleBadge.label}
+                              {group.aisleConfidence}% • {aisleBadge.label}
                             </div>
                           </div>
                           <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>
@@ -6184,7 +6159,7 @@ export default function App() {
                                   ) : null}
                                   {(smartItem.section || smartItem.shelf) ? (
                                     <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3 }}>
-                                      {[smartItem.section && `Section: ${smartItem.section}`, smartItem.shelf && `Shelf: ${smartItem.shelf}`].filter(Boolean).join(" ? ")}
+                                      {[smartItem.section && `Section: ${smartItem.section}`, smartItem.shelf && `Shelf: ${smartItem.shelf}`].filter(Boolean).join(" • ")}
                                     </div>
                                   ) : null}
                                   {smartItem.price ? (
@@ -6203,7 +6178,7 @@ export default function App() {
                                       fontWeight: 800,
                                       display: "inline-block",
                                     }}>
-                                      {score}% ? {itemBadge.label}
+                                      {score}% • {itemBadge.label}
                                     </div>
                                     <div style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>{confidenceText}</div>
                                     {isTrustedContributor ? (
@@ -6332,7 +6307,7 @@ export default function App() {
                               fontSize: 11,
                               fontWeight: 800,
                             }}>
-                              {group.aisleConfidence}% ? {aisleBadge.label}
+                              {group.aisleConfidence}% • {aisleBadge.label}
                             </div>
                           </div>
                           <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>
@@ -6368,7 +6343,7 @@ export default function App() {
                                   ) : null}
                                   {(smartItem.section || smartItem.shelf) ? (
                                     <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3 }}>
-                                      {[smartItem.section && `Section: ${smartItem.section}`, smartItem.shelf && `Shelf: ${smartItem.shelf}`].filter(Boolean).join(" ? ")}
+                                      {[smartItem.section && `Section: ${smartItem.section}`, smartItem.shelf && `Shelf: ${smartItem.shelf}`].filter(Boolean).join(" • ")}
                                     </div>
                                   ) : null}
                                   {smartItem.price ? (
@@ -6387,7 +6362,7 @@ export default function App() {
                                       fontWeight: 800,
                                       display: "inline-block",
                                     }}>
-                                      {score}% ? {itemBadge.label}
+                                      {score}% • {itemBadge.label}
                                     </div>
                                     <div style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>{confidenceText}</div>
                                     {isTrustedContributor ? (
@@ -6564,24 +6539,24 @@ export default function App() {
                   <div style={styles.rewardDescription}>
                     {item.brand || "Unknown brand"}
                     {item.size_value || item.size_unit
-                      ? ` ? ${item.size_value || ""}${item.size_unit ? ` ${item.size_unit}` : ""}`
+                      ? ` • ${item.size_value || ""}${item.size_unit ? ` ${item.size_unit}` : ""}`
                       : ""}
-                    {item.quantity ? ` ? qty ${item.quantity}` : ""}
+                    {item.quantity ? ` • qty ${item.quantity}` : ""}
                     {itemPrice != null
-                      ? ` ? $${Number(itemPrice).toFixed(2)} ${priceTypeLabel}`
+                      ? ` • $${Number(itemPrice).toFixed(2)} ${priceTypeLabel}`
                       : item.price_source === "missing"
-                        ? " ? Price not added yet"
+                        ? " • Price not added yet"
                         : ""}
-                    {item.notes ? ` ? note: ${item.notes}` : ""}
+                    {item.notes ? ` • note: ${item.notes}` : ""}
                   </div>
 
                   <div style={{ ...styles.rewardDescription, marginTop: -2 }}>
                     Confidence: {Number(smartItem.confidence_score || 0)}%
-                    {smartItem.needsContribution ? " ? Needs contribution" : " ? Known location"}
+                    {smartItem.needsContribution ? " • Needs contribution" : " • Known location"}
                   </div>
 
                   <div style={{ ...styles.rewardDescription, marginTop: -2 }}>
-                    {item.price_badge_source === "manual" ? "?? User edited" : "?? AI detected"}
+                    {item.price_badge_source === "manual" ? "Price source: User edited" : "Price source: AI detected"}
                   </div>
 
                   {isEditing && cartEditForm ? (
@@ -6835,17 +6810,17 @@ export default function App() {
                     Cart Coverage: {cartComparison[0].coverage}%
                   </div>
                   <div style={styles.rewardDescription}>
-                    Brand Match: {cartComparison[0].brand_match_pct ?? "?"}%
+                    Brand Match: {cartComparison[0].brand_match_pct ?? "N/A"}%
                   </div>
                   <div style={styles.rewardDescription}>
-                    Price Confidence: {cartComparison[0].avg_confidence ?? "?"}%
+                    Price Confidence: {cartComparison[0].avg_confidence ?? "N/A"}%
                   </div>
                   <div style={styles.rewardDescription}>
                     Brand mode: {brandComparisonMode === "brand_match" ? "Exact brand preferred" : "Flexible"}
                   </div>
                   {cartComparison[0].is_estimate ? (
                     <div style={{ fontSize: 12, color: "#92400e", background: "#fef3c7", borderRadius: 8, padding: "4px 8px", marginTop: 6 }}>
-                      Comparison estimate ? more scans improve accuracy.
+                      Comparison estimate - more scans improve accuracy.
                     </div>
                   ) : null}
                 </div>
@@ -6858,7 +6833,7 @@ export default function App() {
                         key={`${result.store_id || "store-alt"}-${index}`}
                         style={{ ...styles.rewardDescription, marginBottom: 6 }}
                       >
-                        {`${index + 2}. ${result.store?.name || "Unknown store"} ? $${Number(result.total_price || 0).toFixed(2)} ? ${result.coverage}% coverage ? ${result.brand_match_pct ?? "?"}% brand match`}
+                        {`${index + 2}. ${result.store?.name || "Unknown store"} - $${Number(result.total_price || 0).toFixed(2)} - ${result.coverage}% coverage - ${result.brand_match_pct ?? "N/A"}% brand match`}
                       </div>
                     ))}
                   </div>
@@ -7010,7 +6985,7 @@ export default function App() {
                   handleStoreSearch(value);
                 }, 500);
               }}
-              placeholder="e.g. Target, Walmart, Safeway?"
+              placeholder="e.g. Target, Walmart, Safeway"
               style={{ ...styles.input, marginBottom: 12 }}
             />
 
@@ -7059,13 +7034,13 @@ export default function App() {
                     onClick={handleCreateManualStore}
                     style={{ ...styles.storeOptionButton, borderStyle: 'dashed', color: '#2563eb' }}
                   >
-                    <span style={{ fontWeight: 700 }}>? Use "{manualStoreName.trim()}" as my store</span>
+                    <span style={{ fontWeight: 700 }}>Use "{manualStoreName.trim()}" as my store</span>
                   </button>
                 )}
 
                 {storeSearchQuery && filteredStores.length === 0 && (
                   <div style={{ fontSize: 14, color: '#94a3b8', marginTop: 4 }}>
-                    No matching stores found. Tap ?Find Nearby Stores? or use the option above to add it manually.
+                    No matching stores found. Tap "Find Nearby Stores" or use the option above to add it manually.
                   </div>
                 )}
               </div>
@@ -7097,11 +7072,14 @@ export default function App() {
 
         <div style={styles.card}>
           <div style={styles.sectionTitle}>Identify Item</div>
+          <div style={{ fontSize: 14, color: "#64748b", marginBottom: 10 }}>
+            Take up to 3 photos: product label, size, and shelf price.
+          </div>
           <div style={{ display: "flex", gap: 10, marginTop: 8, marginBottom: 10 }}>
             <button
               type="button"
               onClick={handleStartPhotoFirst}
-              style={{ ...styles.primaryButton, flex: 1 }}
+              style={{ ...styles.primaryButton, flex: 1, minHeight: 56, fontWeight: 800 }}
             >
               Start Camera
             </button>
@@ -7113,26 +7091,36 @@ export default function App() {
               Upload from Gallery
             </button>
           </div>
-          <button
-            type="button"
-            style={{ ...styles.libraryButton, width: "100%", marginBottom: 10 }}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            Use Gallery Instead
-          </button>
-          <div style={styles.rewardDescription}>Status: {status}</div>
-          {error ? <div style={styles.errorBox}>{error}</div> : null}
-          <div style={{ ...styles.infoBox, marginTop: 8 }}>
-            <div><strong>Camera Diagnostics</strong></div>
-            <div>isSecureContext: {String(window.isSecureContext)}</div>
-            <div>mediaDevices: {String(Boolean(navigator.mediaDevices))}</div>
-            <div>getUserMedia: {String(Boolean(navigator.mediaDevices?.getUserMedia))}</div>
-            <div>protocol: {String(window.location.protocol || "")}</div>
-            <div>selectedDeviceId: {selectedDeviceId || "(none)"}</div>
-            <div>availableCameras: {availableCameras.length}</div>
-            <div>lastCameraErrorName: {cameraDebug.errorName || "(none)"}</div>
-            <div>lastCameraErrorMessage: {cameraDebug.errorMessage || "(none)"}</div>
+          <div style={{ ...styles.infoBox, marginTop: 6, marginBottom: 10 }}>
+            <div style={{ fontWeight: 800, marginBottom: 4 }}>Best results</div>
+            <div>- Photo 1: front label</div>
+            <div>- Photo 2: size / net weight</div>
+            <div>- Photo 3: shelf price</div>
           </div>
+          {error || String(status || "").includes("Use Gallery") ? (
+            <button
+              type="button"
+              style={{ ...styles.libraryButton, width: "100%", marginBottom: 10 }}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              Use Gallery Instead
+            </button>
+          ) : null}
+          <div
+            style={{
+              display: "inline-flex",
+              padding: "8px 14px",
+              borderRadius: 999,
+              background: "#eef2ff",
+              color: "#334155",
+              fontSize: 13,
+              fontWeight: 700,
+              marginBottom: 10,
+            }}
+          >
+            {status}
+          </div>
+          {error ? <div style={styles.errorBox}>{error}</div> : null}
         </div>
 
         <div style={styles.card}>
@@ -7143,44 +7131,45 @@ export default function App() {
               <div style={styles.scannerCornerBottomLeft}></div>
               <div style={styles.scannerCornerBottomRight}></div>
               
-              <div style={styles.videoWrap}>
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  style={styles.video}
-                />
-                {!isScanning && !awaitingPhoto && (
+              <div style={{ ...styles.videoWrap, borderRadius: 16, overflow: "hidden", maxHeight: 360 }}>
+                {isScanning || awaitingPhoto ? (
+                  <>
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      style={{ ...styles.video, width: "100%", height: "100%", objectFit: "cover" }}
+                    />
+                    {awaitingPhoto && !isScanning && (
+                      <div style={{
+                        position: "absolute",
+                        inset: 0,
+                        background: "rgba(0,0,0,0.75)",
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        zIndex: 10,
+                        textAlign: "center",
+                        padding: 20
+                      }}>
+                        <div style={{ fontSize: 48, marginBottom: 12 }}>Photo</div>
+                        <div style={{ fontSize: 22, fontWeight: 800, color: "#fff", marginBottom: 8 }}>
+                          Photo Required
+                        </div>
+                        <div style={{ fontSize: 15, color: "#e5e7eb", maxWidth: 260 }}>
+                          Take a clear front-label photo so MVP can identify this product.
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
                   <div style={styles.overlay}>
                     <div style={styles.overlayIcon}>[ ]</div>
-                    <div style={styles.overlayText}>
-                      Start with a product photo
-                    </div>
+                    <div style={styles.overlayText}>Start with a product photo</div>
                     <div style={styles.overlaySubtext}>
                       Take or upload clear photos of the front label, size or weight, and shelf price when available. Barcode is optional.
-                    </div>
-                  </div>
-                )}
-                {awaitingPhoto && !isScanning && (
-                  <div style={{
-                    position: "absolute",
-                    inset: 0,
-                    background: "rgba(0,0,0,0.75)",
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    zIndex: 10,
-                    textAlign: "center",
-                    padding: 20
-                  }}>
-                    <div style={{ fontSize: 48, marginBottom: 12 }}>??</div>
-                    <div style={{ fontSize: 22, fontWeight: 800, color: "#fff", marginBottom: 8 }}>
-                      Photo Required
-                    </div>
-                    <div style={{ fontSize: 15, color: "#e5e7eb", maxWidth: 260 }}>
-                      Take a clear front-label photo so MVP can identify this product.
                     </div>
                   </div>
                 )}
@@ -7200,13 +7189,6 @@ export default function App() {
                     onClick={() => fileInputRef.current?.click()}
                   >
                     Upload from Gallery
-                  </button>
-                  <button
-                    type="button"
-                    style={{ ...styles.libraryButton, width: "100%", marginTop: 10 }}
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    Use Gallery Instead
                   </button>
                   <div style={{ ...styles.infoBox, marginTop: 10 }}>
                     Photo-first flow: take or upload a product photo, confirm the AI result, then add location and price.
@@ -7261,18 +7243,27 @@ export default function App() {
               )) : null}
 
               {(isScanning || awaitingPhoto) && (
-                <button
-                  type="button"
-                  onClick={capturePhotoFromLiveCamera}
-                  style={{ ...styles.photoButtonSolid, width: "100%", marginBottom: 10 }}
-                >
-                  Capture Photo
-                </button>
+                <div style={{ display: "flex", gap: 10, width: "100%", marginBottom: 10 }}>
+                  <button
+                    type="button"
+                    onClick={capturePhotoFromLiveCamera}
+                    style={{ ...styles.photoButtonSolid, flex: 1, marginBottom: 0 }}
+                  >
+                    Capture Photo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={stopScanner}
+                    style={{ ...styles.stopButton, flex: 1, minHeight: 52, padding: "0 14px" }}
+                  >
+                    Stop Camera
+                  </button>
+                </div>
               )}
             </div>
           </div>
 
-          {awaitingPhoto && (
+          {(awaitingPhoto || capturedPhotos.length > 0) && (
             <div style={styles.photoPromptBox}>
               {/* -- Header -- */}
               <div style={{
@@ -7291,9 +7282,9 @@ export default function App() {
               {capturedPhotos.length < MAX_PHOTOS && (() => {
                 const nextRole = PHOTO_ROLE_SEQUENCE[capturedPhotos.length];
                 const roleInstructions = [
-                  "Point camera at the product front label ? ensure name and brand are clearly visible.",
-                  "Point camera at the net weight or size label ? usually found on the side or back.",
-                  "Point camera at the shelf price tag ? include the unit price if visible.",
+                  "Point camera at the product front label - ensure name and brand are clearly visible.",
+                  "Point camera at the net weight or size label - usually found on the side or back.",
+                  "Point camera at the shelf price tag - include the unit price if visible.",
                 ];
                 return (
                   <div style={{
@@ -7318,11 +7309,7 @@ export default function App() {
 
               {/* -- Photo count progress -- */}
               <div style={{ fontSize: 14, color: "#475569", marginBottom: 12, fontWeight: 600 }}>
-                {capturedPhotos.length === 0
-                  ? "Take up to 3 photos: front label, size/weight label, price sign"
-                  : capturedPhotos.length < MAX_PHOTOS
-                  ? `${capturedPhotos.length} of ${MAX_PHOTOS} photos captured ? keep going!`
-                  : `All ${MAX_PHOTOS} photos captured`}
+                Photos added: {capturedPhotos.length} / {MAX_PHOTOS}
               </div>
 
               {/* -- Captured photo thumbnails with remove buttons -- */}
@@ -7369,7 +7356,7 @@ export default function App() {
                           padding: 0,
                         }}
                       >
-                        ?
+                        ×
                       </button>
                       <div style={{ position: "absolute", bottom: 2, left: 2, fontSize: 10, color: "#fff", background: "rgba(0,0,0,0.55)", borderRadius: 4, padding: "1px 4px" }}>
                         {`#${i + 1}`}
@@ -7442,11 +7429,10 @@ export default function App() {
               )}
 
               <div style={styles.photoHelpText}>
-                Suggested: Photo 1 = front label, Photo 2 = net weight/size, Photo 3 = price sign. Barcode is optional ? add it after AI identifies the product.
+                Suggested: Photo 1 = front label, Photo 2 = net weight/size, Photo 3 = price sign. Barcode is optional - add it after AI identifies the product.
               </div>
             </div>
           )}
-
           {availableCameras.length > 0 && (
             <div style={styles.fieldBlock}>
               <label style={styles.label}>Camera</label>
@@ -8090,13 +8076,13 @@ export default function App() {
                 <div style={{ fontSize: 12, color: "#1e40af", marginBottom: 8 }}>
                   Price source: {locationForm.price_source}
                   {locationForm.detected_price_unit && locationForm.detected_price_unit !== "unknown"
-                    ? ` ? unit: ${locationForm.detected_price_unit}`
+                    ? ` • unit: ${locationForm.detected_price_unit}`
                     : ""}
                 </div>
               ) : null}
 
               {locationForm.price_source === "missing" ? (
-                <div style={styles.inlineWarning}>Price skipped ? add later</div>
+                <div style={styles.inlineWarning}>Price skipped - add later</div>
               ) : null}
 
               {!priceConfirmed && locationForm.price ? (
@@ -8263,7 +8249,7 @@ export default function App() {
                   })()
                 ) : (
                   <div style={{ fontSize: 14, color: "#64748b" }}>
-                    No price data yet ? be the first to add
+                    No price data yet - be the first to add
                   </div>
                 )}
               </div>
@@ -8271,15 +8257,15 @@ export default function App() {
               <div style={styles.locationDetailsGrid}>
                 <div style={styles.locationDetail}>
                   <div style={styles.locationDetailLabel}>Aisle</div>
-                  <div style={styles.locationDetailValue}>{bestKnownLocation.aisle || "?"}</div>
+                  <div style={styles.locationDetailValue}>{bestKnownLocation.aisle || "Not set"}</div>
                 </div>
                 <div style={styles.locationDetail}>
                   <div style={styles.locationDetailLabel}>Section</div>
-                  <div style={styles.locationDetailValue}>{bestKnownLocation.section || "?"}</div>
+                  <div style={styles.locationDetailValue}>{bestKnownLocation.section || "Not set"}</div>
                 </div>
                 <div style={styles.locationDetail}>
                   <div style={styles.locationDetailLabel}>Shelf</div>
-                  <div style={styles.locationDetailValue}>{bestKnownLocation.shelf || "?"}</div>
+                  <div style={styles.locationDetailValue}>{bestKnownLocation.shelf || "Not set"}</div>
                 </div>
               </div>
 
