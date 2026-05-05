@@ -3756,6 +3756,11 @@ export default function App() {
         toCleanExternalImageUrl(aiResponse?.data?.product_image_url) ||
         toCleanExternalImageUrl(aiResponse?.data?.image_url);
 
+      const imageUrlToPersist =
+        edgeImageUrl ||
+        cleanVerifiedImageUrlCandidate ||
+        null;
+
       let finalRow = savedRow;
 
       if (normalizedProductName) {
@@ -3770,8 +3775,8 @@ export default function App() {
           source: initialSourceValue,
         };
 
-        const updatePayload = cleanVerifiedImageUrlCandidate
-          ? { ...baseUpdatePayload, verified_image_url: cleanVerifiedImageUrlCandidate }
+        const updatePayload = imageUrlToPersist
+          ? { ...baseUpdatePayload, verified_image_url: imageUrlToPersist }
           : baseUpdatePayload;
 
         let updateResult = await supabase
@@ -3808,7 +3813,7 @@ export default function App() {
           ...updatedRow,
           verified_image_url:
             toCleanExternalImageUrl(updatedRow?.verified_image_url) ||
-            cleanVerifiedImageUrlCandidate ||
+            imageUrlToPersist ||
             null,
         };
         setStatus("AI identified product");
@@ -3886,6 +3891,16 @@ export default function App() {
       console.log("FINAL PRODUCT IMAGE HANDOFF:", {
         edgeImageUrl,
         resolvedImageUrl,
+      });
+
+      console.log("IMAGE PIPELINE FINAL CHECK:", {
+        edgeImageUrl,
+        cleanVerifiedImageUrlCandidate,
+        imageUrlToPersist,
+        finalRowVerifiedImage: finalRow?.verified_image_url,
+        resolvedImageUrl,
+        finalProductImage: finalProduct.image,
+        finalProductCartImage: finalProduct.cart_image_url,
       });
 
       setProduct(finalProduct);
