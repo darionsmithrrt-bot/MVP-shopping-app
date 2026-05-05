@@ -3040,6 +3040,12 @@ export default function App() {
           rawAiData?.detected_text ||
           rawAiResult?.detected_text ||
           "",
+        verified_image_url:
+          extractedPayload?.verified_image_url ||
+          rawAiData?.verified_image_url ||
+          rawAiNestedData?.verified_image_url ||
+          rawAiResult?.verified_image_url ||
+          null,
       };
       
       console.log("NORMALIZED AI PAYLOAD AFTER FALLBACK:", aiPayload);
@@ -3159,28 +3165,76 @@ export default function App() {
       setAiIdentityConfidence(Number(aiPayload.confidence || 0));
       const detectedPriceFromAi = extractDetectedPriceFromAi(aiPayload, aiResponse);
 
+      const toCleanExternalImageUrl = (value) => {
+        const candidate = String(value || "").trim();
+        if (!candidate) return null;
+        if (!/^https?:\/\//i.test(candidate)) return null;
+        if (isRawUploadUrl(candidate)) return null;
+        return candidate;
+      };
+
+      const cleanVerifiedImageUrlCandidate =
+        toCleanExternalImageUrl(savedRow?.verified_image_url) ||
+        toCleanExternalImageUrl(aiPayload?.verified_image_url) ||
+        toCleanExternalImageUrl(aiResponse?.data?.verified_image_url) ||
+        toCleanExternalImageUrl(aiResponse?.data?.product_image_url) ||
+        toCleanExternalImageUrl(aiResponse?.data?.image_url);
+
       let finalRow = savedRow;
 
       if (normalizedProductName) {
         setStatus("Updating product with AI result...");
 
-        const { data: updatedRow, error: updateError } = await supabase
+        const baseUpdatePayload = {
+          product_name: normalizedProductName,
+          brand: normalizedBrand,
+          size_value: normalizedSizeValue,
+          size_unit: normalizedSizeUnit,
+          quantity: normalizedQuantity,
+          source: initialSourceValue,
+        };
+
+        const updatePayload = cleanVerifiedImageUrlCandidate
+          ? { ...baseUpdatePayload, verified_image_url: cleanVerifiedImageUrlCandidate }
+          : baseUpdatePayload;
+
+        let updateResult = await supabase
           .from("catalog_products")
-          .update({
-            product_name: normalizedProductName,
-            brand: normalizedBrand,
-            size_value: normalizedSizeValue,
-            size_unit: normalizedSizeUnit,
-            quantity: normalizedQuantity,
-            source: initialSourceValue,
-          })
+          .update(updatePayload)
           .eq("id", savedRow?.id)
           .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
           .single();
 
+        if (updateResult.error && cleanVerifiedImageUrlCandidate) {
+          const errorText = String(updateResult.error?.message || "").toLowerCase();
+          const missingOptionalColumn =
+            errorText.includes("column") ||
+            errorText.includes("does not exist") ||
+            errorText.includes("schema cache") ||
+            errorText.includes("pgrst") ||
+            errorText.includes("42703");
+
+          if (missingOptionalColumn) {
+            updateResult = await supabase
+              .from("catalog_products")
+              .update(baseUpdatePayload)
+              .eq("id", savedRow?.id)
+              .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
+              .single();
+          }
+        }
+
+        const { data: updatedRow, error: updateError } = updateResult;
+
         if (updateError) throw new Error(`AI update failed: ${updateError.message}`);
 
-        finalRow = updatedRow;
+        finalRow = {
+          ...updatedRow,
+          verified_image_url:
+            toCleanExternalImageUrl(updatedRow?.verified_image_url) ||
+            cleanVerifiedImageUrlCandidate ||
+            null,
+        };
         setStatus("AI identified product");
       } else {
         const rawTextCandidate = extractLikelyProductPhraseFromRawText(aiPayload.raw_text);
@@ -3209,13 +3263,19 @@ export default function App() {
         name: finalResolvedProductName,
         raw_photo_url: firstImageUrl || null,
         image: getCleanCartImageForProduct({
-          verifiedImageUrl: finalRow?.verified_image_url,
+          verifiedImageUrl:
+            toCleanExternalImageUrl(finalRow?.verified_image_url) ||
+            cleanVerifiedImageUrlCandidate ||
+            null,
           existingImageUrl: finalRow?.image_url,
           category: normalizedCategory || "",
           productName: finalResolvedProductName,
           brand: finalRow?.brand || normalizedBrand || "",
         }),
-        verified_image_url: finalRow?.verified_image_url || null,
+        verified_image_url:
+          toCleanExternalImageUrl(finalRow?.verified_image_url) ||
+          cleanVerifiedImageUrlCandidate ||
+          null,
         barcode: normalizedBarcode || productKey,
         is_photo_only: isPhotoOnlyProduct,
         brand: finalRow?.brand || normalizedBrand || "",
