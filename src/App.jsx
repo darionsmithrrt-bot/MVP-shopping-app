@@ -1046,6 +1046,7 @@ export default function App() {
   });
   const [aiIdentityConfidence, setAiIdentityConfidence] = useState(0);
   const [showAiSummaryCard, setShowAiSummaryCard] = useState(false);
+  const [imageDebugResult, setImageDebugResult] = useState(null);
   const [isEggQuantityOther, setIsEggQuantityOther] = useState(false);
   // Multi-photo capture
   const MAX_PHOTOS = 3;
@@ -3727,6 +3728,15 @@ export default function App() {
 
         if (response.ok) {
           const imageResult = await response.json();
+
+          setImageDebugResult({
+            imageUrl: imageResult?.imageUrl,
+            fallbackUsed: imageResult?.fallbackUsed,
+            imageSearchQuery: imageResult?.imageSearchQuery,
+            resultCount: imageResult?.debug?.resultCount,
+            firstRawResult: imageResult?.debug?.firstRawResult,
+            googleRaw: imageResult?.debug?.googleRaw,
+          });
 
           console.log("IMAGE FUNCTION RESULT:", imageResult);
 
@@ -8915,6 +8925,12 @@ export default function App() {
                         <div style={styles.aiSummaryMeta}>Qty: {summaryQuantityText}</div>
                         <div style={styles.aiSummaryPrice}>{summaryPriceText}</div>
 
+                        {imageDebugResult ? (
+                          <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>
+                            {JSON.stringify(imageDebugResult, null, 2)}
+                          </pre>
+                        ) : null}
+
                         <div style={styles.aiSummaryConfidenceRow}>
                           {summaryConfidenceItems.map((item) => {
                             const isHigh = item.value >= 0.85;
@@ -8989,6 +9005,11 @@ export default function App() {
               <div style={styles.rewardDescription}>
                 Confirm or edit item details. Barcode is optional.
               </div>
+              {imageDebugResult ? (
+                <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>
+                  {JSON.stringify(imageDebugResult, null, 2)}
+                </pre>
+              ) : null}
               <div style={{ ...styles.aiSummaryName, marginBottom: 8 }}>
                 {correctionForm.product_name || product?.name || "Unknown product"}
               </div>

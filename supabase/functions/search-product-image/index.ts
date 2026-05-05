@@ -3,15 +3,16 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
 type SearchRequestBody = {
+  query?: string;
   productName?: string;
+  product_name?: string;
   brand?: string;
   category?: string;
 };
-
-const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
 
 const jsonResponse = (payload: unknown, status = 200) =>
   new Response(JSON.stringify(payload), {
@@ -22,20 +23,7 @@ const jsonResponse = (payload: unknown, status = 200) =>
     },
   });
 
-const buildSearchQuery = ({ productName, brand, category }: SearchRequestBody): string => {
-  const parts = [String(brand || "").trim(), String(productName || "").trim(), String(category || "").trim(), "product"]
-    .filter(Boolean)
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return parts || "grocery product";
-};
-
-const hasPreferredImageExtension = (value: string): boolean => {
-  const pathname = value.split("?")[0].toLowerCase();
-  return IMAGE_EXTENSIONS.some((ext) => pathname.endsWith(ext));
-};
+const toCleanText = (value: unknown): string => String(value || "").trim();
 
 const isValidHttpsImageCandidate = (value: unknown): value is string => {
   if (typeof value !== "string") return false;
@@ -46,110 +34,125 @@ const isValidHttpsImageCandidate = (value: unknown): value is string => {
   return true;
 };
 
-const isRedirectingUrl = async (url: string): Promise<boolean> => {
-  try {
-    const response = await fetch(url, {
-      method: "HEAD",
-      redirect: "manual",
-    });
+const buildQueries = (body: SearchRequestBody): string[] => {
+  const query = toCleanText(body?.query);
+  const productName = toCleanText(body?.productName) || toCleanText(body?.product_name) || query;
+  const brand = toCleanText(body?.brand);
+  const category = toCleanText(body?.category);
 
-    return response.status >= 300 && response.status < 400;
-  } catch {
-    return true;
-  }
-};
-
-const normalizeGoogleImageCandidates = (items: unknown[]): string[] => {
-  const values: string[] = [];
-
-  for (const item of items) {
-    const obj = item as Record<string, unknown>;
-    if (isValidHttpsImageCandidate(obj?.link)) values.push(obj.link);
-  }
-
-  const unique = [...new Set(values)];
-
-  return unique.sort((a, b) => {
-    const aPreferred = hasPreferredImageExtension(a) ? 1 : 0;
-    const bPreferred = hasPreferredImageExtension(b) ? 1 : 0;
-    return bPreferred - aPreferred;
-  });
-};
-
-const chooseBestDirectImageUrl = async (candidates: string[]): Promise<string | null> => {
-  for (const candidate of candidates) {
-    const isRedirect = await isRedirectingUrl(candidate);
-    if (!isRedirect) return candidate;
-  }
-
-  return null;
+  return [
+    `${brand} ${productName}`.trim(),
+    productName,
+    `${brand} ${category}`.trim(),
+    category,
+  ].filter(Boolean);
 };
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return new Response("ok", {
-      headers: {
-        ...corsHeaders,
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-      },
-    });
+    return new Response("ok", { headers: corsHeaders });
   }
+
+  if (req.method !== "POST") {
+    return jsonResponse({ error: "Method not allowed" }, 405);
+  }
+
+  let googleRaw: unknown = null;
 
   try {
     const googleApiKey = Deno.env.get("GOOGLE_API_KEY") || "";
     const googleCx = Deno.env.get("GOOGLE_CSE_ID") || "";
+    let receivedBody: unknown;
+    try {
+      receivedBody = await req.json();
+    } catch {
+      return jsonResponse({ error: "Malformed request body" }, 400);
+    }
 
-    const body = (await req.json().catch(() => ({}))) as SearchRequestBody;
-    const searchQuery = buildSearchQuery(body);
+    if (!receivedBody || typeof receivedBody !== "object" || Array.isArray(receivedBody)) {
+      return jsonResponse({ error: "Malformed request body" }, 400);
+    }
+
+    const body = receivedBody as SearchRequestBody;
+    const triedQueries = buildQueries(body);
+
+    if (!triedQueries.length) {
+      return jsonResponse({ error: "Malformed request body" }, 400);
+    }
 
     let bestImageUrl: string | null = null;
+    let usedQuery = "";
+    let resultCount = 0;
+    let firstRawResult: unknown = null;
 
     if (googleApiKey && googleCx) {
-      const googleUrl = new URL("https://www.googleapis.com/customsearch/v1");
-      googleUrl.searchParams.set("key", googleApiKey);
-      googleUrl.searchParams.set("cx", googleCx);
-      googleUrl.searchParams.set("searchType", "image");
-      googleUrl.searchParams.set("num", "10");
-      googleUrl.searchParams.set("q", searchQuery);
+      for (const query of triedQueries) {
+        const googleUrl = new URL("https://www.googleapis.com/customsearch/v1");
+        googleUrl.searchParams.set("key", googleApiKey);
+        googleUrl.searchParams.set("cx", googleCx);
+        googleUrl.searchParams.set("searchType", "image");
+        googleUrl.searchParams.set("num", "10");
+        googleUrl.searchParams.set("q", query);
 
-      const googleResponse = await fetch(googleUrl.toString());
-      if (googleResponse.ok) {
-        const googleJson = (await googleResponse.json()) as Record<string, unknown>;
+        const googleResponse = await fetch(googleUrl.toString());
+        if (!googleResponse.ok) {
+          continue;
+        }
+
+        googleRaw = await googleResponse.json();
+        console.log("GOOGLE RAW RESPONSE:", JSON.stringify(googleRaw, null, 2));
+        const googleJson = googleRaw as Record<string, unknown>;
         const items = Array.isArray(googleJson?.items) ? (googleJson.items as unknown[]) : [];
-        const candidates = normalizeGoogleImageCandidates(items);
-        bestImageUrl = await chooseBestDirectImageUrl(candidates);
+
+        if (firstRawResult == null && items.length > 0) {
+          firstRawResult = items[0];
+        }
+
+        resultCount = items.length;
+        usedQuery = query;
+
+        const bestItem = items.find((item) => {
+          const candidate = (item as Record<string, unknown>)?.link;
+          return isValidHttpsImageCandidate(candidate);
+        }) as Record<string, unknown> | undefined;
+
+        if (bestItem && isValidHttpsImageCandidate(bestItem.link)) {
+          bestImageUrl = bestItem.link;
+          break;
+        }
       }
     }
 
-    if (bestImageUrl) {
-      return new Response(
-        JSON.stringify({
-          imageUrl: bestImageUrl,
-          imageSource: "google",
-          imageSearchQuery: searchQuery,
-          confidence: 0.9,
-          fallbackUsed: false,
-        }),
-        { headers: { "Content-Type": "application/json", ...corsHeaders } }
-      );
-    }
-
     return jsonResponse({
-      imageUrl: null,
-      imageSource: "google",
-      imageSearchQuery: searchQuery,
-      confidence: 0,
-      fallbackUsed: true,
+      imageUrl: bestImageUrl,
+      imageSource: "google_custom_search",
+      imageSearchQuery: usedQuery,
+      confidence: bestImageUrl ? 0.9 : 0,
+      fallbackUsed: !bestImageUrl,
+      debug: {
+        receivedBody,
+        triedQueries,
+        resultCount,
+        firstRawResult,
+        googleRaw,
+      },
     });
   } catch (error) {
     console.error("search-product-image error", error);
     return jsonResponse(
       {
         imageUrl: null,
-        imageSource: "google",
+        imageSource: "google_custom_search",
         imageSearchQuery: "",
         confidence: 0,
         fallbackUsed: true,
+        debug: {
+          receivedBody: null,
+          triedQueries: [],
+          resultCount: 0,
+          firstRawResult: null,
+          googleRaw,
+        },
       },
       200
     );
