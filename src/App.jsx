@@ -5364,7 +5364,7 @@ export default function App() {
     };
 
     console.log("CART IMAGE RESOLUTION:", {
-      resolvedCartImage,
+      resolvedImage,
     });
 
     setShoppingListItems((prev) => [...prev, cartItem]);
