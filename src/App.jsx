@@ -5394,6 +5394,12 @@ export default function App() {
     const trimmed = manualListItemName.trim();
     if (!trimmed) return;
 
+    const manualImage = getCleanCartImageForProduct({
+      productName: trimmed,
+      category: "",
+      brand: "",
+    });
+
     setShoppingListItems((prev) => [
       ...prev,
       {
@@ -5409,11 +5415,8 @@ export default function App() {
         size_unit: "",
         quantity: "1",
         notes: "",
-        cart_image_url: getCleanCartImageForProduct({
-          productName: trimmed,
-          category: "",
-          brand: "",
-        }),
+        image: manualImage,
+        cart_image_url: manualImage,
         price_badge_source: "manual",
         brand_lock: false,
       },
@@ -8031,7 +8034,11 @@ export default function App() {
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            saveEditedCartItem(index);
+                            logButtonClick("Save", {
+                              originalIndex: smartItem.originalIndex,
+                              productName: item.product_name,
+                            });
+                            saveEditedCartItem(smartItem.originalIndex);
                           }}
                           style={styles.primaryButton}
                         >
