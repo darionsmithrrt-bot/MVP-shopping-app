@@ -398,6 +398,10 @@ const resolveProductImage = (product = {}) => {
   );
 };
 
+const logButtonClick = (label, meta = {}) => {
+  console.log("BUTTON CLICK:", label, meta);
+};
+
 const extractWeightedLabelPriceFromText = (rawText) => {
   const text = String(rawText || "");
 
@@ -6615,7 +6619,7 @@ export default function App() {
           >
             Back
           </button>
-          <button type="button" style={styles.primaryButton} onClick={handleSaveLocation}>
+          <button type="button" style={styles.primaryButton} onClick={() => { logButtonClick("Save Location"); handleSaveLocation(); }}>
             Save Location
           </button>
         </div>
@@ -7230,6 +7234,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
+              logButtonClick("Store");
               navigateToScreen("store");
             }}
             style={{
@@ -7246,6 +7251,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
+              logButtonClick("Identify Item");
               if (!selectedStore) {
                 setError("Select a store first.");
                 navigateToScreen("store");
@@ -7267,6 +7273,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
+              logButtonClick("Cart");
               navigateToScreen("cart");
             }}
             style={{
@@ -8034,6 +8041,7 @@ export default function App() {
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
+                            logButtonClick("Cancel", { productName: item.product_name });
                             setEditingCartItemIndex(null);
                             setCartEditForm(null);
                             setCartEditError("");
@@ -8046,7 +8054,8 @@ export default function App() {
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleRemoveShoppingListItem(index);
+                            logButtonClick("Remove", { originalIndex: smartItem.originalIndex, productName: item.product_name });
+                            handleRemoveShoppingListItem(smartItem.originalIndex);
                           }}
                           style={styles.editButton}
                         >
@@ -8062,8 +8071,17 @@ export default function App() {
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
+                          console.log("BRAND LOCK TOGGLE:", {
+                            originalIndex: smartItem.originalIndex,
+                            productName: item.product_name,
+                            brandLock: false,
+                          });
                           setShoppingListItems((prev) =>
-                            prev.map((el, i) => i === index ? { ...el, brand_lock: false } : el)
+                            prev.map((el, index) =>
+                              index === smartItem.originalIndex
+                                ? { ...el, brand_lock: false }
+                                : el
+                            )
                           );
                         }}
                         style={{
@@ -8081,8 +8099,17 @@ export default function App() {
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
+                          console.log("BRAND LOCK TOGGLE:", {
+                            originalIndex: smartItem.originalIndex,
+                            productName: item.product_name,
+                            brandLock: true,
+                          });
                           setShoppingListItems((prev) =>
-                            prev.map((el, i) => i === index ? { ...el, brand_lock: true } : el)
+                            prev.map((el, index) =>
+                              index === smartItem.originalIndex
+                                ? { ...el, brand_lock: true }
+                                : el
+                            )
                           );
                         }}
                         style={{
@@ -8120,7 +8147,11 @@ export default function App() {
           <div style={{ ...styles.quickButtonRow, marginBottom: 12 }}>
             <button
               type="button"
-              onClick={() => setBrandComparisonMode("flexible")}
+              onClick={() => {
+                logButtonClick("Flexible");
+                console.log("GLOBAL BRAND MODE:", "flexible");
+                setBrandComparisonMode("flexible");
+              }}
               style={{
                 ...styles.quickButton,
                 background: brandComparisonMode === "flexible" ? "#dbeafe" : "#f8fafc",
@@ -8132,7 +8163,11 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setBrandComparisonMode("brand_match")}
+              onClick={() => {
+                logButtonClick("Match exact brand");
+                console.log("GLOBAL BRAND MODE:", "brand_match");
+                setBrandComparisonMode("brand_match");
+              }}
               style={{
                 ...styles.quickButton,
                 background: brandComparisonMode === "brand_match" ? "#dbeafe" : "#f8fafc",
@@ -8145,8 +8180,13 @@ export default function App() {
           </div>
 
           <button
-            onClick={handleCompareCart}
+            type="button"
+            onClick={() => {
+              logButtonClick("Find Cheapest Store", { cartSize: shoppingListItems.length });
+              handleCompareCart();
+            }}
             disabled={shoppingListItems.length === 0 || isComparingCart}
+            title={shoppingListItems.length === 0 ? "Add items to your cart first" : undefined}
             style={{ ...styles.primaryButton, width: "100%", marginTop: 12 }}
           >
             {isComparingCart ? "Comparing..." : "Find Cheapest Store"}
@@ -8434,7 +8474,10 @@ export default function App() {
           <div style={{ display: "flex", gap: 10, marginTop: 8, marginBottom: 10 }}>
             <button
               type="button"
-              onClick={handleStartPhotoFirst}
+              onClick={() => {
+                logButtonClick("Start Camera");
+                handleStartPhotoFirst();
+              }}
               style={{ ...styles.primaryButton, flex: 1, minHeight: 56, fontWeight: 800 }}
             >
               Start Camera
@@ -8442,7 +8485,10 @@ export default function App() {
             <button
               type="button"
               style={{ ...styles.libraryButton, flex: 1 }}
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => {
+                logButtonClick("Upload from Gallery");
+                fileInputRef.current?.click();
+              }}
             >
               Upload from Gallery
             </button>
@@ -8457,7 +8503,10 @@ export default function App() {
             <button
               type="button"
               style={{ ...styles.libraryButton, width: "100%", marginBottom: 10 }}
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => {
+                logButtonClick("Use Gallery Instead");
+                fileInputRef.current?.click();
+              }}
             >
               Use Gallery Instead
             </button>
@@ -8536,7 +8585,14 @@ export default function App() {
             <div style={styles.scannerControls}>
               {!awaitingPhoto ? (!isScanning ? (
                 <div style={{ width: "100%" }}>
-                  <button onClick={handleStartPhotoFirst} style={styles.scanButton}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      logButtonClick("Start Camera");
+                      handleStartPhotoFirst();
+                    }}
+                    style={styles.scanButton}
+                  >
                     Start Camera
                   </button>
                   <button
@@ -8728,7 +8784,11 @@ export default function App() {
               {/* -- Analyze button (shown after =1 photo) -- */}
               {capturedPhotos.length > 0 && (
                 <button
-                  onClick={() => analyzeAllPhotos()}
+                  type="button"
+                  onClick={() => {
+                    logButtonClick("Analyze Photos", { photoCount: capturedPhotos.length });
+                    analyzeAllPhotos();
+                  }}
                   style={{ ...styles.confirmButton, width: "100%", minHeight: 56, fontSize: 17, fontWeight: 800, marginBottom: 10 }}
                   disabled={photoAnalysisStatus === 'uploading' || photoAnalysisStatus === 'analyzing' || processingRef.current}
                 >
@@ -8871,7 +8931,10 @@ export default function App() {
 
           {product && isCurrentProductInCart ? (
             <button
-              onClick={handleRemoveProductFromCart}
+              onClick={() => {
+                logButtonClick("Remove from Cart", { productName: product?.name });
+                handleRemoveProductFromCart();
+              }}
               style={{ ...styles.secondaryButton, width: "100%", marginTop: 12 }}
             >
               Remove from Cart
