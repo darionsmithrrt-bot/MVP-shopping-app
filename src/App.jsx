@@ -1,6 +1,6 @@
 ﻿import React, { useEffect, useRef, useState } from "react";
 import { BrowserMultiFormatReader } from "@zxing/browser";
-import { supabase } from "./supabaseClient";
+import { supabase, supabaseAnonKey, supabaseUrl } from "./supabaseClient";
 import {
   PRODUCT_IMAGE_BUCKET,
   LOCATION_SUBMISSION_POINTS,
@@ -344,21 +344,6 @@ const CATEGORY_PLACEHOLDER_MAP = {
   personal:   "https://placehold.co/80x80/fdf4ff/7e22ce?text=🧴",
 };
 
-const KEYWORD_PLACEHOLDER_MAP = {
-  dove: "https://placehold.co/80x80/fdf4ff/7e22ce?text=Dove",
-  eggs: "https://placehold.co/80x80/fef9c3/854d0e?text=Eggs",
-  milk: "https://placehold.co/80x80/dbeafe/1d4ed8?text=Milk",
-  bread: "https://placehold.co/80x80/fef3c7/92400e?text=Bread",
-  chicken: "https://placehold.co/80x80/fee2e2/991b1b?text=Chicken",
-  beef: "https://placehold.co/80x80/fee2e2/991b1b?text=Beef",
-  steak: "https://placehold.co/80x80/fee2e2/991b1b?text=Steak",
-  produce: "https://placehold.co/80x80/dcfce7/166534?text=Produce",
-  cereal: "https://placehold.co/80x80/fef3c7/92400e?text=Cereal",
-  snack: "https://placehold.co/80x80/fef3c7/92400e?text=Snack",
-  household: "https://placehold.co/80x80/f1f5f9/475569?text=Home",
-  "personal care": "https://placehold.co/80x80/fdf4ff/7e22ce?text=Care",
-};
-
 const isRawUploadUrl = (url) => {
   if (!url) return false;
   const s = String(url);
@@ -392,14 +377,6 @@ const getCleanCartImageForProduct = ({
     const cat = String(category).toLowerCase();
     for (const [key, url] of Object.entries(CATEGORY_PLACEHOLDER_MAP)) {
       if (cat.includes(key)) return url;
-    }
-  }
-
-  // Brand/product keyword placeholders for common items and manual entries
-  const keywordText = `${String(brand || "")} ${String(productName || "")}`.toLowerCase();
-  if (keywordText) {
-    for (const [key, url] of Object.entries(KEYWORD_PLACEHOLDER_MAP)) {
-      if (keywordText.includes(key)) return url;
     }
   }
 
@@ -945,11 +922,11 @@ const buildFinalProductObject = ({
     notes: savedLocation?.notes ?? product?.notes ?? "",
     source: resolvedSource,
     needs_review: isBad(resolvedName),
-    image: product?.image || product?.cart_image_url || null,
-    image_url: product?.image_url || null,
-    verified_image_url: product?.verified_image_url || null,
-    cart_image_url: product?.cart_image_url || product?.image || null,
-    raw_photo_url: product?.raw_photo_url || null,
+    image: product?.image ?? null,
+    image_url: product?.image_url ?? null,
+    verified_image_url: product?.verified_image_url ?? null,
+    cart_image_url: product?.cart_image_url ?? null,
+    raw_photo_url: product?.raw_photo_url ?? null,
   };
 };
 
@@ -3671,16 +3648,6 @@ export default function App() {
       setAiIdentityConfidence(Number(aiPayload.confidence || 0));
       const detectedPriceFromAi = extractDetectedPriceFromAi(aiPayload, aiResponse);
 
-      const { data: imageSearchData, error: imageSearchError } = await supabase.functions.invoke("search-product-image", {
-        body: {
-          productName: normalizedProductName,
-          brand: normalizedBrand,
-          category: normalizedCategory,
-        },
-      });
-      console.log("PRODUCT IMAGE SEARCH RESULT:", imageSearchData);
-      console.log("PRODUCT IMAGE SEARCH ERROR:", imageSearchError);
-
       const toCleanExternalImageUrl = (value) => {
         const candidate = String(value || "").trim();
         if (!candidate) return null;
@@ -3689,14 +3656,56 @@ export default function App() {
         return candidate;
       };
 
-      const searchedVerifiedImageUrl =
-        toCleanExternalImageUrl(imageSearchData?.imageUrl) ||
-        toCleanExternalImageUrl(imageSearchData?.verified_image_url) ||
-        null;
+      const safeExtractImage = (data) => {
+        const candidate =
+          data?.imageUrl ||
+          data?.image_url ||
+          data?.url ||
+          data?.image ||
+          null;
+
+        if (!candidate || typeof candidate !== "string" || candidate.trim().length === 0) {
+          return null;
+        }
+
+        return toCleanExternalImageUrl(candidate);
+      };
+
+      let edgeImageUrl = null;
+
+      try {
+        const response = await fetch(
+          `${supabaseUrl}/functions/v1/search-product-image`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              apikey: supabaseAnonKey,
+              Authorization: `Bearer ${supabaseAnonKey}`,
+            },
+            body: JSON.stringify({
+              productName: normalizedProductName,
+              brand: normalizedBrand,
+              category: normalizedCategory,
+            }),
+          }
+        );
+
+        if (response.ok) {
+          const imageResult = await response.json();
+
+          console.log("IMAGE FUNCTION RESULT:", imageResult);
+
+          edgeImageUrl = safeExtractImage(imageResult);
+        } else {
+          console.warn("IMAGE SEARCH NON-OK:", response.status);
+        }
+      } catch (err) {
+        console.warn("IMAGE SEARCH FAILED:", err);
+      }
 
       const cleanVerifiedImageUrlCandidate =
         toCleanExternalImageUrl(savedRow?.verified_image_url) ||
-        searchedVerifiedImageUrl ||
         toCleanExternalImageUrl(aiPayload?.verified_image_url) ||
         toCleanExternalImageUrl(aiResponse?.data?.verified_image_url) ||
         toCleanExternalImageUrl(aiResponse?.data?.product_image_url) ||
@@ -3724,7 +3733,7 @@ export default function App() {
           .from("catalog_products")
           .update(updatePayload)
           .eq("id", savedRow?.id)
-          .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
+          .select("id, barcode, product_name, image_url, verified_image_url, brand, source, size_value, size_unit, quantity")
           .single();
 
         if (updateResult.error && cleanVerifiedImageUrlCandidate) {
@@ -3780,24 +3789,19 @@ export default function App() {
           ? persistedProductName
           : (String(normalizedProductName || "").trim() || persistedProductName || "Unknown product");
 
+      const resolvedImageUrl =
+        edgeImageUrl ||
+        toCleanExternalImageUrl(finalRow?.verified_image_url) ||
+        cleanVerifiedImageUrlCandidate ||
+        null;
+
       const finalProduct = {
         catalog_id: finalRow?.id || savedRow?.id || null,
         name: finalResolvedProductName,
-        raw_photo_url: firstImageUrl || null,
-        image: getCleanCartImageForProduct({
-          verifiedImageUrl:
-            toCleanExternalImageUrl(finalRow?.verified_image_url) ||
-            cleanVerifiedImageUrlCandidate ||
-            null,
-          existingImageUrl: finalRow?.image_url,
-          category: normalizedCategory || "",
-          productName: finalResolvedProductName,
-          brand: finalRow?.brand || normalizedBrand || "",
-        }),
-        verified_image_url:
-          toCleanExternalImageUrl(finalRow?.verified_image_url) ||
-          cleanVerifiedImageUrlCandidate ||
-          null,
+        raw_photo_url: finalRow?.raw_photo_url || null,
+        image: resolvedImageUrl || MVP_PLACEHOLDER_IMAGE,
+        verified_image_url: resolvedImageUrl,
+        cart_image_url: resolvedImageUrl || MVP_PLACEHOLDER_IMAGE,
         barcode: normalizedBarcode || productKey,
         is_photo_only: isPhotoOnlyProduct,
         brand: finalRow?.brand || normalizedBrand || "",
@@ -3833,6 +3837,11 @@ export default function App() {
       setAiDetectedPrice(detectedPriceFromAi);
       setIsEditingDetectedPrice(false);
       setAiDetectedPriceEdited(false);
+
+      console.log("FINAL PRODUCT IMAGE HANDOFF:", {
+        edgeImageUrl,
+        resolvedImageUrl,
+      });
 
       setProduct(finalProduct);
 
@@ -4803,6 +4812,11 @@ export default function App() {
       }
 
       setProduct(finalizedProduct);
+      console.log("CART INSERT IMAGE CHECK:", {
+        image: finalizedProduct.image,
+        verified: finalizedProduct.verified_image_url,
+        cart: finalizedProduct.cart_image_url,
+      });
       await handleAddToShoppingList(finalizedProduct, {
         ...locationForm,
         ...savedLocation,
@@ -5113,31 +5127,6 @@ export default function App() {
     }
   };
 
-  const resolveCartImageUrl = (productToAdd, existingItem = null) => {
-    return getCleanCartImageForProduct({
-      verifiedImageUrl:
-        productToAdd?.verified_image_url ||
-        productToAdd?.cart_image_url ||
-        productToAdd?.image ||
-        existingItem?.verified_image_url ||
-        existingItem?.cart_image_url ||
-        existingItem?.image,
-      existingImageUrl:
-        productToAdd?.image_url ||
-        productToAdd?.image ||
-        existingItem?.image_url ||
-        existingItem?.image,
-      category: productToAdd?.category || existingItem?.category || "",
-      productName:
-        productToAdd?.product_name ||
-        productToAdd?.name ||
-        existingItem?.product_name ||
-        existingItem?.name ||
-        "",
-      brand: productToAdd?.brand || existingItem?.brand || "",
-    });
-  };
-
   const handleAddToShoppingList = async (productToAdd = product, locationToUse = bestKnownLocation) => {
     if (!productToAdd) {
       setError("No product available to add");
@@ -5184,6 +5173,11 @@ export default function App() {
           if (!isMatch) return item;
 
           const updatedName = resolveBestCartName(productToAdd, item);
+          const resolvedCartImage =
+            productToAdd.verified_image_url ||
+            productToAdd.cart_image_url ||
+            productToAdd.image ||
+            MVP_PLACEHOLDER_IMAGE;
 
           return {
             ...item,
@@ -5221,18 +5215,8 @@ export default function App() {
             confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? item.confidence_score ?? 0,
             store_id: itemStoreId || item.store_id || null,
             store_name: locationToUse?.store_name || item.store_name || selectedStore?.name || "",
-            cart_image_url: (() => {
-              const resolvedCartImageUrl = resolveCartImageUrl(productToAdd, item);
-              return resolvedCartImageUrl !== MVP_PLACEHOLDER_IMAGE
-                ? resolvedCartImageUrl
-                : (item.cart_image_url !== MVP_PLACEHOLDER_IMAGE ? item.cart_image_url : resolvedCartImageUrl);
-            })(),
-            image: (() => {
-              const resolvedCartImageUrl = resolveCartImageUrl(productToAdd, item);
-              return resolvedCartImageUrl !== MVP_PLACEHOLDER_IMAGE
-                ? resolvedCartImageUrl
-                : (item.image !== MVP_PLACEHOLDER_IMAGE ? item.image : resolvedCartImageUrl);
-            })(),
+            cart_image_url: resolvedCartImage,
+            image: resolvedCartImage,
             category: productToAdd.category || item.category || "",
           };
         })
@@ -5241,7 +5225,13 @@ export default function App() {
       return { added: false, updated: true, hasLocation };
     }
 
-    const item = {
+    const resolvedCartImage =
+      productToAdd.verified_image_url ||
+      productToAdd.cart_image_url ||
+      productToAdd.image ||
+      MVP_PLACEHOLDER_IMAGE;
+
+    const cartItem = {
       cart_item_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       id: productToAdd.id || Date.now(),
       name: itemProductName,
@@ -5277,20 +5267,15 @@ export default function App() {
       confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? 0,
       brand_lock: false,
       needs_review: productToAdd.needs_review || false,
-      cart_image_url: resolveCartImageUrl(productToAdd),
-      image: resolveCartImageUrl(productToAdd),
+      cart_image_url: resolvedCartImage,
+      image: resolvedCartImage,
     };
 
-    const resolvedCartImageUrl = item.cart_image_url;
     console.log("CART IMAGE RESOLUTION:", {
-      productName: itemProductName,
-      incomingImage: productToAdd?.image,
-      incomingVerifiedImage: productToAdd?.verified_image_url,
-      incomingCartImage: productToAdd?.cart_image_url,
-      resolvedCartImageUrl,
+      resolvedCartImage,
     });
 
-    setShoppingListItems((prev) => [...prev, item]);
+    setShoppingListItems((prev) => [...prev, cartItem]);
     setToast({ message: "Added to shopping list", type: "success" });
     return { added: true, updated: false, hasLocation };
   };
