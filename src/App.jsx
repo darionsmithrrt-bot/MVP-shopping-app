@@ -7808,6 +7808,19 @@ export default function App() {
                       const priceTypeLabel = formatPriceType(item.price_type);
                       const isEditing = editingCartItemIndex === index;
                       const isEggCartItem = isEggText(item.product_name);
+                      const displayImageUrl =
+                        item.cart_image_url ||
+                        item.image ||
+                        item.verified_image_url ||
+                        MVP_PLACEHOLDER_IMAGE;
+
+                      console.log("SMART CART RENDER IMAGE:", {
+                        productName: item.product_name,
+                        cart_image_url: item.cart_image_url,
+                        image: item.image,
+                        verified_image_url: item.verified_image_url,
+                        displayImageUrl,
+                      });
 
                       return (
                         <div
@@ -7833,9 +7846,17 @@ export default function App() {
                         >
                   <div style={{ width: "100%", marginBottom: 8 }}>
                     <img
-                      src={item.cart_image_url || item.image || MVP_PLACEHOLDER_IMAGE}
-                      alt={item.product_name || "Product"}
-                      style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", border: "1px solid #e2e8f0", background: "#f8fafc" }}
+                      src={displayImageUrl}
+                      alt={item.product_name || item.name || "Cart item"}
+                      style={styles.cartItemImage}
+                      onError={(e) => {
+                        console.warn("CART IMAGE LOAD FAILED:", {
+                          productName: item.product_name,
+                          attemptedSrc: displayImageUrl,
+                          item,
+                        });
+                        e.currentTarget.src = MVP_PLACEHOLDER_IMAGE;
+                      }}
                     />
                   </div>
                   <div style={styles.rewardTitle}>{item.product_name}</div>
@@ -11193,6 +11214,14 @@ const styles = {
     background: "#ffffff",
     boxShadow: "0 2px 10px rgba(59,130,246,0.05)",
     transition: "box-shadow 0.15s ease",
+  },
+  cartItemImage: {
+    width: 56,
+    height: 56,
+    minWidth: 56,
+    borderRadius: 12,
+    objectFit: "cover",
+    background: "#f1f5f9",
   },
   rewardTitle: {
     fontSize: 15,
