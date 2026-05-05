@@ -380,7 +380,22 @@ const getCleanCartImageForProduct = ({
     }
   }
 
+  // Last resort: show the raw upload photo rather than a blank placeholder
+  if (verifiedImageUrl) return verifiedImageUrl;
+  if (existingImageUrl) return existingImageUrl;
+
   return MVP_PLACEHOLDER_IMAGE;
+};
+
+const resolveProductImage = (product = {}) => {
+  return (
+    product?.verified_image_url ||
+    product?.cart_image_url ||
+    product?.image ||
+    product?.image_url ||
+    product?.raw_photo_url ||
+    MVP_PLACEHOLDER_IMAGE
+  );
 };
 
 const extractWeightedLabelPriceFromText = (rawText) => {
@@ -2678,17 +2693,21 @@ export default function App() {
         return null;
       }
 
+      const _scannedImage = getCleanCartImageForProduct({
+        verifiedImageUrl: data?.verified_image_url || null,
+        existingImageUrl: data?.image_url || "",
+        category: data?.category || "",
+        productName: data?.product_name || "",
+        brand: data?.brand || "",
+      });
       return {
         catalog_id: data?.id || null,
         name: data?.product_name || "Unknown product",
-        image: getCleanCartImageForProduct({
-          verifiedImageUrl: data?.verified_image_url || null,
-          existingImageUrl: data?.image_url || "",
-          category: data?.category || "",
-          productName: data?.product_name || "",
-          brand: data?.brand || "",
-        }),
+        image: _scannedImage,
+        image_url: data?.image_url || null,
         verified_image_url: data?.verified_image_url || null,
+        cart_image_url: _scannedImage,
+        raw_photo_url: data?.image_url || null,
         barcode: data?.barcode || scannedBarcode,
         brand: data?.brand || "",
         category: data?.category || "",
@@ -3030,18 +3049,18 @@ export default function App() {
         const result = await supabase
           .from("catalog_products")
           .upsert(
-            [{ barcode: productKey, product_name: "Unknown product", image_url: null, source: initialSourceValue }],
+            [{ barcode: productKey, product_name: "Unknown product", image_url: firstImageUrl, source: initialSourceValue }],
             { onConflict: "barcode" }
           )
-          .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
+          .select("id, barcode, product_name, image_url, verified_image_url, brand, source, size_value, size_unit, quantity")
           .single();
         savedRow = result.data;
         saveError = result.error;
       } else {
         const result = await supabase
           .from("catalog_products")
-          .insert([{ barcode: productKey, product_name: "Unknown product", image_url: null, source: initialSourceValue }])
-          .select("id, barcode, product_name, image_url, brand, source, size_value, size_unit, quantity")
+          .insert([{ barcode: productKey, product_name: "Unknown product", image_url: firstImageUrl, source: initialSourceValue }])
+          .select("id, barcode, product_name, image_url, verified_image_url, brand, source, size_value, size_unit, quantity")
           .single();
         savedRow = result.data;
         saveError = result.error;
@@ -3839,19 +3858,21 @@ export default function App() {
           ? persistedProductName
           : (String(normalizedProductName || "").trim() || persistedProductName || "Unknown product");
 
-      const resolvedImageUrl =
-        edgeImageUrl ||
+      const finalConsumerImageUrl =
+        imageUrlToPersist ||
         toCleanExternalImageUrl(finalRow?.verified_image_url) ||
-        cleanVerifiedImageUrlCandidate ||
-        null;
+        toCleanExternalImageUrl(finalRow?.image_url) ||
+        firstImageUrl ||
+        MVP_PLACEHOLDER_IMAGE;
 
       const finalProduct = {
         catalog_id: finalRow?.id || savedRow?.id || null,
         name: finalResolvedProductName,
-        raw_photo_url: finalRow?.raw_photo_url || null,
-        image: resolvedImageUrl || MVP_PLACEHOLDER_IMAGE,
-        verified_image_url: resolvedImageUrl,
-        cart_image_url: resolvedImageUrl || MVP_PLACEHOLDER_IMAGE,
+        raw_photo_url: firstImageUrl || finalRow?.image_url || null,
+        image_url: firstImageUrl || finalRow?.image_url || null,
+        verified_image_url: imageUrlToPersist || null,
+        image: finalConsumerImageUrl,
+        cart_image_url: finalConsumerImageUrl,
         barcode: normalizedBarcode || productKey,
         is_photo_only: isPhotoOnlyProduct,
         brand: finalRow?.brand || normalizedBrand || "",
@@ -3890,7 +3911,17 @@ export default function App() {
 
       console.log("FINAL PRODUCT IMAGE HANDOFF:", {
         edgeImageUrl,
-        resolvedImageUrl,
+        finalConsumerImageUrl,
+      });
+
+      console.log("IMAGE MISSION CHECK:", {
+        firstImageUrl,
+        savedRowImageUrl: savedRow?.image_url,
+        edgeImageUrl,
+        imageUrlToPersist,
+        finalConsumerImageUrl,
+        finalProductImage: finalProduct.image,
+        finalProductCartImage: finalProduct.cart_image_url,
       });
 
       console.log("IMAGE PIPELINE FINAL CHECK:", {
@@ -3898,7 +3929,7 @@ export default function App() {
         cleanVerifiedImageUrlCandidate,
         imageUrlToPersist,
         finalRowVerifiedImage: finalRow?.verified_image_url,
-        resolvedImageUrl,
+        finalConsumerImageUrl,
         finalProductImage: finalProduct.image,
         finalProductCartImage: finalProduct.cart_image_url,
       });
@@ -4298,16 +4329,19 @@ export default function App() {
       await fetchUserPoints();
       await updateUserTrustScore(1);
 
+      const _correctedImage = getCleanCartImageForProduct({
+        verifiedImageUrl: updatedRow?.verified_image_url || product.verified_image_url,
+        existingImageUrl: updatedRow.image_url || product.image_url,
+        category: updatedRow.category || product.category || "",
+        productName: updatedRow.product_name || correctedName,
+        brand: updatedRow.brand || correctedBrand,
+      });
       const updatedProduct = {
         name: updatedRow.product_name || correctedName,
-        raw_photo_url: product.raw_photo_url || null,
-        image: getCleanCartImageForProduct({
-          verifiedImageUrl: updatedRow?.verified_image_url || product.verified_image_url,
-          existingImageUrl: updatedRow.image_url,
-          category: updatedRow.category || product.category || "",
-          productName: updatedRow.product_name || correctedName,
-          brand: updatedRow.brand || correctedBrand,
-        }),
+        raw_photo_url: product.raw_photo_url || updatedRow.image_url || null,
+        image_url: updatedRow.image_url || product.image_url || null,
+        image: _correctedImage,
+        cart_image_url: _correctedImage,
         verified_image_url: updatedRow?.verified_image_url || product.verified_image_url || null,
         barcode: updatedRow.barcode || product.barcode,
         brand: updatedRow.brand || correctedBrand,
@@ -5233,11 +5267,7 @@ export default function App() {
           if (!isMatch) return item;
 
           const updatedName = resolveBestCartName(productToAdd, item);
-          const resolvedCartImage =
-            productToAdd.verified_image_url ||
-            productToAdd.cart_image_url ||
-            productToAdd.image ||
-            MVP_PLACEHOLDER_IMAGE;
+          const resolvedImage = resolveProductImage(productToAdd);
 
           return {
             ...item,
@@ -5275,8 +5305,11 @@ export default function App() {
             confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? item.confidence_score ?? 0,
             store_id: itemStoreId || item.store_id || null,
             store_name: locationToUse?.store_name || item.store_name || selectedStore?.name || "",
-            cart_image_url: resolvedCartImage,
-            image: resolvedCartImage,
+            image: resolvedImage,
+            cart_image_url: resolvedImage,
+            image_url: productToAdd.image_url || item.image_url || null,
+            verified_image_url: productToAdd.verified_image_url || item.verified_image_url || null,
+            raw_photo_url: productToAdd.raw_photo_url || item.raw_photo_url || null,
             category: productToAdd.category || item.category || "",
           };
         })
@@ -5285,11 +5318,7 @@ export default function App() {
       return { added: false, updated: true, hasLocation };
     }
 
-    const resolvedCartImage =
-      productToAdd.verified_image_url ||
-      productToAdd.cart_image_url ||
-      productToAdd.image ||
-      MVP_PLACEHOLDER_IMAGE;
+    const resolvedImage = resolveProductImage(productToAdd);
 
     const cartItem = {
       cart_item_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -5327,8 +5356,11 @@ export default function App() {
       confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? 0,
       brand_lock: false,
       needs_review: productToAdd.needs_review || false,
-      cart_image_url: resolvedCartImage,
-      image: resolvedCartImage,
+      image: resolvedImage,
+      cart_image_url: resolvedImage,
+      image_url: productToAdd.image_url || null,
+      verified_image_url: productToAdd.verified_image_url || null,
+      raw_photo_url: productToAdd.raw_photo_url || null,
     };
 
     console.log("CART IMAGE RESOLUTION:", {
@@ -7808,11 +7840,7 @@ export default function App() {
                       const priceTypeLabel = formatPriceType(item.price_type);
                       const isEditing = editingCartItemIndex === index;
                       const isEggCartItem = isEggText(item.product_name);
-                      const displayImageUrl =
-                        item.cart_image_url ||
-                        item.image ||
-                        item.verified_image_url ||
-                        MVP_PLACEHOLDER_IMAGE;
+                      const displayImageUrl = resolveProductImage(item);
 
                       console.log("SMART CART RENDER IMAGE:", {
                         productName: item.product_name,
@@ -7850,10 +7878,9 @@ export default function App() {
                       alt={item.product_name || item.name || "Cart item"}
                       style={styles.cartItemImage}
                       onError={(e) => {
-                        console.warn("CART IMAGE LOAD FAILED:", {
-                          productName: item.product_name,
+                        console.warn("CART IMAGE FALLBACK:", {
+                          productName: item.product_name || item.name,
                           attemptedSrc: displayImageUrl,
-                          item,
                         });
                         e.currentTarget.src = MVP_PLACEHOLDER_IMAGE;
                       }}
