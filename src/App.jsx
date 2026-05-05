@@ -3165,6 +3165,16 @@ export default function App() {
       setAiIdentityConfidence(Number(aiPayload.confidence || 0));
       const detectedPriceFromAi = extractDetectedPriceFromAi(aiPayload, aiResponse);
 
+      const { data: imageSearchData, error: imageSearchError } = await supabase.functions.invoke("search-product-image", {
+        body: {
+          productName: normalizedProductName,
+          brand: normalizedBrand,
+          category: normalizedCategory,
+        },
+      });
+      console.log("PRODUCT IMAGE SEARCH RESULT:", imageSearchData);
+      console.log("PRODUCT IMAGE SEARCH ERROR:", imageSearchError);
+
       const toCleanExternalImageUrl = (value) => {
         const candidate = String(value || "").trim();
         if (!candidate) return null;
@@ -3173,8 +3183,14 @@ export default function App() {
         return candidate;
       };
 
+      const searchedVerifiedImageUrl =
+        toCleanExternalImageUrl(imageSearchData?.imageUrl) ||
+        toCleanExternalImageUrl(imageSearchData?.verified_image_url) ||
+        null;
+
       const cleanVerifiedImageUrlCandidate =
         toCleanExternalImageUrl(savedRow?.verified_image_url) ||
+        searchedVerifiedImageUrl ||
         toCleanExternalImageUrl(aiPayload?.verified_image_url) ||
         toCleanExternalImageUrl(aiResponse?.data?.verified_image_url) ||
         toCleanExternalImageUrl(aiResponse?.data?.product_image_url) ||
