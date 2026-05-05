@@ -645,6 +645,11 @@ const normalizeSizeUnit = (unitRaw) => {
   if (["kg", "kilogram", "kilograms"].includes(unit)) return "kg";
   if (["count", "ct"].includes(unit)) return "count";
   if (["pack", "pk"].includes(unit)) return "pack";
+  if (["l", "liter", "liters", "litre", "litres"].includes(unit)) return "liter";
+  if (["ml", "milliliter", "milliliters", "millilitre", "millilitres"].includes(unit)) return "ml";
+  if (["qt", "quart", "quarts"].includes(unit)) return "qt";
+  if (["gal", "gallon", "gallons"].includes(unit)) return "gal";
+  if (["pt", "pint", "pints"].includes(unit)) return "pt";
   return unit;
 };
 
@@ -677,6 +682,29 @@ const collectTextCandidates = (value) => {
   return [String(value)];
 };
 
+const cleanVisionText = (rawText) => {
+  const blockedLine = [
+    /\bkills?\b/i,
+    /\bgerms?\b/i,
+    /bad\s+breath/i,
+    /\bplaque\b/i,
+    /\bgingivitis\b/i,
+    /\bfresher\b/i,
+    /\bcleaner\b/i,
+    /brushing\s+alone/i,
+    /\bada\b/i,
+    /\baccepted\b/i,
+    /american\s+dental\s+association/i,
+  ];
+
+  return String(rawText || "")
+    .split(/[\n\r]+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !blockedLine.some((re) => re.test(line)))
+    .join("\n");
+};
+
 const extractFallbackSizeFromAiText = (aiPayload, aiResponse) => {
   const responseData = aiResponse?.data || {};
   const textSources = [
@@ -692,7 +720,7 @@ const extractFallbackSizeFromAiText = (aiPayload, aiResponse) => {
 
   const servingNoiseRegex = /(serving\s*size|servings?\s*per\s*container|calories)/i;
   const nearNetWeightRegex = /(net\s*wt|net\s*weight|\bwt\b|\boz\b|\bfl\s*oz\b)/i;
-  const sizeRegex = /(\d+(?:\.\d+)?)\s*(fl\s*oz|fluid\s*oz|oz|ounces?|g|grams?|kg|kilograms?|lb|lbs|pounds?|pack|pk|count|ct)\b/gi;
+  const sizeRegex = /(\d+(?:\.\d+)?)\s*(fl\s*oz|fluid\s*oz|oz|ounces?|g|grams?|kg|kilograms?|lb|lbs|pounds?|pack|pk|count|ct|l|liters?|litres?|ml|qt|quarts?)\b/gi;
 
   const candidates = [];
 
@@ -721,7 +749,13 @@ const extractFallbackSizeFromAiText = (aiPayload, aiResponse) => {
         const hasNetWeightHint = nearNetWeightRegex.test(nearbyContext) || nearNetWeightRegex.test(lower);
 
         // Earlier sources and lines are slightly favored to keep output deterministic.
-        const score = (sourceTexts.length - sourceIndex) + (lines.length - lineIndex) + (hasNetWeightHint ? 20 : 0);
+        // Also prefer liter/L as primary package size when multiple units are present.
+        const unitPreferenceBoost = unit === "liter" ? 35 : unit === "qt" ? 18 : 0;
+        const score =
+          (sourceTexts.length - sourceIndex) +
+          (lines.length - lineIndex) +
+          (hasNetWeightHint ? 20 : 0) +
+          unitPreferenceBoost;
 
         candidates.push({ value, unit, score });
       }
@@ -732,11 +766,217 @@ const extractFallbackSizeFromAiText = (aiPayload, aiResponse) => {
 
   candidates.sort((a, b) => b.score - a.score);
   const best = candidates[0];
-  return {
-    size_value: best.value,
-    size_unit: best.unit,
-    size_confidence: 0.75,
+
+  // Try to detect dual-size labels and build a clean UI display_size string.
+  const allText = sourceTexts.join(" ");
+  let displaySize = "";
+  let secondarySizeValue = "";
+  let secondarySizeUnit = "";
+
+  // Direct patterns for requested formats.
+  const literMatch = allText.match(/(\d+(?:\.\d+)?)\s*(l|liters?|litres?)\b/i);
+  const directFlOzMatch = allText.match(/(\d+(?:\.\d+)?)\s*(fl\s*oz|fluid\s*oz)\b/i);
+  const qtFlOzMatch = allText.match(/(\d+(?:\.\d+)?)\s*(qt|quarts?)\s*(\d+(?:\.\d+)?)\s*(fl\s*oz|fluid\s*oz)\b/i);
+
+  const formatPrimaryValue = (value, unit) => {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && unit === "liter") {
+      return Number.isInteger(numeric) ? numeric.toFixed(1) : String(numeric);
+    }
+    return String(value || "").trim();
   };
+
+  const primaryFromBest = {
+    value: formatPrimaryValue(best.value, best.unit),
+    unit: best.unit,
+  };
+
+  if (literMatch) {
+    primaryFromBest.value = formatPrimaryValue(literMatch[1], "liter");
+    primaryFromBest.unit = "liter";
+  }
+
+  const toDisplayUnitLabel = (unit) => {
+    if (unit === "liter") return "L";
+    if (unit === "fl oz") return "fl oz";
+    return unit;
+  };
+
+  // Prefer explicit fl oz equivalent when available.
+  if (directFlOzMatch) {
+    secondarySizeValue = String(directFlOzMatch[1] || "").trim();
+    secondarySizeUnit = "fl oz";
+  } else if (qtFlOzMatch) {
+    const qt = Number(qtFlOzMatch[1]);
+    const extraFlOz = Number(qtFlOzMatch[3]);
+    if (Number.isFinite(qt) && Number.isFinite(extraFlOz)) {
+      secondarySizeValue = (qt * 32 + extraFlOz).toFixed(1);
+      secondarySizeUnit = "fl oz";
+    }
+  }
+
+  // Pattern: primary unit followed by parenthesised/slash secondary, e.g. "1.0 L (33.8 fl oz)"
+  const dualSizePattern = /(\d+(?:\.\d+)?)\s*(fl\s*oz|fluid\s*oz|oz|l|liters?|litres?|ml|qt|quarts?|gal|gallons?|lb|lbs|g|kg)[\s\(\[\/]*((\d+\s+)?\d+(?:\.\d+)?)\s*(fl\s*oz|fluid\s*oz|oz|l|liters?|litres?|ml|qt|quarts?|gal|gallons?|lb|lbs|g|kg)/i;
+  const dualMatch = dualSizePattern.exec(allText);
+  if (dualMatch && !secondarySizeValue) {
+    const pVal = formatPrimaryValue(dualMatch[1], normalizeSizeUnit(dualMatch[2]));
+    const pUnit = normalizeSizeUnit(dualMatch[2]);
+    const sVal = dualMatch[3].trim();
+    const sUnit = normalizeSizeUnit(dualMatch[5]);
+    if (pUnit && sUnit && pUnit !== sUnit) {
+      secondarySizeValue = sVal;
+      secondarySizeUnit = sUnit;
+      const pLabel = toDisplayUnitLabel(pUnit);
+      const sLabel = toDisplayUnitLabel(sUnit);
+      displaySize = `${pVal} ${pLabel} / ${sVal} ${sLabel}`;
+    }
+  }
+
+  if (!displaySize && secondarySizeValue && secondarySizeUnit && primaryFromBest.value && primaryFromBest.unit) {
+    displaySize = `${primaryFromBest.value} ${toDisplayUnitLabel(primaryFromBest.unit)} / ${secondarySizeValue} ${toDisplayUnitLabel(secondarySizeUnit)}`;
+  }
+
+  // Fallback: single unit display if no dual match
+  if (!displaySize && primaryFromBest.unit && primaryFromBest.value) {
+    const unitLabel = toDisplayUnitLabel(primaryFromBest.unit);
+    displaySize = `${primaryFromBest.value} ${unitLabel}`;
+  }
+
+  return {
+    size_value: primaryFromBest.value,
+    size_unit: primaryFromBest.unit,
+    size_confidence: 0.75,
+    secondary_size_value: secondarySizeValue,
+    secondary_size_unit: secondarySizeUnit,
+    display_size: displaySize,
+  };
+};
+
+// ============================================================================
+// buildFinalProductObject — single authoritative product resolver
+// Called in handleSaveLocation before every handleAddToShoppingList call.
+// Priority rules:
+//   product_name: correctionForm (user edit) > product.name (AI+OCR) > "Review needed"
+//   brand:        correctionForm (user edit) > product.brand (AI+logo) > product state
+//   size:         locationForm (user edit) > product.size_* (AI+OCR fallback)
+//   source tag:   "user" if name was user-edited, "ai" if from AI, "manual" otherwise
+// ============================================================================
+const buildFinalProductObject = ({
+  product,
+  correctionForm,
+  locationForm,
+  savedLocation,
+  submissionMethod,
+  barcodeValue,
+}) => {
+  const BAD_NAMES = ["unknown product", "review needed", ""];
+  const isBad = (n) => BAD_NAMES.includes(String(n || "").trim().toLowerCase());
+
+  // ── product_name ──────────────────────────────────────────────────────────
+  const userEditedName = String(correctionForm?.product_name || "").trim();
+  const aiName = String(product?.name || product?.product_name || "").trim();
+  const resolvedName =
+    (!isBad(userEditedName) && userEditedName) ||
+    (!isBad(aiName) && aiName) ||
+    "Review needed";
+
+  // ── brand ─────────────────────────────────────────────────────────────────
+  const resolvedBrand =
+    String(correctionForm?.brand || "").trim() ||
+    String(product?.brand || "").trim();
+
+  // ── category ──────────────────────────────────────────────────────────────
+  const resolvedCategory = String(correctionForm?.category || product?.category || "").trim();
+
+  // ── size ──────────────────────────────────────────────────────────────────
+  const resolvedSizeValue =
+    String(locationForm?.size_value || "").trim() ||
+    String(product?.size_value || "").trim();
+  const resolvedSizeUnit =
+    String(locationForm?.size_unit || "").trim() ||
+    String(product?.size_unit || "").trim();
+
+  let resolvedDisplaySize = String(product?.display_size || "").trim();
+  if (!resolvedDisplaySize && resolvedSizeValue && resolvedSizeUnit) {
+    const unitLabel =
+      resolvedSizeUnit === "liter" ? "L" :
+      resolvedSizeUnit === "fl oz" ? "fl oz" :
+      resolvedSizeUnit;
+    resolvedDisplaySize = `${resolvedSizeValue} ${unitLabel}`.trim();
+  }
+
+  // ── quantity ──────────────────────────────────────────────────────────────
+  const resolvedQuantity =
+    String(locationForm?.quantity || product?.quantity || "1").trim() || "1";
+
+  // ── source tag ────────────────────────────────────────────────────────────
+  const aiName2 = String(product?.name || "").trim();
+  let resolvedSource = submissionMethod || product?.source || "manual";
+  if (!isBad(userEditedName) && userEditedName && userEditedName !== aiName2) {
+    resolvedSource = "user";
+  } else if (product?.source === "ai") {
+    resolvedSource = "ai";
+  }
+
+  // ── confidence ────────────────────────────────────────────────────────────
+  const resolvedConfidence =
+    savedLocation?.confidence_score ?? product?.confidence_score ?? 0;
+
+  return {
+    ...product,
+    name: resolvedName,
+    product_name: resolvedName,
+    brand: resolvedBrand,
+    category: resolvedCategory,
+    barcode: barcodeValue || product?.barcode || null,
+    size_value: resolvedSizeValue,
+    size_unit: resolvedSizeUnit,
+    quantity: resolvedQuantity,
+    display_size: resolvedDisplaySize,
+    secondary_size_value: product?.secondary_size_value || "",
+    secondary_size_unit: product?.secondary_size_unit || "",
+    price: savedLocation?.price ?? product?.price ?? null,
+    avg_price: savedLocation?.avg_price ?? product?.avg_price ?? null,
+    price_type: savedLocation?.price_type ?? product?.price_type ?? "each",
+    price_source: savedLocation?.price_source ?? product?.price_source ?? null,
+    price_unit_detected:
+      savedLocation?.price_unit_detected ?? product?.price_unit_detected ?? "unknown",
+    confidence_score: resolvedConfidence,
+    notes: savedLocation?.notes ?? product?.notes ?? "",
+    source: resolvedSource,
+    needs_review: isBad(resolvedName),
+  };
+};
+
+const isValidProductName = (name) => {
+  const raw = String(name || "").trim();
+  if (raw.length <= 5) return false;
+
+  const rejectedPatterns = [
+    /unknown\s+product/i,
+    /review\s+needed/i,
+    /^n\/?a$/i,
+    /^item$/i,
+    /^product$/i,
+    /way\s+case\s+bareath/i,
+  ];
+  if (rejectedPatterns.some((re) => re.test(raw))) return false;
+
+  const words = raw.match(/[A-Za-z][A-Za-z'\-]*/g) || [];
+  if (!words.length) return false;
+
+  // Require at least one likely real word (>=3 chars with a vowel).
+  const hasRealWord = words.some((word) => word.length >= 3 && /[aeiouy]/i.test(word));
+  if (!hasRealWord) return false;
+
+  // Block all-caps nonsense names while allowing normal title-case names.
+  const hasLetters = /[A-Za-z]/.test(raw);
+  const allCaps = hasLetters && raw === raw.toUpperCase();
+  const uppercaseWordCount = words.filter((word) => word === word.toUpperCase()).length;
+  const mostlyUpper = words.length > 0 && (uppercaseWordCount / words.length) >= 0.8;
+  if (allCaps && mostlyUpper) return false;
+
+  return true;
 };
 
 export default function App() {
@@ -3051,6 +3291,184 @@ export default function App() {
       console.log("NORMALIZED AI PAYLOAD AFTER FALLBACK:", aiPayload);
       setAiDetectedRawText(String(aiPayload.raw_text || "").trim());
 
+      // Structured product-name extraction from vision OCR text.
+      // Uses known brand/variant/type/descriptor signals to compose a clean name.
+      // Returns null when no known brand is detected so the AI result is preserved.
+      const extractBrandPriorityName = (visionTextInput) => {
+        const upper = String(visionTextInput || "").toUpperCase();
+        if (!upper) return null;
+
+        // Hard override requested: Listerine Freshburst should always normalize consistently.
+        if (upper.includes("LISTERINE") && upper.includes("FRESHBURST")) {
+          return {
+            product_name: "Listerine Freshburst Antiseptic Mouthwash",
+            brand: "Listerine",
+            category: "Oral Care",
+          };
+        }
+
+        const brandSignals = [
+          { signal: "LISTERINE", label: "Listerine", category: "Oral Care" },
+          { signal: "COLGATE", label: "Colgate", category: "Oral Care" },
+          { signal: "CREST", label: "Crest", category: "Oral Care" },
+          { signal: "SCOPE", label: "Scope", category: "Oral Care" },
+          { signal: "BIOTENE", label: "Biotene", category: "Oral Care" },
+          { signal: "SENSODYNE", label: "Sensodyne", category: "Oral Care" },
+          { signal: "AQUAFRESH", label: "Aquafresh", category: "Oral Care" },
+          { signal: "ORAL-B", label: "Oral-B", category: "Oral Care" },
+        ];
+
+        const matchedBrand = brandSignals.find((b) => upper.includes(b.signal));
+        if (!matchedBrand) return null;
+
+        const variant = upper.includes("FRESHBURST")
+          ? "Freshburst"
+          : upper.includes("COOL MINT")
+            ? "Cool Mint"
+            : upper.includes("FRESH MINT")
+              ? "Fresh Mint"
+              : "";
+
+        const descriptor = upper.includes("ANTISEPTIC")
+          ? "Antiseptic"
+          : upper.includes("ANTIGINGIVITIS")
+            ? "Antigingivitis"
+            : upper.includes("ANTIPLAQUE")
+              ? "Antiplaque"
+              : "";
+
+        const productType = upper.includes("MOUTHWASH")
+          ? "Mouthwash"
+          : upper.includes("MOUTH RINSE")
+            ? "Mouth Rinse"
+            : upper.includes("TOOTHPASTE")
+              ? "Toothpaste"
+              : "";
+
+        const parts = [matchedBrand.label];
+        if (variant) parts.push(variant);
+        if (descriptor) parts.push(descriptor);
+        if (productType) parts.push(productType);
+
+        return {
+          product_name: parts.join(" ").trim(),
+          brand: matchedBrand.label,
+          category: matchedBrand.category,
+        };
+      };
+
+      const normalizeProductNameFromVisionText = (rawText, _aiPayload, _visionData) => {
+        const upper = String(rawText || "").toUpperCase();
+        if (!upper) return null;
+
+        // Marketing/claims blocklist — these lines are never a product name.
+        // Shared with extractLikelyProductPhraseFromRawText via closure.
+        const MARKETING_CLAIM_BLOCKLIST = [
+          /KILLS\s+\d{1,3}\.?\d*%/i,
+          /KILLS\s+GERMS/i,
+          /\bGERMS\b/i,
+          /BAD\s+BREATH/i,
+          /\bBREATH\b/i,
+          /\bPLAQUE\b/i,
+          /\bGINGIVITIS\b/i,
+          /FRESHER/i,
+          /CLEANER\s+MOUTH/i,
+          /FRESHER\s+(AND\s+)?CLEANER/i,
+          /FIGHT[S]?\s+(GERMS|PLAQUE|GINGIVITIS)/i,
+          /BRUSHING\s+ALONE/i,
+          /ADA\s+ACCEPTED/i,
+          /AMERICAN\s+DENTAL\s+ASSOCIATION/i,
+          /NO\s+BURN/i,
+          /CLINICALLY\s+PROVEN/i,
+          /\bACCEPTED\b.*\bDENTAL\b/i,
+        ];
+        const isMarketingClaimLine = (text) =>
+          MARKETING_CLAIM_BLOCKLIST.some((re) => re.test(text));
+
+        // Known brand signals
+        const BRAND_SIGNALS = [
+          { signal: "LISTERINE", label: "Listerine" },
+          { signal: "COLGATE", label: "Colgate" },
+          { signal: "CREST", label: "Crest" },
+          { signal: "SCOPE", label: "Scope" },
+          { signal: "BIOTENE", label: "Biotene" },
+          { signal: "SENSODYNE", label: "Sensodyne" },
+          { signal: "AQUAFRESH", label: "Aquafresh" },
+          { signal: "ORAL-B", label: "Oral-B" },
+        ];
+
+        // Product type signals
+        const TYPE_SIGNALS = [
+          { signal: "MOUTHWASH", label: "Mouthwash" },
+          { signal: "MOUTH RINSE", label: "Mouth Rinse" },
+          { signal: "TOOTHPASTE", label: "Toothpaste" },
+          { signal: "TOOTHBRUSH", label: "Toothbrush" },
+          { signal: "DENTAL FLOSS", label: "Dental Floss" },
+          { signal: "WHITENING STRIPS", label: "Whitening Strips" },
+        ];
+
+        // Variant/flavor signals
+        const VARIANT_SIGNALS = [
+          { signal: "FRESHBURST", label: "Freshburst" },
+          { signal: "COOL MINT", label: "Cool Mint" },
+          { signal: "FRESH MINT", label: "Fresh Mint" },
+          { signal: "SPEARMINT", label: "Spearmint" },
+          { signal: "ARCTIC MINT", label: "Arctic Mint" },
+          { signal: "WINTERGREEN", label: "Wintergreen" },
+          { signal: "PEPPERMINT", label: "Peppermint" },
+          { signal: "CLEAN MINT", label: "Clean Mint" },
+          { signal: "WHITENING", label: "Whitening" },
+          { signal: "SENSITIVE", label: "Sensitive" },
+          { signal: "ORIGINAL", label: "Original" },
+          { signal: "TOTAL", label: "Total" },
+        ];
+
+        // Descriptor signals (placed between brand+variant and type)
+        const DESCRIPTOR_SIGNALS = [
+          { signal: "ANTISEPTIC", label: "Antiseptic" },
+          { signal: "ANTIGINGIVITIS", label: "Antigingivitis" },
+          { signal: "ANTIPLAQUE", label: "Antiplaque" },
+          { signal: "FLUORIDE", label: "Fluoride" },
+        ];
+
+        // Prefer Google Vision logo detection as authoritative brand source
+        const logoDetectedBrand =
+          Array.isArray(_visionData?.logos) && _visionData.logos.length > 0
+            ? String(
+                _visionData.logos[0]?.description ||
+                  _visionData.logos[0]?.name ||
+                  _visionData.logos[0] ||
+                  ""
+              ).trim()
+            : "";
+
+        // Strip marketing lines from OCR before matching signals
+        const cleanedUpper = String(rawText || "")
+          .split(/[\n\r]+/)
+          .map((l) => l.trim())
+          .filter((l) => l && !isMarketingClaimLine(l))
+          .join(" ")
+          .toUpperCase();
+
+        const matchedBrand = BRAND_SIGNALS.find((b) => cleanedUpper.includes(b.signal));
+        if (!matchedBrand) return null; // No known brand in OCR — preserve AI result
+
+        const brandLabel = logoDetectedBrand || matchedBrand.label;
+        const variantMatch = VARIANT_SIGNALS.find((v) => cleanedUpper.includes(v.signal));
+        const typeMatch = TYPE_SIGNALS.find((t) => cleanedUpper.includes(t.signal));
+        const descriptorMatch = DESCRIPTOR_SIGNALS.find((d) => cleanedUpper.includes(d.signal));
+
+        // Build: Brand [ + Variant ] [ + Descriptor ] [ + Type ]
+        const parts = [brandLabel];
+        if (variantMatch) parts.push(variantMatch.label);
+        if (descriptorMatch) parts.push(descriptorMatch.label);
+        if (typeMatch) parts.push(typeMatch.label);
+
+        // Require at least brand + one more signal to override AI name
+        if (parts.length >= 2) return parts.join(" ");
+        return null;
+      };
+
       const extractLikelyProductPhraseFromRawText = (rawText) => {
         const lines = String(rawText || "")
           .split(/[\n\r]+/)
@@ -3059,10 +3477,30 @@ export default function App() {
 
         const blockedLine = /(\$|\bper\b|\bprice\b|\btotal\b|\bsave\b|\bcoupon\b|\bwww\.|\bhttp\b|\bbarcode\b|\bnutrition\b|\bserving\b|\bcalories\b)/i;
 
+        // Shared marketing-claim patterns (mirrors MARKETING_CLAIM_BLOCKLIST above)
+        const PHRASE_MARKETING_BLOCKLIST = [
+          /KILLS\s+\d{1,3}\.?\d*%/i,
+          /KILLS\s+GERMS/i,
+          /\bGERMS\b/i,
+          /BAD\s+BREATH/i,
+          /\bBREATH\b/i,
+          /\bPLAQUE\b/i,
+          /\bGINGIVITIS\b/i,
+          /FRESHER/i,
+          /CLEANER\s+MOUTH/i,
+          /FIGHT[S]?\s+(GERMS|PLAQUE|GINGIVITIS)/i,
+          /BRUSHING\s+ALONE/i,
+          /ADA\s+ACCEPTED/i,
+          /AMERICAN\s+DENTAL\s+ASSOCIATION/i,
+          /NO\s+BURN/i,
+          /CLINICALLY\s+PROVEN/i,
+        ];
+
         for (const line of lines) {
           const cleaned = line.replace(/[^\w\s&'\-]/g, " ").replace(/\s+/g, " ").trim();
           if (!cleaned || cleaned.length < 3 || cleaned.length > 80) continue;
           if (blockedLine.test(cleaned)) continue;
+          if (PHRASE_MARKETING_BLOCKLIST.some((re) => re.test(cleaned))) continue;
 
           const words = cleaned.split(" ").filter(Boolean);
           if (words.length < 2 || words.length > 8) continue;
@@ -3109,20 +3547,39 @@ export default function App() {
         String(aiPayload.product_name || "").trim() ||
         inferProductNameFromAi(aiPayload, aiResponse);
       let normalizedBrand = aiPayload.brand || "";
-      const normalizedCategory = aiPayload.category || "";
+      let normalizedCategory = aiPayload.category || "";
       let normalizedSizeValue = aiPayload.size_value || "";
       let normalizedSizeUnit = aiPayload.size_unit || "";
       const normalizedQuantity = aiPayload.quantity || "1";
       let sizeConfidence = Number(aiPayload.size_confidence || 0);
 
-      const visionText = String(visionData?.text || "").trim();
+      const visionText = cleanVisionText(visionData?.text);
       if (visionText) {
-        const visionProductName =
-          extractLikelyProductPhraseFromRawText(visionText) ||
-          visionText.split(/\n|\r/).map((s) => String(s || "").trim()).find(Boolean) ||
-          "";
-        if (visionProductName) {
-          normalizedProductName = visionProductName;
+        // Brand-priority pass first to avoid OCR nonsense names.
+        const brandPriorityResult = extractBrandPriorityName(visionText);
+        if (brandPriorityResult?.brand) {
+          normalizedBrand = brandPriorityResult.brand;
+        }
+        if (brandPriorityResult?.category && !normalizedCategory) {
+          normalizedCategory = brandPriorityResult.category;
+        }
+        if (brandPriorityResult?.product_name) {
+          normalizedProductName = brandPriorityResult.product_name;
+        } else if (!normalizedProductName) {
+          // Try structured brand-signal extraction before generic raw OCR phrase fallback.
+          const visionNormalized = normalizeProductNameFromVisionText(visionText, aiPayload, visionData);
+          if (visionNormalized) {
+            normalizedProductName = visionNormalized;
+          } else {
+            // Only fall back to raw text extraction when AI also returned nothing
+            const visionProductName =
+              extractLikelyProductPhraseFromRawText(visionText) ||
+              visionText.split(/\n|\r/).map((s) => String(s || "").trim()).find(Boolean) ||
+              "";
+            if (visionProductName) {
+              normalizedProductName = visionProductName;
+            }
+          }
         }
       }
 
@@ -3135,6 +3592,34 @@ export default function App() {
         }
       }
 
+      const ensureBrandFirstProductName = (name, brand) => {
+        const cleanName = String(name || "").trim();
+        const cleanBrand = String(brand || "").trim();
+        if (!cleanBrand) return cleanName;
+        if (!cleanName) return cleanBrand;
+
+        const startsWithBrand = cleanName.toLowerCase().startsWith(cleanBrand.toLowerCase());
+        if (startsWithBrand) return cleanName;
+
+        // Remove duplicate brand mentions and force brand-first ordering.
+        const escapedBrand = cleanBrand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const dedupedName = cleanName
+          .replace(new RegExp(`\\b${escapedBrand}\\b`, "ig"), "")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        return dedupedName ? `${cleanBrand} ${dedupedName}` : cleanBrand;
+      };
+
+      // General rule: if we have a detected brand, product_name must be brand-first.
+      if (normalizedBrand) {
+        normalizedProductName = ensureBrandFirstProductName(normalizedProductName, normalizedBrand);
+      }
+
+      let normalizedDisplaySize = String(aiPayload.display_size || "").trim();
+      let normalizedSecondarySizeValue = String(aiPayload.secondary_size_value || "").trim();
+      let normalizedSecondarySizeUnit = String(aiPayload.secondary_size_unit || "").trim();
+
       const isSizeMissing = !String(normalizedSizeValue || "").trim() || !String(normalizedSizeUnit || "").trim();
       if (isSizeMissing) {
         const sizeFallback = extractFallbackSizeFromAiText(aiPayload, aiResponse);
@@ -3142,6 +3627,22 @@ export default function App() {
           normalizedSizeValue = sizeFallback.size_value;
           normalizedSizeUnit = sizeFallback.size_unit;
           sizeConfidence = 0.75;
+          if (sizeFallback.display_size) normalizedDisplaySize = sizeFallback.display_size;
+          if (sizeFallback.secondary_size_value) normalizedSecondarySizeValue = sizeFallback.secondary_size_value;
+          if (sizeFallback.secondary_size_unit) normalizedSecondarySizeUnit = sizeFallback.secondary_size_unit;
+        }
+      } else if (!normalizedDisplaySize) {
+        // Build a display_size even when AI already provided size_value/size_unit
+        const sizeFallback = extractFallbackSizeFromAiText(aiPayload, aiResponse);
+        if (sizeFallback?.display_size) {
+          normalizedDisplaySize = sizeFallback.display_size;
+          if (!normalizedSecondarySizeValue && sizeFallback.secondary_size_value) {
+            normalizedSecondarySizeValue = sizeFallback.secondary_size_value;
+            normalizedSecondarySizeUnit = sizeFallback.secondary_size_unit;
+          }
+        } else {
+          const unitLabel = normalizedSizeUnit === "liter" ? "L" : normalizedSizeUnit === "fl oz" ? "fl oz" : normalizedSizeUnit;
+          normalizedDisplaySize = `${normalizedSizeValue} ${unitLabel}`.trim();
         }
       }
 
@@ -3299,6 +3800,9 @@ export default function App() {
         size_value: lockedSizeValue,
         size_unit: lockedSizeUnit,
         quantity: lockedQuantity,
+        display_size: normalizedDisplaySize || "",
+        secondary_size_value: normalizedSecondarySizeValue || "",
+        secondary_size_unit: normalizedSecondarySizeUnit || "",
         source: finalRow?.source || initialSourceValue,
       };
 
@@ -3326,6 +3830,36 @@ export default function App() {
       setAiDetectedPriceEdited(false);
 
       setProduct(finalProduct);
+
+      // Low-confidence review gate: if AI identity confidence is below 70%,
+      // force the user to confirm or edit before proceeding to location entry.
+      const aiConfidenceScore = Number(aiPayload.confidence || 0);
+      const LOW_CONFIDENCE_THRESHOLD = 0.70;
+      const isLowConfidence = aiConfidenceScore < LOW_CONFIDENCE_THRESHOLD;
+
+      // Even at low confidence, check if strong brand signals exist in OCR —
+      // the normalizeProductNameFromVisionText helper already ran, so if
+      // normalizedProductName was overridden by a known brand signal we can
+      // trust it, but we still surface the review UI so the user can confirm.
+      if (isLowConfidence) {
+        setCorrectionForm({
+          product_name: finalProduct.name === "Unknown product" ? "" : (finalProduct.name || ""),
+          brand: finalProduct.brand || "",
+          category: finalProduct.category || "",
+        });
+        setAwaitingProductConfirmation(true);
+        setShowAiSummaryCard(true);
+        setLocationSaved(false);
+        setStatus(
+          `AI confidence is ${Math.round(aiConfidenceScore * 100)}%. Please review the product name, brand, and size before continuing.`
+        );
+        setToast({ message: "Low confidence — please review product details", type: "warning" });
+        setPhotoAnalysisStatus("done");
+        setAwaitingPhoto(false);
+        await stopScanner();
+        return;
+      }
+
       openLocationPanel();
       setLocationPanelMode("quick");
       setLocationStep("aisle");
@@ -4198,23 +4732,71 @@ export default function App() {
       setLocationConfirmationCount(confirmationCount);
       setLocationConfidenceScore(confidenceScore);
       setActivePanel(null);
-      const finalizedProduct = {
-        ...product,
-        name: product?.name || "Unknown product",
-        brand: product?.brand || "",
-        barcode: barcodeValue,
-        size_value: sizeValue || "",
-        size_unit: sizeUnit || "",
-        quantity: quantity || "",
-        price: savedLocation.price,
-        avg_price: savedLocation.avg_price,
-        price_type: savedLocation.price_type,
-        price_source: savedLocation.price_source,
-        price_unit_detected: savedLocation.price_unit_detected,
-        confidence_score: savedLocation.confidence_score,
-        notes: savedLocation.notes || "",
-        source: submissionMethod || product?.source || "manual",
-      };
+
+      // Use the single authoritative resolver so cart always gets cleaned data.
+      const finalizedProduct = buildFinalProductObject({
+        product,
+        correctionForm,
+        locationForm: { ...locationForm, size_value: sizeValue, size_unit: sizeUnit, quantity },
+        savedLocation,
+        submissionMethod,
+        barcodeValue,
+      });
+
+      const rawAiIdentityScore = Number(aiIdentityConfidence ?? 0);
+      const normalizedAiIdentityScore = rawAiIdentityScore > 1 ? (rawAiIdentityScore / 100) : rawAiIdentityScore;
+      const shouldBlockForLowAiIdentity =
+        !Boolean(finalizedProduct?.product_identity_confirmed) &&
+        normalizedAiIdentityScore < 0.7;
+      if (shouldBlockForLowAiIdentity) {
+        const reviewProduct = {
+          ...finalizedProduct,
+          name: "Review needed",
+          product_name: "Review needed",
+          needs_review: true,
+          status: "needs_review",
+        };
+
+        setProduct(reviewProduct);
+        setCorrectionForm((prev) => ({
+          ...prev,
+          product_name: String(finalizedProduct?.product_name || finalizedProduct?.name || "").trim() || "Review needed",
+          brand: String(finalizedProduct?.brand || "").trim(),
+          category: String(finalizedProduct?.category || "").trim(),
+        }));
+        setAwaitingProductConfirmation(true);
+        setShowAiSummaryCard(true);
+        setStatus(`AI identity confidence ${Math.round(normalizedAiIdentityScore * 100)}% is below threshold. Confirm details before cart insertion.`);
+        setError("");
+        setToast({ message: "Low-confidence result requires confirmation", type: "warning" });
+        return;
+      }
+
+      const finalNameCandidate = String(finalizedProduct?.product_name || finalizedProduct?.name || "").trim();
+      if (!isValidProductName(finalNameCandidate)) {
+        const reviewProduct = {
+          ...finalizedProduct,
+          name: "Review needed",
+          product_name: "Review needed",
+          needs_review: true,
+          status: "needs_review",
+        };
+
+        setProduct(reviewProduct);
+        setCorrectionForm((prev) => ({
+          ...prev,
+          product_name: finalNameCandidate || "Review needed",
+          brand: String(finalizedProduct?.brand || "").trim(),
+          category: String(finalizedProduct?.category || "").trim(),
+        }));
+        setAwaitingProductConfirmation(true);
+        setShowAiSummaryCard(false);
+        setStatus("Review needed before adding item to cart.");
+        setError("Detected product name looks invalid. Please confirm or edit before adding.");
+        setToast({ message: "Review needed before cart insertion", type: "warning" });
+        return;
+      }
+
       setProduct(finalizedProduct);
       await handleAddToShoppingList(finalizedProduct, {
         ...locationForm,
@@ -4532,10 +5114,23 @@ export default function App() {
       return { added: false, updated: false, hasLocation: false };
     }
 
+    const CART_BAD_NAMES = ["unknown product", "review needed", ""];
+    const isCartBadName = (n) => CART_BAD_NAMES.includes(String(n || "").trim().toLowerCase());
+    // Pick the best non-placeholder name available, preferring product_name (DB field) over name
+    const resolveBestCartName = (incoming, existing) => {
+      const candidates = [
+        String(incoming?.product_name || "").trim(),
+        String(incoming?.name || "").trim(),
+        String(existing?.product_name || "").trim(),
+        String(existing?.name || "").trim(),
+      ];
+      return candidates.find((c) => c && !isCartBadName(c)) || "Unknown product";
+    };
+
     const itemBarcode = productToAdd.barcode || barcode || null;
     const itemStoreId = locationToUse?.store_id || selectedStore?.id || "";
-    const itemProductName = productToAdd.name || "Unknown product";
-    const itemBrand = productToAdd.brand || "";
+    const itemProductName = resolveBestCartName(productToAdd, null);
+    const itemBrand = String(productToAdd.brand || "").trim();
 
     const hasLocation = Boolean(locationToUse?.aisle || locationToUse?.section || locationToUse?.shelf);
 
@@ -4558,17 +5153,22 @@ export default function App() {
 
           if (!isMatch) return item;
 
+          const updatedName = resolveBestCartName(productToAdd, item);
+
           return {
             ...item,
             id: item.id || productToAdd.id || item.cart_item_id,
-            name: productToAdd.name || itemProductName || item.name || item.product_name,
-            product_name: itemProductName || item.product_name,
+            name: updatedName,
+            product_name: updatedName,
             brand: itemBrand || item.brand,
             source: productToAdd.source || item.source || "manual",
             size: productToAdd.size ?? productToAdd.size_value ?? item.size ?? item.size_value ?? null,
             unit: productToAdd.unit ?? productToAdd.size_unit ?? item.unit ?? item.size_unit ?? null,
             size_value: productToAdd.size_value || item.size_value || "",
             size_unit: productToAdd.size_unit || item.size_unit || "",
+            display_size: productToAdd.display_size || item.display_size || "",
+            secondary_size_value: productToAdd.secondary_size_value || item.secondary_size_value || "",
+            secondary_size_unit: productToAdd.secondary_size_unit || item.secondary_size_unit || "",
             quantity: productToAdd.quantity || item.quantity || "1",
             notes: locationToUse?.notes ?? productToAdd.notes ?? item.notes ?? "",
             price: locationToUse?.price ?? productToAdd.price ?? item.price ?? null,
@@ -4609,7 +5209,7 @@ export default function App() {
     const item = {
       cart_item_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       id: productToAdd.id || Date.now(),
-      name: productToAdd.name || itemProductName,
+      name: itemProductName,
       barcode: itemBarcode,
       product_name: itemProductName,
       brand: itemBrand,
@@ -4621,6 +5221,9 @@ export default function App() {
       unit: productToAdd.unit ?? productToAdd.size_unit ?? null,
       size_value: productToAdd.size_value || "",
       size_unit: productToAdd.size_unit || "",
+      display_size: productToAdd.display_size || "",
+      secondary_size_value: productToAdd.secondary_size_value || "",
+      secondary_size_unit: productToAdd.secondary_size_unit || "",
       quantity: productToAdd.quantity || "1",
       notes: locationToUse?.notes ?? productToAdd.notes ?? "",
       price: locationToUse?.price ?? productToAdd.price ?? null,
@@ -4638,12 +5241,13 @@ export default function App() {
       shelf: locationToUse?.shelf || "",
       confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? 0,
       brand_lock: false,
+      needs_review: productToAdd.needs_review || false,
       cart_image_url: getCleanCartImageForProduct({
         verifiedImageUrl: productToAdd.verified_image_url,
         existingImageUrl: productToAdd.cart_image_url || productToAdd.image,
         category: productToAdd.category || "",
-        productName: productToAdd.name || itemProductName,
-        brand: productToAdd.brand || itemBrand,
+        productName: itemProductName,
+        brand: itemBrand,
       }),
     };
 
@@ -4955,6 +5559,8 @@ export default function App() {
       size_unit: locationForm.size_unit,
       quantity: locationForm.quantity,
       barcode: confirmedBarcode,
+      needs_review: false,
+      product_identity_confirmed: true,
     };
 
     setCorrectionForm((prev) => ({
@@ -4994,6 +5600,8 @@ export default function App() {
       size_unit: locationForm.size_unit,
       quantity: locationForm.quantity || "1",
       barcode: confirmedBarcode,
+      needs_review: false,
+      product_identity_confirmed: true,
     };
 
     setProduct(confirmedProduct);
@@ -7147,10 +7755,15 @@ export default function App() {
                     />
                   </div>
                   <div style={styles.rewardTitle}>{item.product_name}</div>
+                  {item.needs_review ? (
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#b45309", background: "#fef3c7", borderRadius: 6, padding: "2px 7px", marginBottom: 4, display: "inline-block" }}>
+                      ⚠ Needs review
+                    </div>
+                  ) : null}
                   <div style={styles.rewardDescription}>
                     {item.brand || "Unknown brand"}
-                    {item.size_value || item.size_unit
-                      ? ` • ${item.size_value || ""}${item.size_unit ? ` ${item.size_unit}` : ""}`
+                    {(item.display_size || item.size_value || item.size_unit)
+                      ? ` • ${item.display_size || `${item.size_value || ""}${item.size_unit ? ` ${item.size_unit}` : ""}`.trim()}`
                       : ""}
                     {item.quantity ? ` • qty ${item.quantity}` : ""}
                     {itemPrice != null
