@@ -2830,15 +2830,27 @@ export default function App() {
       setPhotoAnalysisStatus('analyzing');
       setStatus(`Analyzing ${uploadedUrls.length} photo${uploadedUrls.length > 1 ? "s" : ""} with AI...`);
 
-      const { data: visionResult, error: visionError } = await supabase.functions.invoke("analyze-vision", {
-        body: {
-          imageUrl: uploadedUrls[0],
-        },
-      });
-      console.log("VISION RESULT:", visionResult);
+      const imageUrl = uploadedUrls[0];
+      const isValidPublicImageUrl =
+        /^https?:\/\//i.test(String(imageUrl || "")) &&
+        !/^blob:/i.test(String(imageUrl || "")) &&
+        !/^file:/i.test(String(imageUrl || ""));
+
+      let visionData = null;
+      let visionError = null;
+
+      if (isValidPublicImageUrl) {
+        const visionInvokeResult = await supabase.functions.invoke("analyze-vision", {
+          body: { imageUrl }
+        });
+        visionData = visionInvokeResult.data;
+        visionError = visionInvokeResult.error;
+      }
+
+      console.log("VISION RESULT:", visionData);
       console.log("VISION ERROR:", visionError);
 
-      const visionContext = visionError ? null : visionResult;
+      const visionContext = visionError ? null : visionData;
 
       const imageRoles = capturedPhotos
         .slice(0, files.length)
@@ -3090,12 +3102,32 @@ export default function App() {
       let normalizedProductName =
         String(aiPayload.product_name || "").trim() ||
         inferProductNameFromAi(aiPayload, aiResponse);
-      const normalizedBrand = aiPayload.brand || "";
+      let normalizedBrand = aiPayload.brand || "";
       const normalizedCategory = aiPayload.category || "";
       let normalizedSizeValue = aiPayload.size_value || "";
       let normalizedSizeUnit = aiPayload.size_unit || "";
       const normalizedQuantity = aiPayload.quantity || "1";
       let sizeConfidence = Number(aiPayload.size_confidence || 0);
+
+      const visionText = String(visionData?.text || "").trim();
+      if (visionText) {
+        const visionProductName =
+          extractLikelyProductPhraseFromRawText(visionText) ||
+          visionText.split(/\n|\r/).map((s) => String(s || "").trim()).find(Boolean) ||
+          "";
+        if (visionProductName) {
+          normalizedProductName = visionProductName;
+        }
+      }
+
+      if (Array.isArray(visionData?.logos) && visionData.logos.length > 0) {
+        const visionBrand = visionData.logos
+          .map((logo) => String(logo?.description || logo?.name || logo || "").trim())
+          .find(Boolean);
+        if (visionBrand) {
+          normalizedBrand = visionBrand;
+        }
+      }
 
       const isSizeMissing = !String(normalizedSizeValue || "").trim() || !String(normalizedSizeUnit || "").trim();
       if (isSizeMissing) {
@@ -5223,6 +5255,14 @@ export default function App() {
     ].includes(String(status || "").trim());
 
   const renderLocationWizardStep = () => {
+    const handleSectionSelect = (value) => {
+      setLocationForm((prev) => ({ ...prev, section: prev.section === value ? null : value }));
+    };
+
+    const handleShelfSelect = (value) => {
+      setLocationForm((prev) => ({ ...prev, shelf: prev.shelf === value ? null : value }));
+    };
+
     if (locationStep === "aisle") {
       return (
         <div>
@@ -5325,7 +5365,7 @@ export default function App() {
                   ...styles.quickButton,
                   ...(locationForm.section === option ? styles.quickButtonActive : {}),
                 }}
-                onClick={() => setLocationForm((prev) => ({ ...prev, section: option }))}
+                onClick={() => handleSectionSelect(option)}
               >
                 {option}
               </button>
@@ -5342,7 +5382,7 @@ export default function App() {
                   ...styles.quickButton,
                   ...(locationForm.shelf === option ? styles.quickButtonActive : {}),
                 }}
-                onClick={() => setLocationForm((prev) => ({ ...prev, shelf: option }))}
+                onClick={() => handleShelfSelect(option)}
               >
                 {option}
               </button>
