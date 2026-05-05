@@ -3657,23 +3657,53 @@ export default function App() {
       };
 
       const safeExtractImage = (data) => {
-        const candidate =
-          data?.imageUrl ||
-          data?.image_url ||
-          data?.url ||
-          data?.image ||
-          null;
+        const candidates = [
+          data?.imageUrl,
+          data?.image_url,
+          data?.url,
+          data?.image,
+          data?.link,
+          data?.thumbnail,
+          data?.data?.imageUrl,
+          data?.data?.image_url,
+          data?.data?.url,
+          data?.data?.image,
+          data?.result?.imageUrl,
+          data?.result?.image_url,
+          data?.result?.url,
+          data?.result?.image,
+          data?.results?.[0]?.imageUrl,
+          data?.results?.[0]?.image_url,
+          data?.results?.[0]?.url,
+          data?.results?.[0]?.link,
+          data?.items?.[0]?.imageUrl,
+          data?.items?.[0]?.image_url,
+          data?.items?.[0]?.url,
+          data?.items?.[0]?.link,
+          data?.images?.[0]?.imageUrl,
+          data?.images?.[0]?.image_url,
+          data?.images?.[0]?.url,
+          data?.images?.[0]?.link,
+        ];
 
-        if (!candidate || typeof candidate !== "string" || candidate.trim().length === 0) {
-          return null;
-        }
+        const firstValid = candidates.find(
+          (candidate) =>
+            typeof candidate === "string" &&
+            candidate.trim().length > 0
+        );
 
-        return toCleanExternalImageUrl(candidate);
+        return toCleanExternalImageUrl(firstValid);
       };
 
       let edgeImageUrl = null;
 
       try {
+        console.log("IMAGE SEARCH REQUEST:", {
+          productName: normalizedProductName,
+          brand: normalizedBrand,
+          category: normalizedCategory,
+        });
+
         const response = await fetch(
           `${supabaseUrl}/functions/v1/search-product-image`,
           {
@@ -3685,8 +3715,12 @@ export default function App() {
             },
             body: JSON.stringify({
               productName: normalizedProductName,
+              product_name: normalizedProductName,
               brand: normalizedBrand,
               category: normalizedCategory,
+              query: [normalizedBrand, normalizedProductName, normalizedCategory]
+                .filter(Boolean)
+                .join(" "),
             }),
           }
         );
@@ -3697,6 +3731,7 @@ export default function App() {
           console.log("IMAGE FUNCTION RESULT:", imageResult);
 
           edgeImageUrl = safeExtractImage(imageResult);
+          console.log("IMAGE FUNCTION EXTRACTED URL:", edgeImageUrl);
         } else {
           console.warn("IMAGE SEARCH NON-OK:", response.status);
         }
