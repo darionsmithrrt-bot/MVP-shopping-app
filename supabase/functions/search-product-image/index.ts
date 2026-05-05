@@ -25,12 +25,20 @@ const jsonResponse = (payload: unknown, status = 200) =>
 
 const toCleanText = (value: unknown): string => String(value || "").trim();
 
+const BLOCKED_DOMAINS = ["facebook.com", "instagram.com", "pinterest.com", "reddit.com", "fbcdn.net", "cdninstagram.com", "pinimg.com", "redd.it"];
+
 const isValidHttpsImageCandidate = (value: unknown): value is string => {
   if (typeof value !== "string") return false;
   const candidate = value.trim();
   if (!candidate) return false;
   if (!candidate.startsWith("https://")) return false;
   if (candidate.startsWith("data:")) return false;
+  try {
+    const hostname = new URL(candidate).hostname.toLowerCase();
+    if (BLOCKED_DOMAINS.some((d) => hostname === d || hostname.endsWith("." + d))) return false;
+  } catch {
+    return false;
+  }
   return true;
 };
 
@@ -45,6 +53,10 @@ const buildQueries = (body: SearchRequestBody): string[] => {
     productName,
     `${brand} ${category}`.trim(),
     category,
+    query,
+    productName ? `${productName} product image` : "",
+    brand && productName ? `${brand} ${productName} packaging` : "",
+    productName ? `${productName} grocery item` : "",
   ].filter(Boolean);
 };
 
@@ -60,8 +72,8 @@ serve(async (req) => {
   let googleRaw: unknown = null;
 
   try {
-    const googleApiKey = Deno.env.get("GOOGLE_API_KEY") || "";
-    const googleCx = Deno.env.get("GOOGLE_CSE_ID") || "";
+    const googleApiKey = Deno.env.get("GOOGLE_CUSTOM_SEARCH_API_KEY") || Deno.env.get("GOOGLE_API_KEY") || "";
+    const googleCx = Deno.env.get("GOOGLE_CUSTOM_SEARCH_ENGINE_ID") || Deno.env.get("GOOGLE_CSE_ID") || "";
     let receivedBody: unknown;
     try {
       receivedBody = await req.json();
@@ -92,6 +104,8 @@ serve(async (req) => {
         googleUrl.searchParams.set("cx", googleCx);
         googleUrl.searchParams.set("searchType", "image");
         googleUrl.searchParams.set("num", "10");
+        googleUrl.searchParams.set("safe", "active");
+        googleUrl.searchParams.set("imgSize", "medium");
         googleUrl.searchParams.set("q", query);
 
         const googleResponse = await fetch(googleUrl.toString());
@@ -130,12 +144,13 @@ serve(async (req) => {
       confidence: bestImageUrl ? 0.9 : 0,
       fallbackUsed: !bestImageUrl,
       debug: {
-        receivedBody,
-        triedQueries,
-        resultCount,
-        firstRawResult,
-        googleRaw,
-      },
+          receivedBody,
+          triedQueries,
+          usedQuery,
+          resultCount,
+          firstRawResult,
+          googleRaw,
+        },
     });
   } catch (error) {
     console.error("search-product-image error", error);
@@ -149,6 +164,7 @@ serve(async (req) => {
         debug: {
           receivedBody: null,
           triedQueries: [],
+          usedQuery: "",
           resultCount: 0,
           firstRawResult: null,
           googleRaw,
