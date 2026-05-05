@@ -3786,7 +3786,7 @@ export default function App() {
           .select("id, barcode, product_name, image_url, verified_image_url, brand, source, size_value, size_unit, quantity")
           .single();
 
-        if (updateResult.error && cleanVerifiedImageUrlCandidate) {
+        if (updateResult.error && imageUrlToPersist) {
           const errorText = String(updateResult.error?.message || "").toLowerCase();
           const missingOptionalColumn =
             errorText.includes("column") ||
