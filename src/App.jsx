@@ -945,6 +945,11 @@ const buildFinalProductObject = ({
     notes: savedLocation?.notes ?? product?.notes ?? "",
     source: resolvedSource,
     needs_review: isBad(resolvedName),
+    image: product?.image || product?.cart_image_url || null,
+    image_url: product?.image_url || null,
+    verified_image_url: product?.verified_image_url || null,
+    cart_image_url: product?.cart_image_url || product?.image || null,
+    raw_photo_url: product?.raw_photo_url || null,
   };
 };
 
@@ -5108,6 +5113,31 @@ export default function App() {
     }
   };
 
+  const resolveCartImageUrl = (productToAdd, existingItem = null) => {
+    return getCleanCartImageForProduct({
+      verifiedImageUrl:
+        productToAdd?.verified_image_url ||
+        productToAdd?.cart_image_url ||
+        productToAdd?.image ||
+        existingItem?.verified_image_url ||
+        existingItem?.cart_image_url ||
+        existingItem?.image,
+      existingImageUrl:
+        productToAdd?.image_url ||
+        productToAdd?.image ||
+        existingItem?.image_url ||
+        existingItem?.image,
+      category: productToAdd?.category || existingItem?.category || "",
+      productName:
+        productToAdd?.product_name ||
+        productToAdd?.name ||
+        existingItem?.product_name ||
+        existingItem?.name ||
+        "",
+      brand: productToAdd?.brand || existingItem?.brand || "",
+    });
+  };
+
   const handleAddToShoppingList = async (productToAdd = product, locationToUse = bestKnownLocation) => {
     if (!productToAdd) {
       setError("No product available to add");
@@ -5191,13 +5221,18 @@ export default function App() {
             confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? item.confidence_score ?? 0,
             store_id: itemStoreId || item.store_id || null,
             store_name: locationToUse?.store_name || item.store_name || selectedStore?.name || "",
-            cart_image_url: getCleanCartImageForProduct({
-              verifiedImageUrl: productToAdd.verified_image_url,
-              existingImageUrl: productToAdd.cart_image_url || productToAdd.image,
-              category: productToAdd.category || item.category || "",
-              productName: productToAdd.name || itemProductName,
-              brand: productToAdd.brand || itemBrand,
-            }),
+            cart_image_url: (() => {
+              const resolvedCartImageUrl = resolveCartImageUrl(productToAdd, item);
+              return resolvedCartImageUrl !== MVP_PLACEHOLDER_IMAGE
+                ? resolvedCartImageUrl
+                : (item.cart_image_url !== MVP_PLACEHOLDER_IMAGE ? item.cart_image_url : resolvedCartImageUrl);
+            })(),
+            image: (() => {
+              const resolvedCartImageUrl = resolveCartImageUrl(productToAdd, item);
+              return resolvedCartImageUrl !== MVP_PLACEHOLDER_IMAGE
+                ? resolvedCartImageUrl
+                : (item.image !== MVP_PLACEHOLDER_IMAGE ? item.image : resolvedCartImageUrl);
+            })(),
             category: productToAdd.category || item.category || "",
           };
         })
@@ -5242,14 +5277,18 @@ export default function App() {
       confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? 0,
       brand_lock: false,
       needs_review: productToAdd.needs_review || false,
-      cart_image_url: getCleanCartImageForProduct({
-        verifiedImageUrl: productToAdd.verified_image_url,
-        existingImageUrl: productToAdd.cart_image_url || productToAdd.image,
-        category: productToAdd.category || "",
-        productName: itemProductName,
-        brand: itemBrand,
-      }),
+      cart_image_url: resolveCartImageUrl(productToAdd),
+      image: resolveCartImageUrl(productToAdd),
     };
+
+    const resolvedCartImageUrl = item.cart_image_url;
+    console.log("CART IMAGE RESOLUTION:", {
+      productName: itemProductName,
+      incomingImage: productToAdd?.image,
+      incomingVerifiedImage: productToAdd?.verified_image_url,
+      incomingCartImage: productToAdd?.cart_image_url,
+      resolvedCartImageUrl,
+    });
 
     setShoppingListItems((prev) => [...prev, item]);
     setToast({ message: "Added to shopping list", type: "success" });
