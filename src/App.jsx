@@ -1165,6 +1165,10 @@ export default function App() {
   const [searchResults, setSearchResults] = useState([]);
   const [isFindingNearbyStores, setIsFindingNearbyStores] = useState(false);
 
+  useEffect(() => {
+    console.info("MVP BUILD CHECK: account-header-unified-v2");
+  }, []);
+
   const applyItemRequestSuggestion = (suggestion) => {
     if (!suggestion?.product_name) return;
     setItemRequestForm((prev) => ({
@@ -5999,14 +6003,17 @@ export default function App() {
   };
 
   const getProfileInitials = () => {
-    const email =
-      authUser?.email ||
-      currentUserProfile?.email ||
-      loginForm?.username ||
-      "";
-    const cleaned = String(email).trim();
-    if (!cleaned) return "Me";
-    return cleaned.slice(0, 2).toUpperCase();
+    const authEmail = String(authUser?.email || "").trim();
+    if (authEmail) return authEmail.slice(0, 2).toUpperCase();
+
+    const isRealProfile = Boolean(currentUserProfile && !currentUserProfile?.is_guest);
+    const profileDisplayName = String(currentUserProfile?.display_name || "").trim();
+    if (isRealProfile && profileDisplayName) return profileDisplayName.slice(0, 2).toUpperCase();
+
+    const profileEmail = String(currentUserProfile?.email || "").trim();
+    if (isRealProfile && profileEmail) return profileEmail.slice(0, 2).toUpperCase();
+
+    return "Profile";
   };
 
   const isSignedInProfile = Boolean(authUser?.id && currentUserProfile && !currentUserProfile?.is_guest);
