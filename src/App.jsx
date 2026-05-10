@@ -1085,6 +1085,8 @@ export default function App() {
   const [manualListItemName, setManualListItemName] = useState("");
   const [cartComparison, setCartComparison] = useState(null);
   const [isComparingCart, setIsComparingCart] = useState(false);
+  const [storeRouteLocations, setStoreRouteLocations] = useState({});
+  const [isLoadingStoreRoute, setIsLoadingStoreRoute] = useState(false);
   const [brandComparisonMode, setBrandComparisonMode] = useState("flexible");
 
   // ============================================================================
@@ -1732,6 +1734,73 @@ export default function App() {
     localStorage.setItem("shoppingListItems", JSON.stringify(shoppingListItems));
   }, [shoppingListItems]);
 
+  // Reset shopping route when the selected store changes so stale aisle data is not shown.
+  useEffect(() => {
+    setShoppingMode(false);
+    setActiveAisleView(null);
+  }, [selectedStore?.id]);
+
+  // Fetch product_locations for the selected store keyed by barcode.
+  // This allows the route to show correct aisle data even when a cart item was
+  // originally added under a different store.
+  useEffect(() => {
+    const storeId = selectedStore?.id;
+    // Always clear the previous store's route map and loading flag immediately before fetching.
+    setStoreRouteLocations({});
+    setIsLoadingStoreRoute(false);
+    if (!storeId) {
+      return;
+    }
+    const barcodes = shoppingListItems
+      .map((i) => String(i?.barcode || "").trim())
+      .filter(Boolean);
+    if (barcodes.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    const fetchRouteLocations = async () => {
+      setIsLoadingStoreRoute(true);
+      try {
+        const { data, error } = await supabase
+          .from("product_locations")
+          .select("barcode, aisle, section, shelf, notes, price, price_type, avg_price, confidence_score, last_confirmed_at, store_id")
+          .eq("store_id", storeId)
+          .in("barcode", barcodes);
+        if (cancelled) return;
+        if (error) {
+          console.warn("[storeRoute] Failed to fetch product_locations:", error.message);
+          return;
+        }
+        const locationMap = {};
+        for (const row of (data || [])) {
+          const key = String(row.barcode || "").trim();
+          if (!key) continue;
+          const existing = locationMap[key];
+          if (!existing) {
+            locationMap[key] = row;
+          } else {
+            const newConf = Number(row.confidence_score || 0);
+            const curConf = Number(existing.confidence_score || 0);
+            if (newConf > curConf) {
+              locationMap[key] = row;
+            } else if (newConf === curConf) {
+              const newTs = row.last_confirmed_at ? new Date(row.last_confirmed_at).getTime() : 0;
+              const curTs = existing.last_confirmed_at ? new Date(existing.last_confirmed_at).getTime() : 0;
+              if (newTs > curTs) locationMap[key] = row;
+            }
+          }
+        }
+        setStoreRouteLocations(locationMap);
+      } catch (err) {
+        if (!cancelled) console.warn("[storeRoute] Unexpected error fetching product_locations:", err);
+      } finally {
+        if (!cancelled) setIsLoadingStoreRoute(false);
+      }
+    };
+    fetchRouteLocations();
+    return () => { cancelled = true; };
+  }, [selectedStore?.id, shoppingListItems]);
+
   useEffect(() => {
     if (!showItemRequestModal) {
       setItemRequestSuggestions([]);
@@ -1931,6 +2000,7 @@ export default function App() {
 
   const shoppingListEstimatedTotal = calculateCartTotal(shoppingListItems);
 
+  // smartCartItems: used for general cart display (all items, store-agnostic)
   const smartCartItems = shoppingListItems
     .map((item, originalIndex) => {
       const aisleText = String(item?.aisle || "").trim();
@@ -1952,18 +2022,75 @@ export default function App() {
       if (a.isKnownLocation !== b.isKnownLocation) {
         return a.isKnownLocation ? -1 : 1;
       }
-
       if (!a.isKnownLocation && !b.isKnownLocation) {
         return String(a.product_name || "").localeCompare(String(b.product_name || ""));
       }
-
       const confidenceDiff = Number(b.confidence_score || 0) - Number(a.confidence_score || 0);
       if (confidenceDiff !== 0) return confidenceDiff;
-
       return String(a.product_name || "").localeCompare(String(b.product_name || ""));
     });
 
-  const smartCartByAisle = smartCartItems.reduce((acc, smartItem) => {
+  // storeScopedSmartCartItems: used for the smart shopping ROUTE.
+  // Location data (aisle/section/shelf) is only trusted when item.store_id matches selectedStore.id.
+  const storeScopedSmartCartItems = shoppingListItems
+    .map((item, originalIndex) => {
+      const barcode = String(item?.barcode || "").trim();
+      const selectedStoreId = String(selectedStore?.id || "").trim();
+
+      // Priority 1: use product_locations row fetched for the selected store —
+      // but only trust it when its own store_id matches the selected store (double-check).
+      const rawRouteLocation = selectedStoreId && barcode ? (storeRouteLocations[barcode] || null) : null;
+      const routeLocationStoreId = String(rawRouteLocation?.store_id || "").trim();
+      const routeLocation = rawRouteLocation && routeLocationStoreId === selectedStoreId ? rawRouteLocation : null;
+
+      // Priority 2: fall back to cart item's own location only when store_id matches.
+      const itemStoreId = String(item?.store_id || "").trim();
+      const itemStoreMatches = selectedStoreId && itemStoreId === selectedStoreId;
+
+      let aisleText = "";
+      let section = "";
+      let shelf = "";
+      let confidenceScore = 0;
+
+      if (routeLocation) {
+        aisleText = String(routeLocation.aisle || "").trim();
+        section = routeLocation.section || "";
+        shelf = routeLocation.shelf || "";
+        confidenceScore = Number(routeLocation.confidence_score || 0);
+      } else if (itemStoreMatches) {
+        aisleText = String(item?.aisle || "").trim();
+        section = item?.section || "";
+        shelf = item?.shelf || "";
+        confidenceScore = Number(item?.confidence_score || 0);
+      }
+
+      return {
+        product_name: item?.product_name || "",
+        brand: item?.brand || "",
+        aisle: aisleText,
+        section,
+        shelf,
+        confidence_score: Number.isFinite(confidenceScore) ? confidenceScore : 0,
+        routeLocation,
+        isKnownLocation: Boolean(aisleText),
+        needsContribution: !aisleText,
+        originalIndex,
+        item,
+      };
+    })
+    .sort((a, b) => {
+      if (a.isKnownLocation !== b.isKnownLocation) {
+        return a.isKnownLocation ? -1 : 1;
+      }
+      if (!a.isKnownLocation && !b.isKnownLocation) {
+        return String(a.product_name || "").localeCompare(String(b.product_name || ""));
+      }
+      const confidenceDiff = Number(b.confidence_score || 0) - Number(a.confidence_score || 0);
+      if (confidenceDiff !== 0) return confidenceDiff;
+      return String(a.product_name || "").localeCompare(String(b.product_name || ""));
+    });
+
+  const smartCartByAisle = storeScopedSmartCartItems.reduce((acc, smartItem) => {
     const aisleKey = smartItem.aisle || "Unknown location";
     if (!acc[aisleKey]) {
       acc[aisleKey] = [];
@@ -2021,7 +2148,7 @@ export default function App() {
       };
     });
 
-  const smartShoppingItemsToLocate = smartCartItems.filter((smartItem) => smartItem.needsContribution);
+  const smartShoppingItemsToLocate = storeScopedSmartCartItems.filter((smartItem) => smartItem.needsContribution);
   const smartShoppingKnownItemCount = smartShoppingKnownAisleGroups.reduce(
     (sum, group) => sum + group.items.length,
     0
@@ -2054,7 +2181,23 @@ export default function App() {
         : "Ready to shop by aisle.";
 
   const startShoppingMode = () => {
-    if (!shoppingModeAisleLabels.length) return;
+    if (!selectedStore) {
+      setError("Select a store first to build your route.");
+      setAppScreen("store");
+      return;
+    }
+    if (isLoadingStoreRoute) {
+      setError("Loading route for this store. Try again in a moment.");
+      return;
+    }
+    if (shoppingListItems.length === 0) {
+      setError("Add items to your cart before starting a route.");
+      return;
+    }
+    if (!shoppingModeAisleLabels.length) {
+      setError("No route available for this store yet. Add or confirm item locations to build this route.");
+      return;
+    }
     setShoppingMode(true);
     setActiveAisleView(shoppingModeAisleLabels[0]);
   };
@@ -5519,7 +5662,10 @@ export default function App() {
 
   const handleSmartCartUpdateLocation = (smartItem) => {
     const item = smartItem.item;
-    const itemPrice = Number(item?.avg_price ?? item?.price);
+    // Use the selected-store's route location fields for route entry (aisle/section/shelf/price).
+    // Fall back to the cart item's own fields only for product identity.
+    const routeLoc = smartItem.routeLocation || null;
+    const routePrice = Number(routeLoc?.avg_price ?? routeLoc?.price ?? item?.avg_price ?? item?.price);
 
     setProduct({
       name: item.product_name,
@@ -5540,15 +5686,17 @@ export default function App() {
     setBestKnownLocation(null);
     setLocationForm((prev) => ({
       ...prev,
-      aisle: item.aisle || "",
-      section: item.section || "",
-      shelf: item.shelf || "",
-      notes: item.notes || "",
+      // Route location fields — prefer selected-store's DB row, fall back to cart item.
+      aisle: smartItem.aisle || "",
+      section: smartItem.section || "",
+      shelf: smartItem.shelf || "",
+      notes: routeLoc?.notes ?? item.notes ?? "",
+      // Product identity fields — always from cart item.
       size_value: item.size_value || item.size || "",
       size_unit: item.size_unit || item.unit || "",
       quantity: item.quantity || "1",
-      price: Number.isFinite(itemPrice) && itemPrice > 0 ? String(Math.round(itemPrice * 100)) : "",
-      price_type: item.price_type || prev.price_type || "each",
+      price: Number.isFinite(routePrice) && routePrice > 0 ? String(Math.round(routePrice * 100)) : "",
+      price_type: routeLoc?.price_type || item.price_type || prev.price_type || "each",
       price_source: item.price_source || prev.price_source || "",
       detected_price_unit: item.price_unit_detected || prev.detected_price_unit || "unknown",
     }));
@@ -6757,22 +6905,47 @@ export default function App() {
             </button>
           </div>
 
-          {/* ── Smart Cart summary ── */}
+          {/* ── Smart Cart & Route summary ── */}
           <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 14, padding: "12px 16px", marginBottom: 12 }}>
             <div style={{ fontSize: 13, fontWeight: 800, color: "#334155", marginBottom: 6, textTransform: "uppercase" }}>Smart Cart</div>
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
               <div style={{ fontSize: 13, color: "#0f172a" }}>Items: <strong>{listCount}</strong></div>
               <div style={{ fontSize: 13, color: "#0f172a" }}>Est. total: <strong>${shoppingListEstimatedTotal.toFixed(2)}</strong></div>
-              <div style={{ fontSize: 13, color: "#166534" }}>Located: <strong>{knownCount}</strong></div>
-              <div style={{ fontSize: 13, color: "#92400e" }}>Needs location: <strong>{missingCount}</strong></div>
             </div>
-            <button
-              type="button"
-              style={{ ...styles.secondaryButton, minHeight: 34, padding: "6px 12px" }}
-              onClick={() => setAppScreen("cart")}
-            >
-              Open Smart Cart
-            </button>
+            {selectedStore ? (
+              <>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#1e40af", marginBottom: 4 }}>
+                  Route for {selectedStore.name}{selectedStore.city ? `, ${selectedStore.city}` : ""}
+                </div>
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
+                  <div style={{ fontSize: 13, color: "#166534" }}>Located: <strong>{knownCount}</strong></div>
+                  <div style={{ fontSize: 13, color: "#92400e" }}>Needs location: <strong>{missingCount}</strong></div>
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 13, color: "#64748b", marginBottom: 8 }}>Select a store to see route details.</div>
+            )}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                style={{ ...styles.secondaryButton, minHeight: 34, padding: "6px 12px" }}
+                onClick={() => setAppScreen("cart")}
+              >
+                Open Smart Cart
+              </button>
+              <button
+                type="button"
+                style={{ ...styles.introPrimaryButton, minHeight: 34, padding: "6px 14px", marginBottom: 0, fontSize: 13 }}
+                onClick={() => {
+                  startShoppingMode();
+                  if (selectedStore && shoppingListItems.length > 0 && shoppingModeAisleLabels.length > 0) {
+                    setAppScreen("cart");
+                  }
+                }}
+              >
+                {selectedStore ? `Start Route for ${selectedStore.name}` : "Select Store to Start Route"}
+              </button>
+            </div>
           </div>
 
           {/* ── Actions ── */}
