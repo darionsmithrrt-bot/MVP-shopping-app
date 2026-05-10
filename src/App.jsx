@@ -1883,6 +1883,11 @@ export default function App() {
         return;
       }
 
+      if (activeScreen === "profile") {
+        setActiveScreen(selectedStore ? "store" : "landing");
+        return;
+      }
+
       if (activeScreen === "store") {
         // prevent app exit behavior
         window.history.pushState(null, "", window.location.href);
@@ -1892,7 +1897,7 @@ export default function App() {
     window.addEventListener("popstate", handleBack);
 
     return () => window.removeEventListener("popstate", handleBack);
-  }, [activeScreen, activePanel]);
+  }, [activeScreen, activePanel, selectedStore]);
 
   const storeSearchQuery = manualStoreName.trim().toLowerCase();
   const setStoreSearchQuery = setManualStoreName;
@@ -6661,6 +6666,178 @@ export default function App() {
     );
   }
 
+  // ============================================================
+  // PROFILE SCREEN
+  // ============================================================
+  const renderProfileScreen = () => {
+    const displayName = currentUserProfile
+      ? (currentUserProfile.display_name || currentUserProfile.email || "Guest")
+      : null;
+    const isGuest = currentUserProfile?.is_guest ?? true;
+    const points = Number(userPoints || currentUserProfile?.total_points || 0);
+    const trustScore = Number(currentUserProfile?.trust_score || 0);
+    const listCount = shoppingListItems.length;
+    const knownCount = smartShoppingKnownItemCount;
+    const missingCount = smartShoppingNeedsLocationCount;
+
+    return (
+      <div style={styles.introPage}>
+        <div style={styles.introHeroCard}>
+
+          {/* ── Header row ── */}
+          <div style={styles.introHeaderRow}>
+            <img src={mvpLogo} alt="MVP logo" style={styles.introHeaderLogo} />
+            <span style={{ fontWeight: 900, fontSize: 18, color: "#0f172a", flex: 1 }}>Profile</span>
+            <button
+              type="button"
+              style={{ ...styles.secondaryButton, minHeight: 36, padding: "6px 14px" }}
+              onClick={handleBackToHome}
+            >
+              Home
+            </button>
+          </div>
+
+          {/* ── Identity card ── */}
+          <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 14, padding: "14px 16px", marginBottom: 12 }}>
+            {currentUserProfile ? (
+              <>
+                <div style={{ fontSize: 22, fontWeight: 900, color: "#0f172a", marginBottom: 4 }}>{displayName}</div>
+                <div style={{ display: "inline-block", background: isGuest ? "#fef9c3" : "#dbeafe", color: isGuest ? "#92400e" : "#1e3a8a", borderRadius: 999, padding: "2px 10px", fontSize: 12, fontWeight: 700, marginBottom: 8 }}>
+                  {isGuest ? "Guest" : "Signed In"}
+                </div>
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 4 }}>
+                  <div style={{ fontSize: 13, color: "#334155" }}><strong>{points}</strong> pts</div>
+                  <div style={{ fontSize: 13, color: "#334155" }}>Trust: <strong>{trustScore}</strong></div>
+                  <div style={{ fontSize: 13, color: "#334155" }}>{getUserLevelEmoji()} {getUserLevelTitle()}</div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#334155", marginBottom: 10 }}>You are not signed in.</div>
+                <button
+                  type="button"
+                  style={{ ...styles.introPrimaryButton, marginBottom: 8 }}
+                  onClick={() => { setShowLoginModal(true); }}
+                >
+                  Sign In
+                </button>
+                <button
+                  type="button"
+                  style={styles.introSecondaryButton}
+                  onClick={() => {
+                    const guestId = crypto.randomUUID();
+                    const guestProfile = { id: guestId, display_name: "Guest", is_guest: true, total_points: 0, trust_score: 0 };
+                    localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
+                    setCurrentUserProfile(guestProfile);
+                    setAppScreen("store");
+                  }}
+                >
+                  Continue as Guest
+                </button>
+              </>
+            )}
+          </div>
+
+          {/* ── Store context ── */}
+          <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 14, padding: "12px 16px", marginBottom: 12 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#1e40af", marginBottom: 6, textTransform: "uppercase" }}>Current Store</div>
+            {selectedStore ? (
+              <div style={{ fontSize: 14, color: "#0f172a", fontWeight: 700, marginBottom: 8 }}>
+                {selectedStore.name}{selectedStore.city ? `, ${selectedStore.city}` : ""}
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, color: "#64748b", marginBottom: 8 }}>No store selected.</div>
+            )}
+            <button
+              type="button"
+              style={{ ...styles.secondaryButton, minHeight: 34, padding: "6px 12px" }}
+              onClick={() => setAppScreen("store")}
+            >
+              {selectedStore ? "Change Store" : "Select Store"}
+            </button>
+          </div>
+
+          {/* ── Smart Cart summary ── */}
+          <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 14, padding: "12px 16px", marginBottom: 12 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#334155", marginBottom: 6, textTransform: "uppercase" }}>Smart Cart</div>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
+              <div style={{ fontSize: 13, color: "#0f172a" }}>Items: <strong>{listCount}</strong></div>
+              <div style={{ fontSize: 13, color: "#0f172a" }}>Est. total: <strong>${shoppingListEstimatedTotal.toFixed(2)}</strong></div>
+              <div style={{ fontSize: 13, color: "#166534" }}>Located: <strong>{knownCount}</strong></div>
+              <div style={{ fontSize: 13, color: "#92400e" }}>Needs location: <strong>{missingCount}</strong></div>
+            </div>
+            <button
+              type="button"
+              style={{ ...styles.secondaryButton, minHeight: 34, padding: "6px 12px" }}
+              onClick={() => setAppScreen("cart")}
+            >
+              Open Smart Cart
+            </button>
+          </div>
+
+          {/* ── Actions ── */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+            <button
+              type="button"
+              style={{ ...styles.introPrimaryButton, marginBottom: 0 }}
+              onClick={() => {
+                if (!selectedStore) {
+                  setError("Select a store first.");
+                  setAppScreen("store");
+                  return;
+                }
+                setAppScreen("identify");
+              }}
+            >
+              Add Item
+            </button>
+
+            <button
+              type="button"
+              style={{ ...styles.introSecondaryButton, marginBottom: 0 }}
+              onClick={() => setShowItemRequestModal(true)}
+            >
+              Request an Item
+            </button>
+
+            <button
+              type="button"
+              style={{ ...styles.introSecondaryButton, marginBottom: 0 }}
+              disabled={isComparingCart}
+              onClick={handleCompareCart}
+            >
+              {isComparingCart ? "Comparing…" : "Compare My Cart"}
+            </button>
+
+            {currentUserProfile && (
+              <button
+                type="button"
+                style={{ ...styles.changeStoreButton, marginTop: 4 }}
+                onClick={handleResetProfile}
+              >
+                {isGuest ? "Switch Profile" : "Sign Out"}
+              </button>
+            )}
+          </div>
+
+          {/* ── Cart comparison result (if available) ── */}
+          {cartComparison && cartComparison.length > 0 && (
+            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 14, padding: "12px 16px", marginBottom: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#166534", marginBottom: 8, textTransform: "uppercase" }}>Cart Comparison Results</div>
+              {cartComparison.slice(0, 5).map((item, idx) => (
+                <div key={idx} style={{ fontSize: 13, color: "#0f172a", marginBottom: 4 }}>
+                  {item.product_name || item.name}: <strong>${Number(item.price || 0).toFixed(2)}</strong>
+                  {item.store_name ? <span style={{ color: "#64748b" }}> @ {item.store_name}</span> : null}
+                </div>
+              ))}
+            </div>
+          )}
+
+        </div>
+      </div>
+    );
+  };
+
   if ((activeScreen === "landing" || !currentUserProfile) && showOnboarding) {
     return (
       <div style={styles.introPage}>
@@ -6749,6 +6926,14 @@ export default function App() {
               onClick={() => setShowLoginModal(true)}
             >
               {getProfileInitials()}
+            </button>
+
+            <button
+              type="button"
+              style={{ ...styles.loginIconButton, fontSize: 12, fontWeight: 700, padding: "0 10px", minWidth: 64 }}
+              onClick={() => setAppScreen("profile")}
+            >
+              Profile
             </button>
           </div>
 
@@ -7112,7 +7297,12 @@ export default function App() {
     );
   }
 
+  if (activeScreen === "profile") {
+    return renderProfileScreen();
+  }
+
   if (currentUserProfile) {
+
     return (
       <div style={styles.page}>
         <div style={styles.container}>
@@ -7210,6 +7400,13 @@ export default function App() {
             <span>{currentUserProfile.display_name}</span>
             <span>{currentUserProfile.total_points || 0} pts</span>
             <span>Level 1 Contributor</span>
+            <button
+              type="button"
+              style={{ ...styles.changeStoreButton, background: "#dbeafe", color: "#1e3a8a", border: "1px solid #93c5fd" }}
+              onClick={() => setAppScreen("profile")}
+            >
+              Profile
+            </button>
             <button
               type="button"
               style={styles.changeStoreButton}
