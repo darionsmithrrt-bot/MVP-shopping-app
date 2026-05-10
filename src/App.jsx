@@ -1165,10 +1165,6 @@ export default function App() {
   const [searchResults, setSearchResults] = useState([]);
   const [isFindingNearbyStores, setIsFindingNearbyStores] = useState(false);
 
-  useEffect(() => {
-    console.info("MVP BUILD CHECK: account-header-unified-v2");
-  }, []);
-
   const applyItemRequestSuggestion = (suggestion) => {
     if (!suggestion?.product_name) return;
     setItemRequestForm((prev) => ({
