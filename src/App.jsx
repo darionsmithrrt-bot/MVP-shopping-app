@@ -5340,15 +5340,51 @@ export default function App() {
   const updateUserTrustScore = async (increment = 1) => {
     if (!currentUserProfile?.id) return;
 
+    const applyLocalTrustScoreFallback = () => {
+      setCurrentUserProfile((prev) => {
+        if (!prev) return prev;
+        const nextProfile = {
+          ...prev,
+          trust_score: Number(prev?.trust_score || 0) + increment,
+        };
+        localStorage.setItem("currentUserProfile", JSON.stringify(nextProfile));
+        return nextProfile;
+      });
+    };
+
+    if (currentUserProfile?.is_guest) {
+      applyLocalTrustScoreFallback();
+      return;
+    }
+
+    if (!authUser?.id) {
+      applyLocalTrustScoreFallback();
+      return;
+    }
+
+    if (String(currentUserProfile.id) !== String(authUser.id)) {
+      applyLocalTrustScoreFallback();
+      return;
+    }
+
     try {
       // Fetch current trust_score to avoid race conditions
       const { data, error } = await supabase
         .from("profiles")
         .select("trust_score")
         .eq("id", currentUserProfile.id)
-        .single();
+        .maybeSingle();
 
-      if (error) throw error;
+      if (error) {
+        console.warn("TRUST SCORE LOOKUP SKIPPED:", error.message);
+        return;
+      }
+
+      if (!data) {
+        console.warn("TRUST SCORE PROFILE ROW NOT FOUND; using local fallback");
+        applyLocalTrustScoreFallback();
+        return;
+      }
 
       const newTrustScore = Number(data?.trust_score || 0) + increment;
 
@@ -5360,16 +5396,23 @@ export default function App() {
         })
         .eq("id", currentUserProfile.id)
         .select()
-        .single();
+        .maybeSingle();
 
-      if (updateError) throw updateError;
+      if (updateError) {
+        console.warn("TRUST SCORE UPDATE SKIPPED:", updateError.message);
+        return;
+      }
 
-      // Persist locally
-      setCurrentUserProfile(updatedProfile);
-      localStorage.setItem("currentUserProfile", JSON.stringify(updatedProfile));
+      if (updatedProfile) {
+        setCurrentUserProfile(updatedProfile);
+        localStorage.setItem("currentUserProfile", JSON.stringify(updatedProfile));
+      } else {
+        console.warn("TRUST SCORE UPDATE RETURNED NO ROW; using local fallback");
+        applyLocalTrustScoreFallback();
+      }
 
     } catch (err) {
-      console.error("TRUST SCORE UPDATE ERROR:", err);
+      console.warn("TRUST SCORE UPDATE SKIPPED:", err?.message || err);
     }
   };
 
