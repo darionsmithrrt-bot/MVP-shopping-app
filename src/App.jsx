@@ -5174,9 +5174,24 @@ export default function App() {
       return;
     }
 
-    setLoginMode("signIn");
-    setAuthError("");
-    setShowLoginModal(true);
+    const guestId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `guest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const guestProfile = {
+      id: guestId,
+      display_name: "Guest Shopper",
+      email: null,
+      trust_score: 0,
+      points: 0,
+      total_points: 0,
+      is_guest: true,
+      created_at: new Date().toISOString(),
+    };
+    localStorage.setItem("currentUserProfile", JSON.stringify(guestProfile));
+    setCurrentUserProfile(guestProfile);
+    setAppScreen("store");
+    setShowLoginModal(false);
     setShowOnboarding(false);
   };
 
@@ -5992,6 +6007,24 @@ export default function App() {
     const cleaned = String(email).trim();
     if (!cleaned) return "Me";
     return cleaned.slice(0, 2).toUpperCase();
+  };
+
+  const isSignedInProfile = Boolean(authUser?.id && currentUserProfile && !currentUserProfile?.is_guest);
+
+  const handleAccountButtonClick = () => {
+    if (isSignedInProfile) {
+      setAppScreen("profile");
+      return;
+    }
+
+    setLoginMode("signIn");
+    setAuthError("");
+    setShowLoginModal(true);
+  };
+
+  const getAccountButtonLabel = () => {
+    if (isSignedInProfile) return getProfileInitials();
+    return "Profile";
   };
 
   const getAiFieldIndicator = (field, hasValue) => {
@@ -7138,18 +7171,10 @@ export default function App() {
             </button>
 
             <button
-              style={styles.loginIconButton}
-              onClick={() => setShowLoginModal(true)}
-            >
-              {getProfileInitials()}
-            </button>
-
-            <button
-              type="button"
               style={{ ...styles.loginIconButton, fontSize: 12, fontWeight: 700, padding: "0 10px", minWidth: 64 }}
-              onClick={() => setAppScreen("profile")}
+              onClick={handleAccountButtonClick}
             >
-              Profile
+              {getAccountButtonLabel()}
             </button>
           </div>
 
@@ -7619,16 +7644,9 @@ export default function App() {
             <button
               type="button"
               style={{ ...styles.changeStoreButton, background: "#dbeafe", color: "#1e3a8a", border: "1px solid #93c5fd" }}
-              onClick={() => setAppScreen("profile")}
+              onClick={handleAccountButtonClick}
             >
-              Profile
-            </button>
-            <button
-              type="button"
-              style={styles.changeStoreButton}
-              onClick={handleResetProfile}
-            >
-              {currentUserProfile?.is_guest ? "Switch Profile" : "Logout"}
+              {getAccountButtonLabel()}
             </button>
           </div>
 
