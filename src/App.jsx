@@ -5735,128 +5735,140 @@ export default function App() {
       let confidenceScore = weightedConfidenceScore;
 
       if (barcodeValue) {
-        const confirmationInsert = await tryInsertWithPayloads(
-          "location_confirmations",
-          [
+        try {
+          const confirmationInsert = await tryInsertWithPayloads(
+            "location_confirmations",
             [
-              {
-                barcode: barcodeValue,
-                action_type: "confirm",
-                aisle,
-                section,
-                shelf,
-                source: submissionMethod || "manual",
-                store_id: selectedStore.id,
-                user_profile_id: currentUserProfile?.id || null,
-                user_trust_score_at_time: currentUserProfile?.trust_score || 0,
-              },
-            ],
-            [
-              {
-                barcode: barcodeValue,
-                action_type: "confirm",
-                aisle,
-                section,
-                shelf,
-                source: submissionMethod || "manual",
-              },
-            ],
-            [
-              {
-                barcode: barcodeValue,
-                action_type: "confirm",
-                aisle,
-                section,
-                shelf,
-              },
-            ],
-          ]
-        );
-
-        if (!confirmationInsert.success) {
-          throw new Error("Location saved, but confirmation could not be recorded");
-        }
-
-        let countQuery = supabase
-          .from("location_confirmations")
-          .select("id", { count: "exact", head: true })
-          .eq("barcode", barcodeValue)
-          .eq("action_type", "confirm")
-          .eq("aisle", aisle)
-          .eq("store_id", selectedStore.id);
-
-        if (section === null) {
-          countQuery = countQuery.is("section", null);
-        } else {
-          countQuery = countQuery.eq("section", section);
-        }
-
-        if (shelf === null) {
-          countQuery = countQuery.is("shelf", null);
-        } else {
-          countQuery = countQuery.eq("shelf", shelf);
-        }
-
-        const { count, error: countError } = await countQuery;
-
-        if (countError) {
-          throw new Error(`Could not count confirmations: ${countError.message}`);
-        }
-
-        confirmationCount = Number(count || 0);
-        confidenceScore = calculateCrowdConfidence({
-          confirmationCount,
-          priceCount: nextPriceCount,
-          source: submissionMethod || "manual",
-          hasPhoto: hasPhotoEvidence,
-          priceSource: selectedPriceSource,
-          userEdited: userEditedKeyFields,
-          aiConfidence: aiConfidenceForWeight,
-          userTrustScore: currentUserProfile?.trust_score || 0,
-        });
-
-        let updateQuery = supabase
-          .from("product_locations")
-          .update({
-            confidence_score: confidenceScore,
-            price_confidence: weightedPriceConfidence,
-            last_confirmed_at: nowIso,
-          })
-          .eq("store_id", selectedStore.id);
-
-        updateQuery = applyLocationFilters(
-          updateQuery,
-          barcodeValue,
-          aisle,
-          section,
-          shelf
-        );
-
-        const { error: updateError } = await updateQuery;
-
-        if (updateError) {
-          throw new Error(
-            `Location was saved but confidence update failed: ${updateError.message}`
+              [
+                {
+                  barcode: barcodeValue,
+                  action_type: "confirm",
+                  aisle,
+                  section,
+                  shelf,
+                  source: submissionMethod || "manual",
+                  store_id: selectedStore.id,
+                  user_profile_id: currentUserProfile?.id || null,
+                  user_trust_score_at_time: currentUserProfile?.trust_score || 0,
+                },
+              ],
+              [
+                {
+                  barcode: barcodeValue,
+                  action_type: "confirm",
+                  aisle,
+                  section,
+                  shelf,
+                  source: submissionMethod || "manual",
+                },
+              ],
+              [
+                {
+                  barcode: barcodeValue,
+                  action_type: "confirm",
+                  aisle,
+                  section,
+                  shelf,
+                },
+              ],
+            ]
           );
-        }
 
-        await tryInsertWithPayloads("point_events", [
-          [
-            {
+          if (!confirmationInsert.success) {
+            console.warn("LOCATION_CONFIRMATION_INSERT_FAILED", {
               barcode: barcodeValue,
-              event_type: "location_submission",
-              points: LOCATION_SUBMISSION_POINTS,
-              source: "app",
-            },
-          ],
-          [
-            {
-              barcode: barcodeValue,
-              event_name: "location_submission",
-              points: LOCATION_SUBMISSION_POINTS,
-            },
-          ],
-        ]);
+              store_id: selectedStore.id,
+              aisle,
+              section,
+              shelf,
+            });
+          } else {
+            let countQuery = supabase
+              .from("location_confirmations")
+              .select("id", { count: "exact", head: true })
+              .eq("barcode", barcodeValue)
+              .eq("action_type", "confirm")
+              .eq("aisle", aisle)
+              .eq("store_id", selectedStore.id);
+
+            if (section === null) {
+              countQuery = countQuery.is("section", null);
+            } else {
+              countQuery = countQuery.eq("section", section);
+            }
+
+            if (shelf === null) {
+              countQuery = countQuery.is("shelf", null);
+            } else {
+              countQuery = countQuery.eq("shelf", shelf);
+            }
+
+            const { count, error: countError } = await countQuery;
+
+            if (countError) {
+              console.warn("LOCATION_CONFIRMATION_COUNT_FAILED", countError);
+            } else {
+              confirmationCount = Number(count || 0);
+              confidenceScore = calculateCrowdConfidence({
+                confirmationCount,
+                priceCount: nextPriceCount,
+                source: submissionMethod || "manual",
+                hasPhoto: hasPhotoEvidence,
+                priceSource: selectedPriceSource,
+                userEdited: userEditedKeyFields,
+                aiConfidence: aiConfidenceForWeight,
+                userTrustScore: currentUserProfile?.trust_score || 0,
+              });
+
+              let updateQuery = supabase
+                .from("product_locations")
+                .update({
+                  confidence_score: confidenceScore,
+                  price_confidence: weightedPriceConfidence,
+                  last_confirmed_at: nowIso,
+                })
+                .eq("store_id", selectedStore.id);
+
+              updateQuery = applyLocationFilters(
+                updateQuery,
+                barcodeValue,
+                aisle,
+                section,
+                shelf
+              );
+
+              const { error: updateError } = await updateQuery;
+
+              if (updateError) {
+                console.warn("LOCATION_CONFIRMATION_COUNT_FAILED", updateError);
+              }
+            }
+          }
+
+          await tryInsertWithPayloads("point_events", [
+            [
+              {
+                barcode: barcodeValue,
+                event_type: "location_submission",
+                points: LOCATION_SUBMISSION_POINTS,
+                source: "app",
+              },
+            ],
+            [
+              {
+                barcode: barcodeValue,
+                event_name: "location_submission",
+                points: LOCATION_SUBMISSION_POINTS,
+              },
+            ],
+          ]);
+        } catch (confirmationException) {
+          console.warn("LOCATION_CONFIRMATION_EXCEPTION", {
+            barcode: barcodeValue,
+            store_id: selectedStore.id,
+            error: confirmationException?.message || confirmationException,
+          });
+        }
       }
 
       await fetchUserPoints();
@@ -5995,7 +6007,7 @@ export default function App() {
       setAwaitingProductConfirmation(false);
       setShowAiSummaryCard(false);
       setStatus("Contribution saved to shared product intelligence");
-      setToast({ message: "Contribution saved", type: "success" });
+      setToast({ message: "Location saved. Confirmation will sync later.", type: "info" });
       setShowNextItemPrompt(true);
     } catch (err) {
       console.error("LOCATION SAVE ERROR:", err);
@@ -6055,6 +6067,7 @@ export default function App() {
     try {
       const safeTerm = trimmedTerm.replace(/,/g, " ").trim();
       const wildcardTerm = `%${safeTerm}%`;
+      console.log("CATALOG_SEARCH_START", safeTerm);
       console.log("CATALOG SEARCH TERM", safeTerm);
 
       const isMissingOptionalColumnError = (err) => {
@@ -6074,52 +6087,7 @@ export default function App() {
         );
       };
 
-      let { data: catalogRows, error: catalogError } = await supabase
-        .from("catalog_products")
-        .select("id, barcode, canonical_product_key, product_name, brand, category, image_url, verified_image_url, size_value, size_unit, display_size, quantity, source")
-        .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},category.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},canonical_product_key.ilike.${wildcardTerm}`)
-        .limit(25);
-
-      if (catalogError && isMissingOptionalColumnError(catalogError)) {
-        const fallbackResult = await supabase
-          .from("catalog_products")
-          .select("id, barcode, canonical_product_key, product_name, brand, image_url, size_value, size_unit, display_size, quantity, source")
-          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},canonical_product_key.ilike.${wildcardTerm}`)
-          .limit(25);
-
-        catalogRows = fallbackResult.data;
-        catalogError = fallbackResult.error;
-      }
-
-      if (catalogError) {
-        console.warn("CATALOG SEARCH WARNING:", catalogError.message);
-        setCatalogSearchResults([]);
-        setCatalogSearchMessage("No catalog matches yet.");
-        return;
-      }
-
-      const safeRows = Array.isArray(catalogRows) ? catalogRows : [];
-  console.log("CATALOG_ROWS_FOUND", safeRows.length);
-      const barcodes = [...new Set(safeRows.map((row) => String(row?.barcode || "").trim()).filter(Boolean))];
-      const canonicalKeys = [...new Set(safeRows.map((row) => normalizeComparableKey(row?.canonical_product_key)).filter(Boolean))];
-
-      const makeStrictIdentitySignature = (value) => {
-        const brand = normalizeComparableText(value?.brand || value?.last_seen_location?.brand);
-        const productName = normalizeComparableText(
-          value?.product_name || value?.name || value?.title || value?.last_seen_location?.product_name || value?.last_seen_location?.name
-        );
-        const sizeValue = normalizeComparableText(value?.size_value || value?.last_seen_location?.size_value);
-        const sizeUnit = normalizeComparableText(value?.size_unit || value?.last_seen_location?.size_unit || value?.unit || value?.last_seen_location?.unit);
-        const displaySize = normalizeComparableText(value?.display_size || value?.last_seen_location?.display_size);
-        const sizeKey = [sizeValue, sizeUnit].filter(Boolean).join(" ") || displaySize;
-
-        if (!brand || !productName || !sizeKey) return "";
-        return normalizeComparableKey([brand, productName, sizeKey].join("|"));
-      };
-
-      const strictSignatures = [...new Set(safeRows.map(makeStrictIdentitySignature).filter(Boolean))];
-      const searchProductNames = [...new Set(safeRows.map((row) => String(row?.product_name || "").trim()).filter(Boolean))];
-
+      // Search product_locations FIRST (where legacy mapped items exist)
       let locationRows = [];
       try {
         const mapRows = [];
@@ -6167,33 +6135,6 @@ export default function App() {
           appendRows(directProductLocationsQuery.data);
         }
 
-        if (barcodes.length > 0) {
-          const { data: barcodeRows } = await supabase
-            .from("store_product_price_map_v1")
-            .select(mapSelect)
-            .in("barcode", barcodes)
-            .limit(300);
-          appendRows(barcodeRows);
-        }
-
-        if (canonicalKeys.length > 0) {
-          const { data: canonicalRows } = await supabase
-            .from("store_product_price_map_v1")
-            .select(mapSelect)
-            .in("canonical_product_key", canonicalKeys)
-            .limit(300);
-          appendRows(canonicalRows);
-        }
-
-        if (searchProductNames.length > 0) {
-          const { data: nameRows } = await supabase
-            .from("store_product_price_map_v1")
-            .select(mapSelect)
-            .in("product_name", searchProductNames.slice(0, 25))
-            .limit(500);
-          appendRows(nameRows);
-        }
-
         const deduped = [];
         const seen = new Set();
         for (const row of mapRows) {
@@ -6212,9 +6153,123 @@ export default function App() {
         }
 
         locationRows = deduped;
-        console.log("PRODUCT_LOCATION_ROWS_FOUND", locationRows.length);
+        console.log("CATALOG_SEARCH_PRODUCT_LOCATIONS_COUNT", locationRows.length);
       } catch (locationMergeError) {
         console.warn("CATALOG LOCATION MERGE WARNING:", locationMergeError?.message || locationMergeError);
+      }
+
+      // Extract keys from product_locations for secondary catalog search
+      const locationBarcodes = [...new Set(locationRows.map((row) => String(row?.barcode || "").trim()).filter(Boolean))];
+      const locationCanonicalKeys = [...new Set(locationRows.map((row) => normalizeComparableKey(row?.canonical_product_key)).filter(Boolean))];
+      const locationProductNames = [...new Set(locationRows.map((row) => String(row?.product_name || "").trim()).filter(Boolean))];
+
+      // Now search catalog_products as fallback
+      let { data: catalogRows, error: catalogError } = await supabase
+        .from("catalog_products")
+        .select("id, barcode, canonical_product_key, product_name, brand, category, image_url, verified_image_url, size_value, size_unit, display_size, quantity, source")
+        .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},category.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},canonical_product_key.ilike.${wildcardTerm}`)
+        .limit(25);
+
+      if (catalogError && isMissingOptionalColumnError(catalogError)) {
+        const fallbackResult = await supabase
+          .from("catalog_products")
+          .select("id, barcode, canonical_product_key, product_name, brand, image_url, size_value, size_unit, display_size, quantity, source")
+          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},canonical_product_key.ilike.${wildcardTerm}`)
+          .limit(25);
+
+        catalogRows = fallbackResult.data;
+        catalogError = fallbackResult.error;
+      }
+
+      if (catalogError && locationRows.length === 0) {
+        console.warn("CATALOG SEARCH WARNING:", catalogError.message);
+        setCatalogSearchResults([]);
+        setCatalogSearchMessage("No catalog matches yet.");
+        return;
+      }
+
+      const safeRows = Array.isArray(catalogRows) ? catalogRows : [];
+  console.log("CATALOG_SEARCH_CATALOG_PRODUCTS_COUNT", safeRows.length);
+      const barcodes = [...new Set(safeRows.map((row) => String(row?.barcode || "").trim()).filter(Boolean))];
+      const canonicalKeys = [...new Set(safeRows.map((row) => normalizeComparableKey(row?.canonical_product_key)).filter(Boolean))];
+
+      const makeStrictIdentitySignature = (value) => {
+        const brand = normalizeComparableText(value?.brand || value?.last_seen_location?.brand);
+        const productName = normalizeComparableText(
+          value?.product_name || value?.name || value?.title || value?.last_seen_location?.product_name || value?.last_seen_location?.name
+        );
+        const sizeValue = normalizeComparableText(value?.size_value || value?.last_seen_location?.size_value);
+        const sizeUnit = normalizeComparableText(value?.size_unit || value?.last_seen_location?.size_unit || value?.unit || value?.last_seen_location?.unit);
+        const displaySize = normalizeComparableText(value?.display_size || value?.last_seen_location?.display_size);
+        const sizeKey = [sizeValue, sizeUnit].filter(Boolean).join(" ") || displaySize;
+
+        if (!brand || !productName || !sizeKey) return "";
+        return normalizeComparableKey([brand, productName, sizeKey].join("|"));
+      };
+
+      const strictSignatures = [...new Set(safeRows.map(makeStrictIdentitySignature).filter(Boolean))];
+      const searchProductNames = [...new Set(safeRows.map((row) => String(row?.product_name || "").trim()).filter(Boolean))];
+
+      // If no location results yet, do secondary location searches using catalog keys
+      if (locationRows.length === 0) {
+        try {
+          const mapRows = [];
+          const mapSelect = "store_id, store_name, barcode, canonical_product_key, product_name, brand, category, size_value, size_unit, display_size, aisle, section, shelf, price, avg_price, price_type, price_count, price_confidence, confidence_score, last_confirmed_at, updated_at";
+
+          const appendRows = (rows) => {
+            if (Array.isArray(rows)) {
+              mapRows.push(...rows);
+            }
+          };
+
+          if (barcodes.length > 0) {
+            const { data: barcodeRows } = await supabase
+              .from("store_product_price_map_v1")
+              .select(mapSelect)
+              .in("barcode", barcodes)
+              .limit(300);
+            appendRows(barcodeRows);
+          }
+
+          if (canonicalKeys.length > 0) {
+            const { data: canonicalRows } = await supabase
+              .from("store_product_price_map_v1")
+              .select(mapSelect)
+              .in("canonical_product_key", canonicalKeys)
+              .limit(300);
+            appendRows(canonicalRows);
+          }
+
+          if (searchProductNames.length > 0) {
+            const { data: nameRows } = await supabase
+              .from("store_product_price_map_v1")
+              .select(mapSelect)
+              .in("product_name", searchProductNames.slice(0, 25))
+              .limit(500);
+            appendRows(nameRows);
+          }
+
+          const deduped = [];
+          const seen = new Set();
+          for (const row of mapRows) {
+            const key = [
+              String(row?.store_id || ""),
+              String(row?.barcode || ""),
+              String(row?.canonical_product_key || ""),
+              String(row?.product_name || ""),
+              String(row?.brand || ""),
+              String(row?.display_size || ""),
+              String(row?.avg_price || row?.price || ""),
+            ].join("|");
+            if (seen.has(key)) continue;
+            seen.add(key);
+            deduped.push(row);
+          }
+
+          locationRows = deduped;
+        } catch (locationMergeError) {
+          console.warn("CATALOG LOCATION MERGE WARNING:", locationMergeError?.message || locationMergeError);
+        }
       }
 
       const mergedMap = new Map();
@@ -6327,9 +6382,11 @@ export default function App() {
         });
       });
 
-      console.log("MERGED_CATALOG_RESULTS", mergedResults.length);
+      console.log("CATALOG_SEARCH_MERGED_COUNT", mergedResults.length);
       setCatalogSearchResults(mergedResults);
-      setCatalogSearchMessage(mergedResults.length ? "" : "No catalog matches yet.");
+      setCatalogSearchMessage(
+        mergedResults.length ? "" : (safeRows.length === 0 && locationRows.length === 0 ? "No catalog matches yet." : "")
+      );
     } catch (err) {
       console.warn("CATALOG SEARCH EXCEPTION:", err?.message || err);
       setCatalogSearchResults([]);
