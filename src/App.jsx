@@ -1205,6 +1205,7 @@ export default function App() {
   const buildComparableProductKey = (value) => {
     if (!value) return "";
 
+    // Strongest comparable identity: canonical key when the database already provides one.
     const canonicalKey = normalizeComparableKey(
       value?.canonical_product_key || value?.last_seen_location?.canonical_product_key
     );
@@ -1220,6 +1221,57 @@ export default function App() {
 
     const sizeKey = [sizeValue, sizeUnit].filter(Boolean).join(" ") || displaySize;
     return normalizeComparableKey([brand, productName, sizeKey].join("|"));
+  };
+
+  const buildComparableLookupTerms = (value) => {
+    const rawTerms = [
+      value?.product_name,
+      value?.name,
+      value?.brand,
+      value?.size_value,
+      value?.size_unit,
+      value?.display_size,
+    ]
+      .map(normalizeComparableText)
+      .filter(Boolean);
+
+    const tokenTerms = rawTerms.flatMap((term) => term.split(" ").map((part) => part.trim()).filter((part) => part.length >= 3));
+
+    return [...new Set([...rawTerms, ...tokenTerms])];
+  };
+
+  const buildComparableProductKeyCandidates = (value) => {
+    const candidates = [];
+    const pushCandidate = (candidate) => {
+      const normalized = normalizeComparableKey(candidate);
+      if (normalized && !candidates.includes(normalized)) {
+        candidates.push(normalized);
+      }
+    };
+
+    // Match priority: barcode > canonical key > exact brand/name/size signature.
+    const barcodeValue = String(value?.barcode || value?.last_seen_location?.barcode || "").trim();
+    if (barcodeValue) {
+      pushCandidate(`barcode|${barcodeValue}`);
+    }
+
+    const canonicalKey = value?.canonical_product_key || value?.last_seen_location?.canonical_product_key;
+    if (canonicalKey) {
+      pushCandidate(canonicalKey);
+    }
+
+    const brand = normalizeComparableText(value?.brand || value?.last_seen_location?.brand);
+    const productName = normalizeComparableText(
+      value?.product_name || value?.name || value?.title || value?.last_seen_location?.product_name || value?.last_seen_location?.name
+    );
+    const sizeValue = normalizeComparableText(value?.size_value || value?.last_seen_location?.size_value);
+    const sizeUnit = normalizeComparableText(value?.size_unit || value?.last_seen_location?.size_unit || value?.unit || value?.last_seen_location?.unit);
+    const displaySize = normalizeComparableText(value?.display_size || value?.last_seen_location?.display_size);
+
+    const sizeKey = [sizeValue, sizeUnit].filter(Boolean).join(" ") || displaySize;
+    pushCandidate([brand, productName, sizeKey].filter(Boolean).join("|"));
+
+    return candidates;
   };
 
   const isBetterPriceObservation = (candidate, current) => {
@@ -1254,37 +1306,71 @@ export default function App() {
     const byKey = {};
 
     for (const row of rows || []) {
-      const key = buildComparableProductKey(row);
-      if (!key) continue;
+      const keys = buildComparableProductKeyCandidates(row);
+      if (!keys.length) continue;
 
       const storeId = String(row?.store_id || "").trim();
       if (!storeId) continue;
 
-      if (!byKey[key]) {
-        byKey[key] = {
-          rowsByStore: {},
-          allRows: [],
-          cheapestRow: null,
-        };
-      }
+      keys.forEach((key) => {
+        if (!byKey[key]) {
+          byKey[key] = {
+            rowsByStore: {},
+            allRows: [],
+            cheapestRow: null,
+          };
+        }
 
-      const bucket = byKey[key];
-      const existingStoreRow = bucket.rowsByStore[storeId];
-      if (!existingStoreRow || isBetterPriceObservation(row, existingStoreRow)) {
-        bucket.rowsByStore[storeId] = row;
-      }
+        const bucket = byKey[key];
+        const existingStoreRow = bucket.rowsByStore[storeId];
+        if (!existingStoreRow || isBetterPriceObservation(row, existingStoreRow)) {
+          bucket.rowsByStore[storeId] = row;
+        }
 
-      if (!bucket.cheapestRow || isBetterPriceObservation(row, bucket.cheapestRow)) {
-        bucket.cheapestRow = row;
-      }
+        if (!bucket.cheapestRow || isBetterPriceObservation(row, bucket.cheapestRow)) {
+          bucket.cheapestRow = row;
+        }
 
-      bucket.allRows.push(row);
+        bucket.allRows.push(row);
+      });
     }
 
     return byKey;
   };
 
-  const fetchComparableProductLocationRows = async ({ barcodes = [], canonicalKeys = [], terms = [] } = {}) => {
+  const getComparablePriceBucket = (priceIndex, value) => {
+    const candidateKeys = buildComparableProductKeyCandidates(value);
+    const mergedBucket = {
+      rowsByStore: {},
+      allRows: [],
+      cheapestRow: null,
+    };
+
+    let matched = false;
+
+    candidateKeys.forEach((candidateKey) => {
+      const bucket = priceIndex?.[candidateKey];
+      if (!bucket) return;
+      matched = true;
+
+      Object.entries(bucket.rowsByStore || {}).forEach(([storeId, row]) => {
+        const existingStoreRow = mergedBucket.rowsByStore[storeId];
+        if (!existingStoreRow || isBetterPriceObservation(row, existingStoreRow)) {
+          mergedBucket.rowsByStore[storeId] = row;
+        }
+      });
+
+      if (!mergedBucket.cheapestRow || isBetterPriceObservation(bucket.cheapestRow, mergedBucket.cheapestRow)) {
+        mergedBucket.cheapestRow = bucket.cheapestRow;
+      }
+
+      mergedBucket.allRows.push(...(bucket.allRows || []));
+    });
+
+    return matched ? mergedBucket : null;
+  };
+
+  const fetchComparableProductLocationRows = async ({ barcodes = [], canonicalKeys = [], terms = [], lookupTerms = [] } = {}) => {
     const allRows = [];
     const fullSelect = "barcode, canonical_product_key, product_name, brand, category, size_value, size_unit, display_size, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at";
     const fallbackSelect = "barcode, product_name, brand, category, size_value, size_unit, display_size, store_id, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at";
@@ -1382,6 +1468,37 @@ export default function App() {
       }
     }
 
+
+    if (Array.isArray(lookupTerms) && lookupTerms.length > 0) {
+      const tokenTerms = [...new Set(lookupTerms.map(normalizeComparableText).filter((term) => term.length >= 3).slice(0, 20))];
+      if (tokenTerms.length > 0) {
+        const orClause = tokenTerms
+          .flatMap((term) => [
+            `product_name.ilike.%${term}%`,
+            `brand.ilike.%${term}%`,
+            `display_size.ilike.%${term}%`,
+          ])
+          .join(",");
+
+        const query = supabase
+          .from("product_locations")
+          .select(fullSelect)
+          .or(orClause)
+          .limit(200);
+
+        const succeeded = await addRows(query, "PRICE MATCH TOKEN QUERY");
+        if (!succeeded) {
+          await addRows(
+            supabase
+              .from("product_locations")
+              .select(fallbackSelect)
+              .or(orClause)
+              .limit(200),
+            "PRICE MATCH TOKEN QUERY"
+          );
+        }
+      }
+    }
     const dedupedRows = [];
     const seen = new Set();
     for (const row of allRows) {
@@ -2204,13 +2321,15 @@ export default function App() {
 
       try {
         const cartBarcodes = [...new Set(cartItems.map((item) => String(item?.barcode || "").trim()).filter(Boolean))];
-        const cartKeys = [...new Set(cartItems.map((item) => buildComparableProductKey(item)).filter(Boolean))];
+        const cartKeys = [...new Set(cartItems.flatMap((item) => buildComparableProductKeyCandidates(item)).filter(Boolean))];
         const cartTerms = [...new Set(cartItems.flatMap((item) => [item?.product_name, item?.name, item?.brand, item?.category, item?.size_value, item?.size_unit, item?.display_size]).map(normalizeComparableText).filter(Boolean))];
+        const cartLookupTerms = [...new Set(cartItems.flatMap((item) => buildComparableLookupTerms(item)))];
 
         const priceRows = await fetchComparableProductLocationRows({
           barcodes: cartBarcodes,
           canonicalKeys: cartKeys,
           terms: cartTerms,
+          lookupTerms: cartLookupTerms,
         });
 
         if (cancelled) return;
@@ -2540,6 +2659,20 @@ export default function App() {
   };
 
   const shoppingListEstimatedTotal = calculateCartTotal(shoppingListItems);
+
+  const cartComparisonBestStore = Array.isArray(cartComparison) && cartComparison.length > 0 ? cartComparison[0] : null;
+  const cartComparisonWinningRows = cartComparisonBestStore
+    ? Object.values(cartComparisonBestStore.itemsByKey || {}).map((entry) => ({
+        product_name: entry?.cartItem?.product_name || entry?.cartItem?.name || entry?.row?.product_name || "Unknown product",
+        price: Number(entry?.row?.avg_price ?? entry?.row?.price ?? 0) || null,
+        price_type: entry?.row?.price_type || "each",
+        aisle: entry?.row?.aisle || "",
+        section: entry?.row?.section || "",
+        shelf: entry?.row?.shelf || "",
+        store_name: entry?.row?.store_name || entry?.row?.stores?.name || "Unknown store",
+        confidence_score: Number(entry?.row?.confidence_score || 0),
+      })).sort((a, b) => String(a.product_name).localeCompare(String(b.product_name), undefined, { sensitivity: "base", numeric: true }))
+    : [];
 
   // smartCartItems: used for general cart display (all items, store-agnostic)
   const smartCartItems = shoppingListItems
@@ -6171,6 +6304,12 @@ export default function App() {
   const addSharedCatalogResultToCart = async (result) => {
     const productName = String(result?.product_name || "").trim();
     const barcode = String(result?.barcode || "").trim();
+    const selectedLocation = result?.selected_store_location || {};
+    const canonicalProductKey = normalizeComparableKey(
+      result?.canonical_product_key || selectedLocation?.canonical_product_key || buildComparableProductKey(result)
+    ) || null;
+    const cheapestKnownPrice = Number(result?.cheapest_known_price ?? selectedLocation?.avg_price ?? selectedLocation?.price ?? 0) || null;
+    const cheapestKnownStoreName = result?.cheapest_known_store_name || selectedLocation?.store_name || null;
 
     if (!productName && !barcode) {
       setError("Could not add this item.");
@@ -6188,35 +6327,44 @@ export default function App() {
       category: result?.category || "",
       size_value: result?.size_value || "",
       size_unit: result?.size_unit || "",
+      display_size: result?.display_size || "",
+      canonical_product_key: canonicalProductKey,
       quantity: result?.quantity || "1",
       image: result?.cart_image_url || result?.verified_image_url || result?.image_url || null,
       cart_image_url: result?.cart_image_url || result?.verified_image_url || result?.image_url || null,
       verified_image_url: result?.verified_image_url || null,
       image_url: result?.image_url || null,
+      cheapest_known_price: cheapestKnownPrice,
+      cheapest_known_store_name: cheapestKnownStoreName,
+      other_known_prices: Array.isArray(result?.other_known_prices) ? result.other_known_prices : [],
+      price: cheapestKnownPrice,
+      avg_price: cheapestKnownPrice,
+      price_type: selectedLocation?.price_type || result?.price_type || "each",
+      selected_store_location: selectedLocation || null,
       source: "shared_catalog",
     };
 
     const hasSelectedStoreLocation = Boolean(
-      result?.aisle ||
-      result?.section ||
-      result?.shelf ||
-      result?.price != null ||
-      result?.avg_price != null ||
-      result?.selected_store_location
+      selectedLocation?.aisle ||
+      selectedLocation?.section ||
+      selectedLocation?.shelf ||
+      selectedLocation?.price != null ||
+      selectedLocation?.avg_price != null ||
+      selectedLocation?.store_id
     );
 
-    const selectedLocation = result?.selected_store_location || {};
     const lastSeenLocation = hasSelectedStoreLocation
       ? {
-          store_id: selectedStore?.id || selectedLocation?.store_id || null,
-          store_name: selectedStore?.name || "",
-          aisle: result?.aisle || selectedLocation?.aisle || "",
-          section: result?.section || selectedLocation?.section || "",
-          shelf: result?.shelf || selectedLocation?.shelf || "",
-          price: result?.price ?? selectedLocation?.price ?? null,
-          avg_price: result?.avg_price ?? selectedLocation?.avg_price ?? null,
-          price_type: result?.price_type || selectedLocation?.price_type || "each",
+          store_id: selectedLocation?.store_id || null,
+          store_name: selectedLocation?.store_name || selectedLocation?.stores?.name || "",
+          aisle: selectedLocation?.aisle || "",
+          section: selectedLocation?.section || "",
+          shelf: selectedLocation?.shelf || "",
+          price: selectedLocation?.price ?? result?.price ?? cheapestKnownPrice ?? null,
+          avg_price: selectedLocation?.avg_price ?? result?.avg_price ?? cheapestKnownPrice ?? null,
+          price_type: selectedLocation?.price_type || result?.price_type || "each",
           confidence_score: Number(result?.confidence_score ?? selectedLocation?.confidence_score ?? 0),
+          canonical_product_key: canonicalProductKey,
         }
       : null;
 
@@ -6670,6 +6818,13 @@ export default function App() {
             quantity: item.quantity || productToAdd.quantity || "1",
             notes: locationToUse ? (item.notes || "") : (productToAdd.notes ?? item.notes ?? ""),
             last_seen_location: latestLastSeenLocation || item.last_seen_location || null,
+            selected_store_location: productToAdd.selected_store_location || item.selected_store_location || null,
+            cheapest_known_price: productToAdd.cheapest_known_price ?? item.cheapest_known_price ?? null,
+            cheapest_known_store_name: productToAdd.cheapest_known_store_name || item.cheapest_known_store_name || null,
+            other_known_prices: Array.isArray(productToAdd.other_known_prices) ? productToAdd.other_known_prices : (item.other_known_prices || []),
+            price: productToAdd.price ?? item.price ?? null,
+            avg_price: productToAdd.avg_price ?? item.avg_price ?? null,
+            price_type: productToAdd.price_type || item.price_type || "each",
             image: nextImage,
             cart_image_url: nextCartImage,
             image_url: productToAdd.image_url || item.image_url || null,
@@ -6710,6 +6865,13 @@ export default function App() {
       quantity: productToAdd.quantity || "1",
       notes: locationToUse ? "" : (productToAdd.notes ?? ""),
       last_seen_location: latestLastSeenLocation,
+      selected_store_location: productToAdd.selected_store_location || null,
+      cheapest_known_price: productToAdd.cheapest_known_price ?? null,
+      cheapest_known_store_name: productToAdd.cheapest_known_store_name || null,
+      other_known_prices: Array.isArray(productToAdd.other_known_prices) ? productToAdd.other_known_prices : [],
+      price: productToAdd.price ?? null,
+      avg_price: productToAdd.avg_price ?? null,
+      price_type: productToAdd.price_type || "each",
       needs_review: productToAdd.needs_review || false,
       image: resolvedImage,
       cart_image_url: resolvedImage,
@@ -7268,14 +7430,33 @@ export default function App() {
     let matchedItemCount = 0;
 
     cartItems.forEach((cartItem) => {
-      const itemKey = buildComparableProductKey(cartItem);
-      const priceBucket = itemKey ? priceIndex[itemKey] : null;
+      const itemKeys = buildComparableProductKeyCandidates(cartItem);
+      const priceBucket = getComparablePriceBucket(priceIndex, cartItem);
+      const itemKey =
+        itemKeys[0] ||
+        buildComparableProductKey(cartItem) ||
+        String(cartItem?.cart_item_id || cartItem?.id || cartItem?.barcode || cartItem?.product_name || "cart-item");
+
+      console.info("CART ITEM BEING COMPARED", {
+        product_name: cartItem?.product_name || cartItem?.name || null,
+        barcode: cartItem?.barcode || null,
+        comparableKeys: itemKeys,
+      });
+
       if (!priceBucket) return;
 
       matchedItemCount += 1;
 
       Object.entries(priceBucket.rowsByStore || {}).forEach(([storeId, row]) => {
         if (!storeId) return;
+
+        if (brandMode === "brand_match") {
+          const cartBrand = normalizeComparableText(cartItem?.brand);
+          const rowBrand = normalizeComparableText(row?.brand);
+          if (cartBrand && rowBrand && cartBrand !== rowBrand) {
+            return;
+          }
+        }
 
         if (!storeGroups[storeId]) {
           storeGroups[storeId] = {
@@ -7341,14 +7522,33 @@ export default function App() {
 
     try {
       const cartBarcodes = [...new Set(shoppingListItems.map((item) => String(item?.barcode || "").trim()).filter(Boolean))];
-      const cartKeys = [...new Set(shoppingListItems.map((item) => buildComparableProductKey(item)).filter(Boolean))];
+      const cartKeys = [...new Set(shoppingListItems.flatMap((item) => buildComparableProductKeyCandidates(item)).filter(Boolean))];
       const cartTerms = [...new Set(shoppingListItems.flatMap((item) => [item?.product_name, item?.name, item?.brand, item?.category, item?.size_value, item?.size_unit, item?.display_size]).map(normalizeComparableText).filter(Boolean))];
+      const cartLookupTerms = [...new Set(shoppingListItems.flatMap((item) => buildComparableLookupTerms(item)))];
+
+      console.info("CART ITEMS BEING COMPARED", shoppingListItems.map((item) => ({
+        product_name: item?.product_name || item?.name || null,
+        brand: item?.brand || null,
+        barcode: item?.barcode || null,
+      })));
+      console.info("CART COMPARABLE KEYS", cartKeys);
 
       const priceRows = await fetchComparableProductLocationRows({
         barcodes: cartBarcodes,
         canonicalKeys: cartKeys,
         terms: cartTerms,
+        lookupTerms: cartLookupTerms,
       });
+
+      console.info("FETCHED PRODUCT_LOCATIONS ROWS", priceRows.map((row) => ({
+        store_id: row?.store_id || null,
+        store_name: row?.store_name || row?.stores?.name || null,
+        barcode: row?.barcode || null,
+        canonical_product_key: row?.canonical_product_key || null,
+        product_name: row?.product_name || null,
+        brand: row?.brand || null,
+        price: row?.avg_price ?? row?.price ?? null,
+      })));
 
       console.info("PRICE MATCH ROWS", {
         cartItemCount: shoppingListItems.length,
@@ -7356,11 +7556,20 @@ export default function App() {
       });
 
       const priceIndex = buildPriceObservationIndex(priceRows);
+      console.info("PRICE INDEX KEYS", Object.keys(priceIndex || {}));
       setCartPriceInsightsByKey(priceIndex);
 
       const sortedResults = calculateBestStore(shoppingListItems, priceRows || [], brandComparisonMode);
 
+      console.info("FINAL STORE COMPARISON RESULTS", sortedResults || []);
       console.info("CHEAPEST STORE RESULT", sortedResults?.[0] || null);
+      if ((!sortedResults || sortedResults.length === 0) && (import.meta.env.DEV || window.localStorage.getItem("mvpDebug") === "true")) {
+        console.warn("CART COMPARISON NO MATCHES", {
+          cartComparableKeys: cartKeys,
+          fetchedRowCount: priceRows.length,
+          cartItemCount: shoppingListItems.length,
+        });
+      }
       setCartComparison(sortedResults);
       setToast({ message: "Cart comparison complete", type: "success" });
     } catch (err) {
@@ -9438,6 +9647,7 @@ export default function App() {
                         ? storeRouteLocations[String(item.barcode).trim()] || null
                         : null;
                       const routeStorePriceValue = Number(routeStorePrice?.avg_price ?? routeStorePrice?.price ?? 0) || null;
+                      const hasKnownPrice = cheapestKnownPrice != null || itemPrice != null || routeStorePriceValue != null;
 
                       console.log("SMART CART RENDER IMAGE:", {
                         productName: item.product_name,
@@ -9497,6 +9707,11 @@ export default function App() {
                   {otherKnownPrices.length > 0 ? (
                     <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3 }}>
                       Other known price: {otherKnownPrices.slice(0, 2).map((entry) => `${entry.storeName} $${entry.price.toFixed(2)}`).join(" • ")}
+                    </div>
+                  ) : null}
+                  {!hasKnownPrice ? (
+                    <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3, fontWeight: 700 }}>
+                      No known price yet
                     </div>
                   ) : null}
                   {routeStorePriceValue != null && shoppingMode ? (
@@ -9805,26 +10020,49 @@ export default function App() {
               <div style={{ ...styles.rewardsGrid, marginTop: 12 }}>
                 <div style={styles.rewardCard}>
                   <div style={styles.rewardTitle}>
-                    Best Value Store: {cartComparison[0].store?.name || "Unknown store"}
+                    Best Value Store: {cartComparisonBestStore?.store?.name || "Unknown store"}
                   </div>
                   <div style={styles.rewardDescription}>
-                    Estimated Total: ${Number(cartComparison[0].total_price || 0).toFixed(2)}
+                    Estimated Total: ${Number(cartComparisonBestStore?.total_price || 0).toFixed(2)}
                   </div>
                   <div style={styles.rewardDescription}>
-                    Cart Coverage: {cartComparison[0].coverage}%
+                    Cart Coverage: {cartComparisonBestStore?.coverage}%
                   </div>
                   <div style={styles.rewardDescription}>
-                    Brand Match: {cartComparison[0].brand_match_pct ?? "N/A"}%
+                    Brand Match: {cartComparisonBestStore?.brand_match_pct ?? "N/A"}%
                   </div>
                   <div style={styles.rewardDescription}>
-                    Price Confidence: {cartComparison[0].avg_confidence ?? "N/A"}%
+                    Price Confidence: {cartComparisonBestStore?.avg_confidence ?? "N/A"}%
                   </div>
                   <div style={styles.rewardDescription}>
                     Brand mode: {brandComparisonMode === "brand_match" ? "Exact brand preferred" : "Flexible"}
                   </div>
-                  {cartComparison[0].is_estimate ? (
+                  {cartComparisonBestStore?.is_estimate ? (
                     <div style={{ fontSize: 12, color: "#92400e", background: "#fef3c7", borderRadius: 8, padding: "4px 8px", marginTop: 6 }}>
                       Comparison estimate - more scans improve accuracy.
+                    </div>
+                  ) : null}
+
+                  {cartComparisonWinningRows.length > 0 ? (
+                    <div style={{ marginTop: 10, borderTop: "1px solid #bbf7d0", paddingTop: 10 }}>
+                      <div style={{ fontSize: 12, fontWeight: 800, color: "#166534", marginBottom: 6, textTransform: "uppercase" }}>
+                        Item breakdown
+                      </div>
+                      {cartComparisonWinningRows.map((row, index) => {
+                        const locationParts = [row.aisle, row.section, row.shelf].filter(Boolean).join(" • ");
+                        return (
+                          <div key={`${row.product_name || "item"}-${index}`} style={{ fontSize: 13, color: "#0f172a", marginBottom: 6 }}>
+                            <div style={{ fontWeight: 700 }}>
+                              {row.product_name} — ${row.price != null ? Number(row.price).toFixed(2) : "0.00"} {formatPriceType(row.price_type)}
+                            </div>
+                            {locationParts ? (
+                              <div style={{ fontSize: 12, color: "#64748b" }}>
+                                {locationParts}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
                     </div>
                   ) : null}
                 </div>
@@ -9835,9 +10073,14 @@ export default function App() {
                     {cartComparison.slice(1).map((result, index) => (
                       <div
                         key={`${result.store_id || "store-alt"}-${index}`}
-                        style={{ ...styles.rewardDescription, marginBottom: 6 }}
+                        style={{ ...styles.rewardDescription, marginBottom: 8, paddingBottom: 8, borderBottom: index < cartComparison.length - 2 ? "1px solid #dbeafe" : "none" }}
                       >
-                        {`${index + 2}. ${result.store?.name || "Unknown store"} - $${Number(result.total_price || 0).toFixed(2)} - ${result.coverage}% coverage - ${result.brand_match_pct ?? "N/A"}% brand match`}
+                        <div style={{ fontWeight: 700, color: "#0f172a" }}>
+                          {`${index + 2}. ${result.store?.name || "Unknown store"}`}
+                        </div>
+                        <div style={{ fontSize: 12, color: "#475569" }}>
+                          ${Number(result.total_price || 0).toFixed(2)} total • {result.coverage}% coverage • {result.brand_match_pct ?? "N/A"}% brand match
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -9845,7 +10088,7 @@ export default function App() {
               </div>
             ) : (
               <div style={{ ...styles.rewardEmptyState, marginTop: 12 }}>
-                No price matches found for this cart.
+                No comparable price records found yet for these cart items.
               </div>
             )
           ) : null}
