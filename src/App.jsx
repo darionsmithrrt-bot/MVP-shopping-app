@@ -405,9 +405,9 @@ const getCleanCartImageForProduct = ({
 
 const resolveProductImage = (product = {}) => {
   return (
-    product?.verified_image_url ||
     product?.cart_image_url ||
     product?.image ||
+    product?.verified_image_url ||
     product?.image_url ||
     product?.raw_photo_url ||
     MVP_PLACEHOLDER_IMAGE
@@ -5928,6 +5928,35 @@ export default function App() {
       });
       const finalizedProductForCart = {
         ...finalizedProductForCartBase,
+        cart_image_url:
+          finalizedProductForCartBase?.cart_image_url ||
+          product?.cart_image_url ||
+          product?.image ||
+          product?.image_url ||
+          product?.raw_photo_url ||
+          finalizedProductForLocation?.image_url ||
+          null,
+        image:
+          finalizedProductForCartBase?.image ||
+          product?.image ||
+          product?.cart_image_url ||
+          product?.image_url ||
+          product?.raw_photo_url ||
+          finalizedProductForLocation?.image_url ||
+          null,
+        image_url:
+          finalizedProductForCartBase?.image_url ||
+          product?.image_url ||
+          finalizedProductForLocation?.image_url ||
+          null,
+        raw_photo_url:
+          finalizedProductForCartBase?.raw_photo_url ||
+          product?.raw_photo_url ||
+          null,
+        verified_image_url:
+          finalizedProductForCartBase?.verified_image_url ||
+          product?.verified_image_url ||
+          null,
         canonical_product_key:
           savedLocation?.canonical_product_key ||
           finalizedLocationProductKey ||
@@ -6076,7 +6105,6 @@ export default function App() {
         const hint = String(err?.hint || "").toLowerCase();
         const code = String(err?.code || "").toLowerCase();
         const combined = `${message} ${details} ${hint} ${code}`;
-
         return (
           combined.includes("column") ||
           combined.includes("schema cache") ||
@@ -6092,106 +6120,140 @@ export default function App() {
         console.warn("CATALOG_SEARCH_ERROR", { label, error: errorObj });
       };
 
-      // Primary source of truth: product_locations
-      let locationRows = [];
-      const baseLocationSelect = "barcode, canonical_product_key, product_name, brand, category, size_value, size_unit, display_size, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at";
-      const fallbackLocationSelect = "barcode, product_name, brand, category, size_value, size_unit, display_size, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at";
+      const safeIdentityKey = (row) => {
+        const barcodeKey = String(row?.barcode || "").trim();
+        const canonicalKey = normalizeComparableKey(row?.canonical_product_key);
+        const nameBrandKey = `${normalizeComparableText(row?.product_name)}|${normalizeComparableText(row?.brand)}`;
+        return canonicalKey || (barcodeKey ? `barcode|${barcodeKey}` : nameBrandKey);
+      };
 
-      let productLocationsQuery = await supabase
+      // 1) product_locations MIN-safe query first
+      const productLocationsMinSelect = "barcode, product_name, brand, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at";
+      const productLocationsEnhancedSelect = "barcode, product_name, brand, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at, category, size_value, size_unit, display_size, canonical_product_key, image_url, verified_image_url";
+
+      let productLocationsMinRows = [];
+      let productLocationsEnhancedRows = [];
+
+      const productLocationsMinQuery = await supabase
         .from("product_locations")
-        .select(baseLocationSelect)
-        .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},category.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},canonical_product_key.ilike.${wildcardTerm}`)
+        .select(productLocationsMinSelect)
+        .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm}`)
         .limit(500);
 
-      if (productLocationsQuery.error && isMissingOptionalColumnError(productLocationsQuery.error)) {
-        productLocationsQuery = await supabase
-          .from("product_locations")
-          .select(fallbackLocationSelect)
-          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},category.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm}`)
-          .limit(500);
-      }
-
-      if (productLocationsQuery.error) {
-        logCatalogSearchError("product_locations", productLocationsQuery.error);
+      if (productLocationsMinQuery.error) {
+        logCatalogSearchError("product_locations_min", productLocationsMinQuery.error);
       } else {
-        locationRows = Array.isArray(productLocationsQuery.data) ? productLocationsQuery.data : [];
+        productLocationsMinRows = Array.isArray(productLocationsMinQuery.data) ? productLocationsMinQuery.data : [];
       }
-      console.log("PRODUCT_LOCATIONS_SEARCH_COUNT", locationRows.length);
+      console.log("PRODUCT_LOCATIONS_MIN_QUERY_COUNT", productLocationsMinRows.length);
 
-      // Secondary supplemental source: catalog_products
-      let { data: catalogRows, error: catalogError } = await supabase
+      if (!productLocationsMinQuery.error) {
+        const productLocationsEnhancedQuery = await supabase
+          .from("product_locations")
+          .select(productLocationsEnhancedSelect)
+          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm}`)
+          .limit(500);
+
+        if (productLocationsEnhancedQuery.error) {
+          if (!isMissingOptionalColumnError(productLocationsEnhancedQuery.error)) {
+            logCatalogSearchError("product_locations_enhanced", productLocationsEnhancedQuery.error);
+          }
+          productLocationsEnhancedRows = [...productLocationsMinRows];
+        } else {
+          productLocationsEnhancedRows = Array.isArray(productLocationsEnhancedQuery.data)
+            ? productLocationsEnhancedQuery.data
+            : [];
+        }
+      } else {
+        productLocationsEnhancedRows = [...productLocationsMinRows];
+      }
+      console.log("PRODUCT_LOCATIONS_ENHANCED_QUERY_COUNT", productLocationsEnhancedRows.length);
+
+      // Merge min + enhanced rows (prefer enhanced fields)
+      const productLocationsByKey = new Map();
+      productLocationsMinRows.forEach((row) => {
+        const idKey = `${safeIdentityKey(row)}|${String(row?.store_id || "")}`;
+        productLocationsByKey.set(idKey, { ...row });
+      });
+      productLocationsEnhancedRows.forEach((row) => {
+        const idKey = `${safeIdentityKey(row)}|${String(row?.store_id || "")}`;
+        productLocationsByKey.set(idKey, { ...(productLocationsByKey.get(idKey) || {}), ...row });
+      });
+      const locationRows = Array.from(productLocationsByKey.values());
+
+      // 2) catalog_products MIN query SECOND
+      const catalogMinSelect = "id, barcode, product_name, brand, image_url, source";
+      const catalogEnhancedSelect = "id, barcode, product_name, brand, image_url, source, category, size_value, size_unit, quantity, display_size, verified_image_url, canonical_product_key";
+
+      let catalogMinRows = [];
+      let catalogEnhancedRows = [];
+
+      const catalogMinQuery = await supabase
         .from("catalog_products")
-        .select("id, barcode, canonical_product_key, product_name, brand, category, image_url, verified_image_url, size_value, size_unit, display_size, quantity")
-        .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},category.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},canonical_product_key.ilike.${wildcardTerm}`)
+        .select(catalogMinSelect)
+        .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm}`)
         .limit(250);
 
-      if (catalogError && isMissingOptionalColumnError(catalogError)) {
-        const fallbackResult = await supabase
+      if (catalogMinQuery.error) {
+        logCatalogSearchError("catalog_products_min", catalogMinQuery.error);
+      } else {
+        catalogMinRows = Array.isArray(catalogMinQuery.data) ? catalogMinQuery.data : [];
+      }
+      console.log("CATALOG_PRODUCTS_MIN_QUERY_COUNT", catalogMinRows.length);
+
+      if (!catalogMinQuery.error) {
+        const catalogEnhancedQuery = await supabase
           .from("catalog_products")
-          .select("id, barcode, canonical_product_key, product_name, brand, image_url, size_value, size_unit, display_size, quantity")
-          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},canonical_product_key.ilike.${wildcardTerm}`)
+          .select(catalogEnhancedSelect)
+          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm}`)
           .limit(250);
 
-        catalogRows = fallbackResult.data;
-        catalogError = fallbackResult.error;
+        if (catalogEnhancedQuery.error) {
+          if (!isMissingOptionalColumnError(catalogEnhancedQuery.error)) {
+            logCatalogSearchError("catalog_products_enhanced", catalogEnhancedQuery.error);
+          }
+          catalogEnhancedRows = [...catalogMinRows];
+        } else {
+          catalogEnhancedRows = Array.isArray(catalogEnhancedQuery.data)
+            ? catalogEnhancedQuery.data
+            : [];
+        }
+      } else {
+        catalogEnhancedRows = [...catalogMinRows];
       }
+      console.log("CATALOG_PRODUCTS_ENHANCED_QUERY_COUNT", catalogEnhancedRows.length);
 
-      if (catalogError) {
-        logCatalogSearchError("catalog_products", catalogError);
-      }
+      const catalogByBarcode = new Map();
+      catalogEnhancedRows.forEach((row) => {
+        const barcodeValue = String(row?.barcode || "").trim();
+        if (barcodeValue) catalogByBarcode.set(barcodeValue, row);
+      });
 
-      const safeRows = Array.isArray(catalogRows) ? catalogRows : [];
-      console.log("CATALOG_PRODUCTS_SEARCH_COUNT", safeRows.length);
-
-      const makeStrictIdentitySignature = (value) => {
-        const brand = normalizeComparableText(value?.brand || value?.last_seen_location?.brand);
-        const productName = normalizeComparableText(
-          value?.product_name || value?.name || value?.title || value?.last_seen_location?.product_name || value?.last_seen_location?.name
-        );
-        const sizeValue = normalizeComparableText(value?.size_value || value?.last_seen_location?.size_value);
-        const sizeUnit = normalizeComparableText(value?.size_unit || value?.last_seen_location?.size_unit || value?.unit || value?.last_seen_location?.unit);
-        const displaySize = normalizeComparableText(value?.display_size || value?.last_seen_location?.display_size);
-        const sizeKey = [sizeValue, sizeUnit].filter(Boolean).join(" ") || displaySize;
-
-        if (!brand || !productName || !sizeKey) return "";
-        return normalizeComparableKey([brand, productName, sizeKey].join("|"));
-      };
+      const groupedLocationRows = new Map();
+      locationRows.forEach((row) => {
+        const groupKey = safeIdentityKey(row);
+        if (!groupedLocationRows.has(groupKey)) groupedLocationRows.set(groupKey, []);
+        groupedLocationRows.get(groupKey).push(row);
+      });
 
       const mergedMap = new Map();
 
-      const addMergedRow = (row) => {
-        const key = buildComparableProductKey(row) || String(row?.barcode || "").trim() || `${normalizeComparableText(row?.product_name)}|${normalizeComparableText(row?.brand)}`;
-        if (!key) return;
-
-        const rowBarcode = String(row?.barcode || "").trim();
-        const rowCanonical = normalizeComparableKey(row?.canonical_product_key) || normalizeComparableKey(buildComparableProductKey(row));
-        const rowStrictSignature = makeStrictIdentitySignature(row);
-
-        const matchedRows = (locationRows || []).filter((locRow) => {
-          const locBarcode = String(locRow?.barcode || "").trim();
-          if (rowBarcode && locBarcode && rowBarcode === locBarcode) return true;
-
-          const locCanonical = normalizeComparableKey(locRow?.canonical_product_key);
-          if (rowCanonical && locCanonical && rowCanonical === locCanonical) return true;
-
-          const locStrictSignature = makeStrictIdentitySignature(locRow);
-          return Boolean(rowStrictSignature && locStrictSignature && rowStrictSignature === locStrictSignature);
-        });
-
+      const buildResultFromRows = (baseRow, locationGroup = [], source = "catalog_products") => {
         const rowsByStore = {};
-        matchedRows.forEach((matchedRow) => {
-          const storeId = String(matchedRow?.store_id || "").trim();
+        locationGroup.forEach((locRow) => {
+          const storeId = String(locRow?.store_id || "").trim();
           if (!storeId) return;
-          const existingRow = rowsByStore[storeId];
-          if (!existingRow || isBetterPriceObservation(matchedRow, existingRow)) {
-            rowsByStore[storeId] = matchedRow;
+          const existing = rowsByStore[storeId];
+          if (!existing || isBetterPriceObservation(locRow, existing)) {
+            rowsByStore[storeId] = locRow;
           }
         });
 
         const bestRows = Object.values(rowsByStore);
         const selectedStoreId = String(selectedStore?.id || "").trim();
         const selectedLocation = selectedStoreId ? (rowsByStore[selectedStoreId] || null) : null;
-        const cheapestRow = bestRows.reduce((current, candidate) => {
+
+        const cheapestLocation = bestRows.reduce((current, candidate) => {
           if (!current) return candidate;
           return isBetterPriceObservation(candidate, current) ? candidate : current;
         }, null);
@@ -6213,78 +6275,119 @@ export default function App() {
             return Number(b.confidence_score || 0) - Number(a.confidence_score || 0);
           });
 
-        const hasImage = Boolean(row?.verified_image_url || row?.image_url || cheapestRow?.verified_image_url || cheapestRow?.image_url);
-        const otherKnownPrices = allKnownStorePrices
-          .filter((entry) => entry.store_id !== String(cheapestRow?.store_id || ""));
+        const rowBarcode = String(baseRow?.barcode || "").trim();
+        const catalogImageSource = rowBarcode ? catalogByBarcode.get(rowBarcode) : null;
+        const imageUrl =
+          baseRow?.image_url ||
+          catalogImageSource?.image_url ||
+          null;
+        const verifiedImageUrl =
+          baseRow?.verified_image_url ||
+          catalogImageSource?.verified_image_url ||
+          null;
+        const resolvedImage =
+          baseRow?.cart_image_url ||
+          baseRow?.image ||
+          verifiedImageUrl ||
+          imageUrl ||
+          baseRow?.raw_photo_url ||
+          MVP_PLACEHOLDER_IMAGE;
 
-        const bestDisplayPrice = Number(cheapestRow?.avg_price ?? cheapestRow?.price ?? 0) || null;
-        const merged = {
-          ...row,
-          source: "shared_catalog",
-          canonical_product_key: rowCanonical || row?.canonical_product_key || null,
-          product_name: row?.product_name || cheapestRow?.product_name || "",
-          brand: row?.brand || cheapestRow?.brand || "",
-          barcode: String(row?.barcode || cheapestRow?.barcode || "").trim(),
-          category: row?.category || cheapestRow?.category || "",
-          size_value: row?.size_value || cheapestRow?.size_value || "",
-          size_unit: row?.size_unit || cheapestRow?.size_unit || "",
-          display_size: row?.display_size || cheapestRow?.display_size || "",
-          quantity: row?.quantity || "1",
+        const cheapestKnownPrice = Number(cheapestLocation?.avg_price ?? cheapestLocation?.price ?? 0) || null;
+
+        return {
+          id: baseRow?.id || null,
+          catalog_id: baseRow?.id || null,
+          product_name: baseRow?.product_name || "",
+          brand: baseRow?.brand || "",
+          barcode: rowBarcode,
+          canonical_product_key: baseRow?.canonical_product_key || null,
+          category: baseRow?.category || "",
+          size_value: baseRow?.size_value || "",
+          size_unit: baseRow?.size_unit || "",
+          display_size: baseRow?.display_size || "",
+          quantity: baseRow?.quantity || "1",
+          image_url: imageUrl,
+          verified_image_url: verifiedImageUrl,
+          cart_image_url: resolvedImage,
+          raw_photo_url: baseRow?.raw_photo_url || null,
+          cheapest_known_price: cheapestKnownPrice,
+          cheapest_known_store_name: cheapestLocation?.store_name || null,
+          cheapest_location: cheapestLocation,
           selected_store_location: selectedLocation,
-          cheapest_location: cheapestRow,
-          cheapest_known_store_name: cheapestRow?.store_name || null,
-          cheapest_known_price: bestDisplayPrice,
           all_known_store_prices: allKnownStorePrices,
-          other_known_prices: otherKnownPrices,
-          aisle: selectedLocation?.aisle || row?.aisle || cheapestRow?.aisle || "",
-          section: selectedLocation?.section || row?.section || cheapestRow?.section || "",
-          shelf: selectedLocation?.shelf || row?.shelf || cheapestRow?.shelf || "",
-          price: bestDisplayPrice,
-          avg_price: bestDisplayPrice,
-          price_type: cheapestRow?.price_type || selectedLocation?.price_type || row?.price_type || "each",
-          confidence_score: Number(selectedLocation?.confidence_score || row?.confidence_score || 0),
-          hasImage,
+          source,
           hasSelectedStoreLocation: Boolean(selectedLocation?.aisle || selectedLocation?.section || selectedLocation?.shelf),
           hasKnownPriceAtAnotherStore: Boolean(!selectedLocation && allKnownStorePrices.length > 0),
+          price: cheapestKnownPrice,
+          avg_price: cheapestKnownPrice,
+          price_type: cheapestLocation?.price_type || baseRow?.price_type || "each",
+          confidence_score: Number(selectedLocation?.confidence_score || baseRow?.confidence_score || 0),
+          aisle: selectedLocation?.aisle || baseRow?.aisle || cheapestLocation?.aisle || "",
+          section: selectedLocation?.section || baseRow?.section || cheapestLocation?.section || "",
+          shelf: selectedLocation?.shelf || baseRow?.shelf || cheapestLocation?.shelf || "",
         };
-
-        const existing = mergedMap.get(key);
-        if (!existing || Boolean(merged.hasSelectedStoreLocation) || Boolean(merged.hasImage && !existing.hasImage)) {
-          mergedMap.set(key, merged);
-        }
       };
 
-        locationRows.forEach((row) => addMergedRow(row));
-        safeRows.forEach((row) => addMergedRow(row));
+      // Build results from location intelligence first
+      groupedLocationRows.forEach((rows, groupKey) => {
+        const representative = rows[0] || {};
+        const result = buildResultFromRows(representative, rows, "product_locations");
+        mergedMap.set(groupKey, result);
+      });
+
+      // Supplement with catalog rows where missing
+      catalogEnhancedRows.forEach((row) => {
+        const groupKey = safeIdentityKey(row);
+        const linkedLocationRows = groupedLocationRows.get(groupKey) || groupedLocationRows.get(`barcode|${String(row?.barcode || "").trim()}`) || [];
+        const nextResult = buildResultFromRows(row, linkedLocationRows, "catalog_products");
+        const existing = mergedMap.get(groupKey);
+
+        if (!existing) {
+          mergedMap.set(groupKey, nextResult);
+          return;
+        }
+
+        const shouldUpgradeImage =
+          (!existing?.verified_image_url && Boolean(nextResult?.verified_image_url)) ||
+          (!existing?.image_url && Boolean(nextResult?.image_url));
+
+        if (shouldUpgradeImage) {
+          mergedMap.set(groupKey, {
+            ...existing,
+            image_url: existing?.image_url || nextResult?.image_url || null,
+            verified_image_url: existing?.verified_image_url || nextResult?.verified_image_url || null,
+            cart_image_url: existing?.cart_image_url || nextResult?.cart_image_url || MVP_PLACEHOLDER_IMAGE,
+          });
+        }
+      });
 
       const mergedResults = Array.from(mergedMap.values()).sort((a, b) => {
         if (a.hasSelectedStoreLocation !== b.hasSelectedStoreLocation) {
           return a.hasSelectedStoreLocation ? -1 : 1;
         }
-
         if (a.cheapest_known_price != null && b.cheapest_known_price != null && a.cheapest_known_price !== b.cheapest_known_price) {
           return a.cheapest_known_price - b.cheapest_known_price;
         }
-
-        if (a.hasImage !== b.hasImage) {
-          return a.hasImage ? -1 : 1;
-        }
-
         return String(a?.product_name || "").localeCompare(String(b?.product_name || ""), undefined, {
           sensitivity: "base",
           numeric: true,
         });
       });
 
-      console.log("CATALOG_SEARCH_MERGED_COUNT", mergedResults.length);
+      console.log("CATALOG_SEARCH_MERGED_RESULTS", mergedResults.length);
+      console.log("CATALOG_SEARCH_FINAL_RESULTS", mergedResults.length);
+
       setCatalogSearchResults(mergedResults);
       setCatalogSearchMessage(
-        mergedResults.length ? "" : (safeRows.length === 0 && locationRows.length === 0 ? "No scanned item found yet" : "")
+        mergedResults.length > 0
+          ? ""
+          : (productLocationsMinRows.length === 0 && catalogMinRows.length === 0 ? "No catalog matches yet." : "")
       );
     } catch (err) {
       console.warn("CATALOG_SEARCH_ERROR", { label: "searchSharedCatalogItems.catch", error: err });
       setCatalogSearchResults([]);
-      setCatalogSearchMessage("No scanned item found yet");
+      setCatalogSearchMessage("No catalog matches yet.");
     } finally {
       setIsSearchingCatalog(false);
     }
@@ -7205,6 +7308,28 @@ export default function App() {
 
     const storeScopedLocation = locationToUse || null;
     const storeId = String(storeScopedLocation?.store_id || selectedStore?.id || "").trim();
+    const resolvedContributionImage = resolveProductImage(productToRecord);
+
+    console.log("CONTRIBUTION_IMAGE_INPUT", {
+      product_name: itemName || null,
+      image: productToRecord?.image || null,
+      cart_image_url: productToRecord?.cart_image_url || null,
+      image_url: productToRecord?.image_url || null,
+      raw_photo_url: productToRecord?.raw_photo_url || null,
+      verified_image_url: productToRecord?.verified_image_url || null,
+      resolvedImage: resolvedContributionImage,
+    });
+
+    console.log("CONTRIBUTION_IMAGE_RESOLVED", {
+      product_name: itemName || null,
+      image: productToRecord?.image || null,
+      cart_image_url: productToRecord?.cart_image_url || null,
+      image_url: productToRecord?.image_url || null,
+      raw_photo_url: productToRecord?.raw_photo_url || null,
+      verified_image_url: productToRecord?.verified_image_url || null,
+      resolvedImage: resolvedContributionImage,
+    });
+
     const contributionKey = normalizeComparableKey([
       itemCanonicalKey || itemBarcode || itemName,
       storeId,
@@ -7230,6 +7355,11 @@ export default function App() {
       display_size: String(productToRecord?.display_size || "").trim(),
       quantity: String(productToRecord?.quantity || "1").trim() || "1",
       location: storeScopedLocation,
+      image: productToRecord?.image || resolvedContributionImage,
+      cart_image_url: productToRecord?.cart_image_url || resolvedContributionImage,
+      image_url: productToRecord?.image_url || null,
+      raw_photo_url: productToRecord?.raw_photo_url || null,
+      verified_image_url: productToRecord?.verified_image_url || null,
       price: productToRecord?.price ?? storeScopedLocation?.price ?? null,
       avg_price: productToRecord?.avg_price ?? storeScopedLocation?.avg_price ?? null,
       price_type: productToRecord?.price_type || storeScopedLocation?.price_type || "each",
@@ -10121,7 +10251,7 @@ export default function App() {
                   }}
                 >
                   <div style={{ fontSize: 13, color: "#334155", fontWeight: 700, marginBottom: 8 }}>
-                    No scanned item found yet. Add it to the database when you shop.
+                    No catalog matches yet. Add it to the database when you shop.
                   </div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     <button
@@ -10247,6 +10377,16 @@ export default function App() {
                   const contributionImage = resolveProductImage(item);
                   const contributionPrice = contributionLocation?.avg_price ?? contributionLocation?.price ?? item?.avg_price ?? item?.price;
                   const contributionPriceType = contributionLocation?.price_type || item?.price_type || "each";
+
+                  console.log("IN_STORE_SCANNED_CART_IMAGE_RENDER", {
+                    product_name: item?.product_name || null,
+                    image: item?.image || null,
+                    cart_image_url: item?.cart_image_url || null,
+                    image_url: item?.image_url || null,
+                    raw_photo_url: item?.raw_photo_url || null,
+                    verified_image_url: item?.verified_image_url || null,
+                    resolvedImage: contributionImage,
+                  });
 
                   return (
                     <div
