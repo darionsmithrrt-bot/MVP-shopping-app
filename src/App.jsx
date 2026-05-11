@@ -4914,6 +4914,9 @@ export default function App() {
       });
 
       setProduct(finalProduct);
+      if (!normalizedBarcode && finalProduct?.barcode) {
+        setBarcode(finalProduct.barcode);
+      }
 
       // Low-confidence review gate: if AI identity confidence is below 70%,
       // force the user to confirm or edit before proceeding to location entry.
@@ -5386,7 +5389,8 @@ export default function App() {
     };
 
     try {
-      const barcodeValue = String(barcode || "").trim() || null;
+      const barcodeValue =
+        String(barcode || product?.barcode || "").trim() || null;
       const applyBarcodeFilter = (query) =>
         barcodeValue ? query.eq("barcode", barcodeValue) : query.is("barcode", null);
 
