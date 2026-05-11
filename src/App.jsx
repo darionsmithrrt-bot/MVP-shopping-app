@@ -1745,19 +1745,99 @@ export default function App() {
       const priceRows = await fetchComparableProductLocationRows(searchCandidates);
 
       const debugEnabled = import.meta.env.DEV || window.localStorage.getItem("mvpDebug") === "true";
+      const debugFilterEnabled = window.localStorage.getItem("mvpDebug") === "true";
+      const normalizedBrandMode = String(brandComparisonMode || "flexible").toLowerCase();
+      const requireExactBrand = normalizedBrandMode === "brand_match" || normalizedBrandMode === "match exact brand";
+      const normalizedCatalogBrand = normalizeComparableText(catalogProduct?.brand);
+      const normalizedCatalogCanonical = normalizeComparableKey(catalogProduct?.canonical_product_key);
+
+      const rejectedRows = [];
+      const filteredPriceRows = (Array.isArray(priceRows) ? priceRows : []).filter((row) => {
+        const rowBarcode = String(row?.barcode || "").trim();
+        const rowCanonical = normalizeComparableKey(row?.canonical_product_key);
+        const isBarcodeMatch = Boolean(barcode && rowBarcode && barcode === rowBarcode);
+
+        if (isBarcodeMatch) {
+          return true;
+        }
+
+        if (normalizedCatalogCanonical && rowCanonical && normalizedCatalogCanonical === rowCanonical) {
+          if (!requireExactBrand) {
+            return true;
+          }
+
+          const rowBrand = normalizeComparableText(row?.brand);
+          if (normalizedCatalogBrand && rowBrand && normalizedCatalogBrand === rowBrand) {
+            return true;
+          }
+
+          if (rejectedRows.length < 5) {
+            rejectedRows.push({
+              reason: "canonical_brand_mismatch",
+              product_name: row?.product_name || null,
+              brand: row?.brand || null,
+              barcode: rowBarcode || null,
+              canonical_product_key: rowCanonical || null,
+            });
+          }
+          return false;
+        }
+
+        const matchMethod = getProductMatchMethod(catalogProduct, row);
+        if (!matchMethod) {
+          if (rejectedRows.length < 5) {
+            rejectedRows.push({
+              reason: "no_strict_match_method",
+              product_name: row?.product_name || null,
+              brand: row?.brand || null,
+              barcode: rowBarcode || null,
+              canonical_product_key: rowCanonical || null,
+            });
+          }
+          return false;
+        }
+
+        if (requireExactBrand) {
+          const rowBrand = normalizeComparableText(row?.brand);
+          if (!(normalizedCatalogBrand && rowBrand && normalizedCatalogBrand === rowBrand)) {
+            if (rejectedRows.length < 5) {
+              rejectedRows.push({
+                reason: "brand_mode_reject",
+                match_method: matchMethod,
+                product_name: row?.product_name || null,
+                brand: row?.brand || null,
+                barcode: rowBarcode || null,
+                canonical_product_key: rowCanonical || null,
+              });
+            }
+            return false;
+          }
+        }
+
+        return true;
+      });
       if (debugEnabled) {
         console.debug("PRICE_HYDRATION_SEARCH", {
           searchedProduct: `${productName} ${brand}`.trim(),
           barcode,
           canonicalKey,
           matchingStrategy: barcode ? "barcode" : canonicalKey ? "canonical_key" : "normalized_fields",
-          offersFound: priceRows.length,
+          offersFound: filteredPriceRows.length,
+        });
+      }
+
+      if (debugFilterEnabled) {
+        console.debug("PRICE_HYDRATION_FILTER", {
+          product_name: productName || null,
+          fetched_row_count: Array.isArray(priceRows) ? priceRows.length : 0,
+          filtered_row_count: filteredPriceRows.length,
+          rejected_examples: rejectedRows,
         });
       }
 
       // Group by store and pick best price per store
       const offersByStore = {};
-      priceRows.forEach((row) => {
+      filteredPriceRows.forEach((row) => {
         const storeId = String(row?.store_id || "").trim();
         if (!storeId) return;
 
