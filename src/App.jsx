@@ -4059,96 +4059,18 @@ export default function App() {
 
       if (saveError) throw new Error(`Database save failed: ${saveError.message}`);
 
-      // -- Call AI vision analysis for all uploaded images ----------------------
+      // -- Call AI identify-product as the primary analysis flow ----------------
       setPhotoAnalysisStatus('analyzing');
       setStatus(`Analyzing ${uploadedUrls.length} photo${uploadedUrls.length > 1 ? "s" : ""} with AI...`);
+      console.log("PHOTO ANALYSIS USING IDENTIFY-PRODUCT PRIMARY FLOW");
+      console.log("CLOUD VISION BYPASSED FOR STABILITY");
 
       const imageRoles = capturedPhotos
         .slice(0, files.length)
         .map((photo, index) => normalizeImageRole(photo?.role, index));
 
-      // Build visionByRole structure by calling analyze-vision for each image
+      const visionContext = null;
       const visionByRole = {};
-      const visionResults = [];
-
-      for (let i = 0; i < uploadedUrls.length; i++) {
-        const imageUrl = uploadedUrls[i];
-        const role = imageRoles[i] || "unknown";
-        const isValidPublicImageUrl =
-          /^https?:\/\//i.test(String(imageUrl || "")) &&
-          !/^blob:/i.test(String(imageUrl || "")) &&
-          !/^file:/i.test(String(imageUrl || ""));
-
-        if (isValidPublicImageUrl) {
-          try {
-            const visionInvokeResult = await supabase.functions.invoke("analyze-vision", {
-              body: { imageUrl, role }
-            });
-            const visionData = visionInvokeResult.data;
-            const visionError = visionInvokeResult.error;
-
-            if (!visionError && visionData) {
-              visionByRole[role] = visionData;
-              visionResults.push(visionData);
-              console.log(`VISION RESULT FOR ${role}:`, visionData);
-            } else {
-              console.warn(`VISION ERROR FOR ${role}:`, visionError);
-              visionByRole[role] = { text: "", labels: [], logos: [], objects: [], confidence: 0 };
-            }
-          } catch (err) {
-            console.warn(`VISION INVOKE EXCEPTION FOR ${role}:`, err);
-            visionByRole[role] = { text: "", labels: [], logos: [], objects: [], confidence: 0 };
-          }
-        } else {
-          console.warn(`INVALID URL FOR ${role}:`, imageUrl);
-          visionByRole[role] = { text: "", labels: [], logos: [], objects: [], confidence: 0 };
-        }
-      }
-
-      // Build merged vision context from all results
-      const mergedVisionText = visionResults.map((r) => r.text || "").filter(Boolean).join(" ");
-      const mergedVisionLabels = [];
-      const mergedVisionLogos = [];
-      const mergedVisionObjects = [];
-      const seenLabels = new Set();
-      const seenLogos = new Set();
-      const seenObjects = new Set();
-
-      for (const result of visionResults) {
-        if (Array.isArray(result.labels)) {
-          for (const label of result.labels) {
-            if (!seenLabels.has(label.description)) {
-              mergedVisionLabels.push(label);
-              seenLabels.add(label.description);
-            }
-          }
-        }
-        if (Array.isArray(result.logos)) {
-          for (const logo of result.logos) {
-            if (!seenLogos.has(logo.description)) {
-              mergedVisionLogos.push(logo);
-              seenLogos.add(logo.description);
-            }
-          }
-        }
-        if (Array.isArray(result.objects)) {
-          for (const obj of result.objects) {
-            if (!seenObjects.has(obj.name)) {
-              mergedVisionObjects.push(obj);
-              seenObjects.add(obj.name);
-            }
-          }
-        }
-      }
-
-      const visionContext = {
-        text: mergedVisionText,
-        labels: mergedVisionLabels.slice(0, 20),
-        logos: mergedVisionLogos.slice(0, 10),
-        objects: mergedVisionObjects.slice(0, 20),
-      };
-
-      console.log("MERGED VISION CONTEXT:", visionContext);
 
       let aiResponse = await identifyProductFromPhoto(
         uploadedUrls,
@@ -4345,6 +4267,7 @@ export default function App() {
       };
       
       console.log("NORMALIZED AI PAYLOAD AFTER FALLBACK:", aiPayload);
+      console.log("IDENTIFY PRODUCT RESPONSE NORMALIZED", aiPayload);
       setAiDetectedRawText(String(aiPayload.raw_text || "").trim());
 
       // Structured product-name extraction from vision OCR text.
@@ -4608,6 +4531,8 @@ export default function App() {
       let normalizedSizeUnit = aiPayload.size_unit || "";
       const normalizedQuantity = aiPayload.quantity || "1";
       let sizeConfidence = Number(aiPayload.size_confidence || 0);
+
+      const visionData = visionContext || { text: "", labels: [], logos: [], objects: [] };
 
       const visionText = cleanVisionText(visionData?.text);
       if (visionText) {
@@ -6126,6 +6051,7 @@ export default function App() {
     try {
       const safeTerm = trimmedTerm.replace(/,/g, " ").trim();
       const wildcardTerm = `%${safeTerm}%`;
+      console.log("CATALOG SEARCH TERM", safeTerm);
 
       const isMissingOptionalColumnError = (err) => {
         const message = String(err?.message || "").toLowerCase();
@@ -6147,14 +6073,14 @@ export default function App() {
       let { data: catalogRows, error: catalogError } = await supabase
         .from("catalog_products")
         .select("id, barcode, canonical_product_key, product_name, brand, category, image_url, verified_image_url, size_value, size_unit, display_size, quantity, source")
-        .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},category.ilike.${wildcardTerm}`)
+        .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},category.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},canonical_product_key.ilike.${wildcardTerm}`)
         .limit(25);
 
       if (catalogError && isMissingOptionalColumnError(catalogError)) {
         const fallbackResult = await supabase
           .from("catalog_products")
           .select("id, barcode, canonical_product_key, product_name, brand, image_url, size_value, size_unit, display_size, quantity, source")
-          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm}`)
+          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},canonical_product_key.ilike.${wildcardTerm}`)
           .limit(25);
 
         catalogRows = fallbackResult.data;
@@ -6169,6 +6095,7 @@ export default function App() {
       }
 
       const safeRows = Array.isArray(catalogRows) ? catalogRows : [];
+  console.log("CATALOG_ROWS_FOUND", safeRows.length);
       const barcodes = [...new Set(safeRows.map((row) => String(row?.barcode || "").trim()).filter(Boolean))];
       const canonicalKeys = [...new Set(safeRows.map((row) => normalizeComparableKey(row?.canonical_product_key)).filter(Boolean))];
 
@@ -6199,6 +6126,42 @@ export default function App() {
             mapRows.push(...rows);
           }
         };
+
+        // Always run a direct database text search against shared price/location intelligence.
+        const directLocationQuery = await supabase
+          .from("store_product_price_map_v1")
+          .select(mapSelect)
+          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},category.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},canonical_product_key.ilike.${wildcardTerm}`)
+          .limit(500);
+
+        if (directLocationQuery.error && isMissingOptionalColumnError(directLocationQuery.error)) {
+          const directLocationFallbackQuery = await supabase
+            .from("store_product_price_map_v1")
+            .select(mapSelect)
+            .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm}`)
+            .limit(500);
+          appendRows(directLocationFallbackQuery.data);
+        } else {
+          appendRows(directLocationQuery.data);
+        }
+
+        // Query product_locations directly so location-only records can appear even when catalog_products has no hit.
+        const directProductLocationsQuery = await supabase
+          .from("product_locations")
+          .select("store_id, store_name, barcode, canonical_product_key, product_name, brand, category, size_value, size_unit, display_size, aisle, section, shelf, price, avg_price, price_type, price_count, price_confidence, confidence_score, last_confirmed_at, updated_at")
+          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},category.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm},canonical_product_key.ilike.${wildcardTerm}`)
+          .limit(500);
+
+        if (directProductLocationsQuery.error && isMissingOptionalColumnError(directProductLocationsQuery.error)) {
+          const directProductLocationsFallbackQuery = await supabase
+            .from("product_locations")
+            .select("store_id, store_name, barcode, product_name, brand, size_value, size_unit, display_size, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at, updated_at")
+            .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},display_size.ilike.${wildcardTerm}`)
+            .limit(500);
+          appendRows(directProductLocationsFallbackQuery.data);
+        } else {
+          appendRows(directProductLocationsQuery.data);
+        }
 
         if (barcodes.length > 0) {
           const { data: barcodeRows } = await supabase
@@ -6245,6 +6208,7 @@ export default function App() {
         }
 
         locationRows = deduped;
+        console.log("PRODUCT_LOCATION_ROWS_FOUND", locationRows.length);
       } catch (locationMergeError) {
         console.warn("CATALOG LOCATION MERGE WARNING:", locationMergeError?.message || locationMergeError);
       }
@@ -6338,6 +6302,7 @@ export default function App() {
       };
 
       safeRows.forEach((row) => addMergedRow(row, "catalog"));
+  locationRows.forEach((row) => addMergedRow(row, "location"));
 
       const mergedResults = Array.from(mergedMap.values()).sort((a, b) => {
         if (a.hasSelectedStoreLocation !== b.hasSelectedStoreLocation) {
@@ -6358,6 +6323,7 @@ export default function App() {
         });
       });
 
+      console.log("MERGED_CATALOG_RESULTS", mergedResults.length);
       setCatalogSearchResults(mergedResults);
       setCatalogSearchMessage(mergedResults.length ? "" : "No catalog matches yet.");
     } catch (err) {
@@ -6651,6 +6617,13 @@ export default function App() {
   };
 
   const addSharedCatalogResultToCart = async (result) => {
+    console.log("ADD_KNOWN_DATABASE_ITEM_TO_DESIRED_LIST", {
+      product_name: result?.product_name || null,
+      brand: result?.brand || null,
+      barcode: result?.barcode || null,
+      canonical_product_key: result?.canonical_product_key || null,
+    });
+
     const productName = String(result?.product_name || "").trim();
     const barcode = String(result?.barcode || "").trim();
     const selectedLocation = result?.selected_store_location || {};
