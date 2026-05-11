@@ -23,9 +23,7 @@ import { useRewards } from "./hooks/useRewards";
 import mvpLogo from "./assets/mvp-logo.png";
 
 const AUTH_REDIRECT_URL =
-  window.location.hostname === "localhost"
-    ? window.location.origin
-    : "https://mvp-app-tau.vercel.app";
+  window.location.origin;
 
 const PHOTO_ROLE_SEQUENCE = [
   { key: "product_label", label: "Product front label" },
@@ -1000,6 +998,10 @@ export default function App() {
   const activeScreenRef = useRef("store");
   const activePanelRef = useRef(null);
   const cameraLoadPromiseRef = useRef(null);
+  const cloudShoppingListLoadedForUserRef = useRef(null);
+  const cloudShoppingListReadyRef = useRef(false);
+  const cloudShoppingListExplicitClearRef = useRef(false);
+  const latestShoppingListItemsRef = useRef([]);
 
   // ============================================================================
   // STATE - Scanner & Camera
@@ -1083,7 +1085,12 @@ export default function App() {
   const [activeAisleView, setActiveAisleView] = useState(null);
   const [shoppingMode, setShoppingMode] = useState(false);
   const [manualListItemName, setManualListItemName] = useState("");
+  const [catalogSearchTerm, setCatalogSearchTerm] = useState("");
+  const [catalogSearchResults, setCatalogSearchResults] = useState([]);
+  const [isSearchingCatalog, setIsSearchingCatalog] = useState(false);
+  const [catalogSearchMessage, setCatalogSearchMessage] = useState("");
   const [cartComparison, setCartComparison] = useState(null);
+  const [cartPriceInsightsByKey, setCartPriceInsightsByKey] = useState({});
   const [isComparingCart, setIsComparingCart] = useState(false);
   const [storeRouteLocations, setStoreRouteLocations] = useState({});
   const [isLoadingStoreRoute, setIsLoadingStoreRoute] = useState(false);
@@ -1114,6 +1121,9 @@ export default function App() {
   const [itemRequestSuggestions, setItemRequestSuggestions] = useState([]);
   const [isSavingItemRequest, setIsSavingItemRequest] = useState(false);
   const [isCheckingProfile, setIsCheckingProfile] = useState(true);
+  const [hasCompletedInitialBootstrap, setHasCompletedInitialBootstrap] = useState(false);
+  const [hasHydratedLocalShoppingList, setHasHydratedLocalShoppingList] = useState(false);
+  const [isCloudShoppingListReady, setIsCloudShoppingListReady] = useState(false);
   const [profileForm, setProfileForm] = useState({
     display_name: "",
     email: "",
@@ -1175,6 +1185,314 @@ export default function App() {
     setItemRequestSuggestions([]);
   };
 
+  const normalizeComparableText = (value) => {
+    return String(value || "")
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  };
+
+  const normalizeComparableKey = (value) => {
+    return String(value || "")
+      .split("|")
+      .map((segment) => normalizeComparableText(segment))
+      .filter(Boolean)
+      .join("|");
+  };
+
+  const buildComparableProductKey = (value) => {
+    if (!value) return "";
+
+    const canonicalKey = normalizeComparableKey(
+      value?.canonical_product_key || value?.last_seen_location?.canonical_product_key
+    );
+    if (canonicalKey) return canonicalKey;
+
+    const brand = normalizeComparableText(value?.brand || value?.last_seen_location?.brand);
+    const productName = normalizeComparableText(
+      value?.product_name || value?.name || value?.title || value?.last_seen_location?.product_name || value?.last_seen_location?.name
+    );
+    const sizeValue = normalizeComparableText(value?.size_value || value?.last_seen_location?.size_value);
+    const sizeUnit = normalizeComparableText(value?.size_unit || value?.last_seen_location?.size_unit || value?.unit || value?.last_seen_location?.unit);
+    const displaySize = normalizeComparableText(value?.display_size || value?.last_seen_location?.display_size);
+
+    const sizeKey = [sizeValue, sizeUnit].filter(Boolean).join(" ") || displaySize;
+    return normalizeComparableKey([brand, productName, sizeKey].join("|"));
+  };
+
+  const isBetterPriceObservation = (candidate, current) => {
+    if (!current) return true;
+
+    const candidatePrice = Number(candidate?.avg_price ?? candidate?.price);
+    const currentPrice = Number(current?.avg_price ?? current?.price);
+
+    const candidateHasPrice = Number.isFinite(candidatePrice) && candidatePrice > 0;
+    const currentHasPrice = Number.isFinite(currentPrice) && currentPrice > 0;
+
+    if (candidateHasPrice !== currentHasPrice) {
+      return candidateHasPrice;
+    }
+
+    if (candidateHasPrice && currentHasPrice && candidatePrice !== currentPrice) {
+      return candidatePrice < currentPrice;
+    }
+
+    const candidateConfidence = Number(candidate?.confidence_score || 0);
+    const currentConfidence = Number(current?.confidence_score || 0);
+    if (candidateConfidence !== currentConfidence) {
+      return candidateConfidence > currentConfidence;
+    }
+
+    const candidateConfirmed = candidate?.last_confirmed_at ? new Date(candidate.last_confirmed_at).getTime() : 0;
+    const currentConfirmed = current?.last_confirmed_at ? new Date(current.last_confirmed_at).getTime() : 0;
+    return candidateConfirmed > currentConfirmed;
+  };
+
+  const buildPriceObservationIndex = (rows) => {
+    const byKey = {};
+
+    for (const row of rows || []) {
+      const key = buildComparableProductKey(row);
+      if (!key) continue;
+
+      const storeId = String(row?.store_id || "").trim();
+      if (!storeId) continue;
+
+      if (!byKey[key]) {
+        byKey[key] = {
+          rowsByStore: {},
+          allRows: [],
+          cheapestRow: null,
+        };
+      }
+
+      const bucket = byKey[key];
+      const existingStoreRow = bucket.rowsByStore[storeId];
+      if (!existingStoreRow || isBetterPriceObservation(row, existingStoreRow)) {
+        bucket.rowsByStore[storeId] = row;
+      }
+
+      if (!bucket.cheapestRow || isBetterPriceObservation(row, bucket.cheapestRow)) {
+        bucket.cheapestRow = row;
+      }
+
+      bucket.allRows.push(row);
+    }
+
+    return byKey;
+  };
+
+  const fetchComparableProductLocationRows = async ({ barcodes = [], canonicalKeys = [], terms = [] } = {}) => {
+    const allRows = [];
+    const fullSelect = "barcode, canonical_product_key, product_name, brand, category, size_value, size_unit, display_size, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at";
+    const fallbackSelect = "barcode, product_name, brand, category, size_value, size_unit, display_size, store_id, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at";
+
+    const addRows = async (queryBuilder, label) => {
+      const { data, error } = await queryBuilder;
+      if (error) {
+        if (isMissingOptionalColumnError(error)) {
+          console.warn(`${label} OPTIONAL COLUMN FALLBACK:`, error.message);
+          return false;
+        }
+        throw error;
+      }
+
+      if (Array.isArray(data)) {
+        allRows.push(...data);
+      }
+
+      return true;
+    };
+
+    if (Array.isArray(barcodes) && barcodes.length > 0) {
+      const query = supabase
+        .from("product_locations")
+        .select(fullSelect)
+        .in("barcode", barcodes)
+        .limit(200);
+
+      const succeeded = await addRows(query, "PRICE MATCH BARCODE QUERY");
+      if (!succeeded) {
+        await addRows(
+          supabase
+            .from("product_locations")
+            .select(fallbackSelect)
+            .in("barcode", barcodes)
+            .limit(200),
+          "PRICE MATCH BARCODE QUERY"
+        );
+      }
+    }
+
+    if (Array.isArray(canonicalKeys) && canonicalKeys.length > 0) {
+      try {
+        const query = supabase
+          .from("product_locations")
+          .select(fullSelect)
+          .in("canonical_product_key", canonicalKeys)
+          .limit(200);
+
+        const succeeded = await addRows(query, "PRICE MATCH CANONICAL QUERY");
+        if (!succeeded) {
+          await addRows(
+            supabase
+              .from("product_locations")
+              .select(fallbackSelect)
+              .limit(200),
+            "PRICE MATCH CANONICAL QUERY"
+          );
+        }
+      } catch (err) {
+        if (!isMissingOptionalColumnError(err)) {
+          throw err;
+        }
+      }
+    }
+
+    if (Array.isArray(terms) && terms.length > 0) {
+      const normalizedTerms = [...new Set(terms.map(normalizeComparableText).filter(Boolean))].slice(0, 12);
+      if (normalizedTerms.length > 0) {
+        const orClause = normalizedTerms
+          .flatMap((term) => [
+            `product_name.ilike.%${term}%`,
+            `brand.ilike.%${term}%`,
+            `category.ilike.%${term}%`,
+          ])
+          .join(",");
+
+        const query = supabase
+          .from("product_locations")
+          .select(fullSelect)
+          .or(orClause)
+          .limit(200);
+
+        const succeeded = await addRows(query, "PRICE MATCH TERM QUERY");
+        if (!succeeded) {
+          await addRows(
+            supabase
+              .from("product_locations")
+              .select(fallbackSelect)
+              .or(orClause)
+              .limit(200),
+            "PRICE MATCH TERM QUERY"
+          );
+        }
+      }
+    }
+
+    const dedupedRows = [];
+    const seen = new Set();
+    for (const row of allRows) {
+      const key = [
+        String(row?.store_id || "").trim(),
+        String(row?.barcode || "").trim(),
+        String(row?.canonical_product_key || "").trim(),
+        String(row?.product_name || "").trim(),
+        String(row?.brand || "").trim(),
+        String(row?.category || "").trim(),
+        String(row?.size_value || "").trim(),
+        String(row?.size_unit || "").trim(),
+        String(row?.display_size || "").trim(),
+        String(row?.price || "").trim(),
+        String(row?.avg_price || "").trim(),
+      ].join("|");
+
+      if (seen.has(key)) continue;
+      seen.add(key);
+      dedupedRows.push(row);
+    }
+
+    return dedupedRows;
+  };
+
+  const buildStoreComparisonResults = (cartItems, priceIndex) => {
+    const storeGroups = {};
+    const totalItems = Array.isArray(cartItems) ? cartItems.length : 0;
+    let matchedItemCount = 0;
+
+    (cartItems || []).forEach((cartItem) => {
+      const itemKey = buildComparableProductKey(cartItem);
+      const priceBucket = itemKey ? priceIndex?.[itemKey] || null : null;
+
+      if (!priceBucket) return;
+
+      matchedItemCount += 1;
+
+      Object.values(priceBucket.rowsByStore || {}).forEach((row) => {
+        const storeId = String(row?.store_id || "").trim();
+        if (!storeId) return;
+
+        const price = Number(row?.avg_price ?? row?.price);
+        if (!Number.isFinite(price) || price <= 0) return;
+
+        if (!storeGroups[storeId]) {
+          storeGroups[storeId] = {
+            store_id: storeId,
+            store: row?.stores || (row?.store_name ? { name: row.store_name } : null),
+            matched_count: 0,
+            total_price: 0,
+            total_confidence: 0,
+            brand_match_count: 0,
+            itemsByKey: {},
+            is_estimate: false,
+          };
+        }
+
+        const storeGroup = storeGroups[storeId];
+        const currentMatch = storeGroup.itemsByKey[itemKey];
+        if (!currentMatch || isBetterPriceObservation(row, currentMatch.row)) {
+          storeGroup.itemsByKey[itemKey] = { row, cartItem };
+        }
+      });
+    });
+
+    Object.values(storeGroups).forEach((storeGroup) => {
+      const matches = Object.values(storeGroup.itemsByKey || {});
+      storeGroup.matched_count = matches.length;
+      storeGroup.total_price = matches.reduce((sum, match) => {
+        const price = Number(match?.row?.avg_price ?? match?.row?.price);
+        return Number.isFinite(price) && price > 0 ? sum + price : sum;
+      }, 0);
+      storeGroup.total_confidence = matches.reduce((sum, match) => sum + Number(match?.row?.confidence_score || 0), 0);
+      storeGroup.avg_confidence = matches.length > 0 ? Math.round(storeGroup.total_confidence / matches.length) : 0;
+      storeGroup.coverage = totalItems > 0 ? Math.round((storeGroup.matched_count / totalItems) * 100) : 0;
+      storeGroup.brand_match_pct = 0;
+      storeGroup.is_estimate = matches.some((match) => !Number.isFinite(Number(match?.row?.avg_price ?? match?.row?.price)));
+    });
+
+    const sortedStores = Object.values(storeGroups).sort((a, b) => {
+      if (b.coverage !== a.coverage) return b.coverage - a.coverage;
+      if (a.total_price !== b.total_price) return a.total_price - b.total_price;
+      return b.avg_confidence - a.avg_confidence;
+    });
+
+    return {
+      byKey: priceIndex,
+      stores: sortedStores,
+      matchedItemCount,
+      totalItems,
+    };
+  };
+
+  const isMissingOptionalColumnError = (err) => {
+    const message = String(err?.message || "").toLowerCase();
+    const details = String(err?.details || "").toLowerCase();
+    const hint = String(err?.hint || "").toLowerCase();
+    const code = String(err?.code || "").toLowerCase();
+    const combined = `${message} ${details} ${hint} ${code}`;
+
+    return (
+      combined.includes("column") ||
+      combined.includes("schema cache") ||
+      combined.includes("does not exist") ||
+      combined.includes("could not find") ||
+      combined.includes("pgrst") ||
+      combined.includes("42703")
+    );
+  };
+
   const loadProfileFromLocalStorage = ({ guestOnly = false } = {}) => {
     const saved = localStorage.getItem("currentUserProfile");
 
@@ -1222,6 +1540,10 @@ export default function App() {
       setIsCheckingProfile(false);
     }
   };
+
+  useEffect(() => {
+    latestShoppingListItemsRef.current = shoppingListItems;
+  }, [shoppingListItems]);
 
   const resetAppSession = async () => {
     try {
@@ -1310,7 +1632,10 @@ export default function App() {
   const loadOrCreateSupabaseProfile = async (user) => {
     if (!user?.id) return null;
 
-    console.log("PROFILE LOOKUP USER:", user);
+    console.info("PROFILE LOAD START", {
+      userId: user?.id || null,
+      emailDomain: String(user?.email || "").split("@").slice(1).join("@") || null,
+    });
 
     try {
       const { data: existingProfile, error: existingProfileError } = await supabase
@@ -1324,6 +1649,11 @@ export default function App() {
       if (existingProfile) {
         setCurrentUserProfile(existingProfile);
         localStorage.setItem("currentUserProfile", JSON.stringify(existingProfile));
+        console.info("PROFILE LOAD SUCCESS", {
+          profileId: existingProfile?.id || null,
+          isGuest: Boolean(existingProfile?.is_guest),
+          source: "existing",
+        });
         return existingProfile;
       }
 
@@ -1361,8 +1691,17 @@ export default function App() {
 
       setCurrentUserProfile(insertedProfile);
       localStorage.setItem("currentUserProfile", JSON.stringify(insertedProfile));
+      console.info("PROFILE LOAD SUCCESS", {
+        profileId: insertedProfile?.id || null,
+        isGuest: Boolean(insertedProfile?.is_guest),
+        source: "inserted",
+      });
       return insertedProfile;
     } catch (err) {
+      console.info("PROFILE LOAD FAILED", {
+        userId: user?.id || null,
+        message: err?.message || "Unable to load profile",
+      });
       console.error("SUPABASE PROFILE BOOTSTRAP ERROR:", err);
       setError(err?.message || "Unable to load your profile.");
       return null;
@@ -1371,7 +1710,7 @@ export default function App() {
 
   // Supabase email confirmation may block sign-in unless disabled in Authentication > Settings > Email Auth or the user confirms by email.
   const handleSupabaseAuth = async () => {
-    const email = loginForm.username.trim();
+    const email = loginForm.username.trim().toLowerCase();
     const password = loginForm.password;
 
     if (!email || !password) {
@@ -1381,6 +1720,10 @@ export default function App() {
 
     setAuthError("");
     setIsSubmittingAuth(true);
+    console.info("AUTH LOGIN START", {
+      mode: loginMode,
+      emailDomain: String(email || "").split("@").slice(1).join("@") || null,
+    });
 
     try {
       let shouldCloseModal = false;
@@ -1402,6 +1745,10 @@ export default function App() {
           setAuthUser(data.user);
           shouldCloseModal = true;
           successMessage = "Account created. Welcome to MVP.";
+          console.info("AUTH LOGIN SUCCESS", {
+            mode: loginMode,
+            userId: data.user?.id || null,
+          });
 
           // Never block the auth modal flow on profile bootstrap.
           withTimeout(loadOrCreateSupabaseProfile(data.user), 8000, "Profile load")
@@ -1427,23 +1774,26 @@ export default function App() {
       } else {
         const { data, error: signInError } = await withTimeout(
           supabase.auth.signInWithPassword({
-            email: email.trim().toLowerCase(),
+            email,
             password,
           }),
           10000,
           "Login"
         );
-        console.log("LOGIN RESULT:", data, signInError);
         if (signInError) throw signInError;
         if (data?.user && data?.session) {
           setAuthUser(data.user);
           localStorage.removeItem("currentUserProfile");
           setCurrentUserProfile(null);
           setAuthError("");
-          setAppScreen("store");
           setShowLoginModal(false);
           setLoginForm({ username: "", password: "" });
           setToast({ message: "Signed in successfully.", type: "success" });
+          setAppScreen("store");
+          console.info("AUTH LOGIN SUCCESS", {
+            mode: loginMode,
+            userId: data.user?.id || null,
+          });
 
           withTimeout(loadOrCreateSupabaseProfile(data.user), 8000, "Profile load")
             .then((profile) => {
@@ -1479,6 +1829,10 @@ export default function App() {
         });
       }
     } catch (err) {
+      console.info("AUTH LOGIN FAILED", {
+        mode: loginMode,
+        message: err?.message || "Unable to authenticate right now.",
+      });
       console.error("SUPABASE AUTH ERROR:", err);
       const errorMessage = String(err?.message || "");
       const lowerErrorMessage = errorMessage.toLowerCase();
@@ -1488,14 +1842,12 @@ export default function App() {
           message: "Login is taking too long. Please try again or continue as guest.",
           type: "error",
         });
-      } else
-      if (loginMode === "signIn" && errorMessage.includes("Invalid login credentials")) {
-        setAuthError("Incorrect email or password");
+      } else if (loginMode === "signIn" && lowerErrorMessage.includes("invalid login credentials")) {
+        setAuthError("Invalid login credentials. This usually means the user does not exist, the password is wrong, or the email was not confirmed. Create a new test user or reset the password, then try again.");
       } else if (loginMode === "signIn" && errorMessage.includes("Email not confirmed")) {
         setAuthError("Please confirm your email before logging in");
-      } else if (errorMessage.includes("Invalid login credentials")) {
-        console.log("LOGIN FAILED: user may not exist, password may be wrong, or email may be unconfirmed:", email);
-        setAuthError("Invalid login. Check your email and password. If you deleted this test user, create the account again.");
+      } else if (lowerErrorMessage.includes("invalid login credentials")) {
+        setAuthError("Invalid login credentials. This usually means the user does not exist, the password is wrong, or the email was not confirmed. Create a new test user or reset the password, then try again.");
       } else if (lowerErrorMessage.includes("rate limit") || lowerErrorMessage.includes("email rate limit exceeded")) {
         setAuthError("Too many email attempts. Please wait a few minutes before trying again, or continue as guest for now.");
       } else {
@@ -1507,7 +1859,7 @@ export default function App() {
   };
 
   const handleResendConfirmationEmail = async () => {
-    const email = loginForm.username.trim();
+    const email = loginForm.username.trim().toLowerCase();
 
     if (!email) {
       setAuthError("Enter your email first, then resend the confirmation link.");
@@ -1640,6 +1992,7 @@ export default function App() {
     };
 
     const bootstrapAuth = async () => {
+      console.info("AUTH BOOTSTRAP START");
       setIsAuthLoading(true);
 
       try {
@@ -1654,11 +2007,15 @@ export default function App() {
         const user = data?.session?.user || null;
 
         if (user) {
+          console.info("AUTH BOOTSTRAP SESSION FOUND", {
+            authUserId: user?.id || null,
+          });
           setAuthUser(user);
           localStorage.removeItem("currentUserProfile");
           setCurrentUserProfile(null);
           await loadAuthProfileWithRecovery(user);
         } else {
+          console.info("AUTH BOOTSTRAP NO SESSION");
           setAuthUser(null);
           loadProfileFromLocalStorage({ guestOnly: true });
         }
@@ -1684,6 +2041,8 @@ export default function App() {
         if (isMounted) {
           setIsAuthLoading(false);
           setIsCheckingProfile(false);
+          setHasCompletedInitialBootstrap(true);
+          console.info("AUTH BOOTSTRAP COMPLETE");
         }
       }
     };
@@ -1694,6 +2053,11 @@ export default function App() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (_event, session) => {
       const user = session?.user || null;
+      console.info("AUTH STATE CHANGE", {
+        event: _event || null,
+        authUserId: user?.id || null,
+        hasSession: Boolean(session),
+      });
       setAuthUser(user);
 
       if (user) {
@@ -1719,20 +2083,168 @@ export default function App() {
       if (!savedShoppingList) return;
       const parsedShoppingList = JSON.parse(savedShoppingList);
       if (Array.isArray(parsedShoppingList)) {
-        setShoppingListItems(parsedShoppingList);
+        const normalizedShoppingList = parsedShoppingList.map(normalizeCartItemForStoreNeutral).filter(Boolean);
+        setShoppingListItems(normalizedShoppingList);
       } else {
         localStorage.removeItem("shoppingListItems");
       }
     } catch (_) {
       localStorage.removeItem("shoppingListItems");
-      setIsAuthLoading(false);
-      setIsCheckingProfile(false);
+    } finally {
+      setHasHydratedLocalShoppingList(true);
     }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("shoppingListItems", JSON.stringify(shoppingListItems));
-  }, [shoppingListItems]);
+    if (!hasHydratedLocalShoppingList) return;
+    const normalizedShoppingList = shoppingListItems.map(normalizeCartItemForStoreNeutral).filter(Boolean);
+    localStorage.setItem("shoppingListItems", JSON.stringify(normalizedShoppingList));
+  }, [shoppingListItems, hasHydratedLocalShoppingList]);
+
+  useEffect(() => {
+    if (!hasHydratedLocalShoppingList) return;
+
+    const canUseCloudList = Boolean(
+      authUser?.id &&
+      currentUserProfile?.id &&
+      !currentUserProfile?.is_guest &&
+      String(authUser.id) === String(currentUserProfile.id)
+    );
+
+    console.info("CLOUD ELIGIBILITY CHECK", {
+      hasAuthUser: Boolean(authUser?.id),
+      authUserId: authUser?.id || null,
+      hasProfile: Boolean(currentUserProfile?.id),
+      profileId: currentUserProfile?.id || null,
+      isGuest: Boolean(currentUserProfile?.is_guest),
+      idsMatch: String(authUser?.id || "") === String(currentUserProfile?.id || ""),
+      canUseCloudList: canUseSavedShoppingList(),
+    });
+
+    if (!canUseCloudList) {
+      cloudShoppingListLoadedForUserRef.current = null;
+      cloudShoppingListReadyRef.current = false;
+      setIsCloudShoppingListReady(false);
+      return;
+    }
+
+    const userId = String(currentUserProfile.id);
+    if (cloudShoppingListLoadedForUserRef.current === userId) {
+      cloudShoppingListReadyRef.current = true;
+      setIsCloudShoppingListReady(true);
+      return;
+    }
+
+    cloudShoppingListReadyRef.current = false;
+    setIsCloudShoppingListReady(false);
+
+    const runLoad = async () => {
+      try {
+        await loadShoppingListFromCloud();
+      } finally {
+        cloudShoppingListLoadedForUserRef.current = userId;
+        cloudShoppingListReadyRef.current = true;
+        setIsCloudShoppingListReady(true);
+      }
+    };
+
+    runLoad();
+  }, [authUser?.id, currentUserProfile?.id, currentUserProfile?.is_guest, hasHydratedLocalShoppingList]);
+
+  useEffect(() => {
+    if (!hasCompletedInitialBootstrap) return;
+
+    const isSignedInProfile = Boolean(authUser?.id && currentUserProfile && !currentUserProfile?.is_guest);
+    if (!isSignedInProfile) return;
+
+    if (activeScreen === "landing") {
+      setActiveScreen(getSafeResumeScreen());
+    }
+  }, [
+    hasCompletedInitialBootstrap,
+    authUser?.id,
+    currentUserProfile?.id,
+    currentUserProfile?.is_guest,
+    shoppingListItems.length,
+    selectedStore?.id,
+  ]);
+
+  useEffect(() => {
+    if (!hasHydratedLocalShoppingList) return;
+    if (!canUseSavedShoppingList()) return;
+    if (!isCloudShoppingListReady) return;
+    if (shoppingListItems.length === 0 && !cloudShoppingListExplicitClearRef.current) {
+      console.info("CLOUD LIST SKIPPED EMPTY INITIAL SAVE");
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      const allowEmptySave = cloudShoppingListExplicitClearRef.current && shoppingListItems.length === 0;
+      const itemsToSave = latestShoppingListItemsRef.current || [];
+      saveShoppingListToCloud(itemsToSave, { allowEmptySave })
+        .finally(() => {
+          cloudShoppingListExplicitClearRef.current = false;
+        });
+    }, 500);
+
+    return () => clearTimeout(timeoutId);
+  }, [shoppingListItems, authUser?.id, currentUserProfile?.id, currentUserProfile?.is_guest, isCloudShoppingListReady, hasHydratedLocalShoppingList]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshCartPriceInsights = async () => {
+      if (!hasHydratedLocalShoppingList) return;
+
+      const cartItems = latestShoppingListItemsRef.current || [];
+      if (cartItems.length === 0) {
+        setCartPriceInsightsByKey({});
+        return;
+      }
+
+      try {
+        const cartBarcodes = [...new Set(cartItems.map((item) => String(item?.barcode || "").trim()).filter(Boolean))];
+        const cartKeys = [...new Set(cartItems.map((item) => buildComparableProductKey(item)).filter(Boolean))];
+        const cartTerms = [...new Set(cartItems.flatMap((item) => [item?.product_name, item?.name, item?.brand, item?.category, item?.size_value, item?.size_unit, item?.display_size]).map(normalizeComparableText).filter(Boolean))];
+
+        const priceRows = await fetchComparableProductLocationRows({
+          barcodes: cartBarcodes,
+          canonicalKeys: cartKeys,
+          terms: cartTerms,
+        });
+
+        if (cancelled) return;
+        setCartPriceInsightsByKey(buildPriceObservationIndex(priceRows));
+      } catch (err) {
+        if (!cancelled) {
+          console.warn("SHOPPING LIST PRICE INTELLIGENCE WARNING:", err?.message || err);
+          setCartPriceInsightsByKey({});
+        }
+      }
+    };
+
+    refreshCartPriceInsights();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [shoppingListItems, hasHydratedLocalShoppingList, selectedStore?.id]);
+
+  useEffect(() => {
+    const trimmedTerm = String(catalogSearchTerm || "").trim();
+    if (trimmedTerm.length < 2) {
+      setCatalogSearchResults([]);
+      setCatalogSearchMessage("");
+      setIsSearchingCatalog(false);
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      searchSharedCatalogItems(trimmedTerm);
+    }, 300);
+
+    return () => clearTimeout(timeoutId);
+  }, [catalogSearchTerm, selectedStore?.id]);
 
   // Reset shopping route when the selected store changes so stale aisle data is not shown.
   useEffect(() => {
@@ -1991,10 +2503,39 @@ export default function App() {
       )
     : nearbyStores;
 
+  const getSafeResumeScreen = () => {
+    if (shoppingListItems.length > 0) return "cart";
+    if (selectedStore?.id) return "store";
+    return "store";
+  };
+
   const calculateCartTotal = (cart) => {
     return (cart || []).reduce((sum, item) => {
-      const price = Number(item?.avg_price ?? item?.price);
-      return Number.isNaN(price) || price <= 0 ? sum : sum + price;
+      const itemKey = buildComparableProductKey(item);
+      const routeBarcode = String(item?.barcode || "").trim();
+      const selectedStoreId = String(selectedStore?.id || "").trim();
+
+      if (shoppingMode && selectedStoreId && routeBarcode) {
+        const routeLocation = storeRouteLocations[routeBarcode] || null;
+        const locationStoreId = String(routeLocation?.store_id || "").trim();
+        if (routeLocation && locationStoreId === selectedStoreId) {
+          const routePrice = Number(routeLocation?.avg_price ?? routeLocation?.price);
+          if (Number.isFinite(routePrice) && routePrice > 0) {
+            return sum + routePrice;
+          }
+        }
+      }
+
+      const priceInsights = itemKey ? cartPriceInsightsByKey[itemKey] || null : null;
+      const cheapestRow = priceInsights?.cheapestRow || null;
+      const cheapestPrice = Number(cheapestRow?.avg_price ?? cheapestRow?.price);
+      if (Number.isFinite(cheapestPrice) && cheapestPrice > 0) {
+        return sum + cheapestPrice;
+      }
+
+      const lastSeenLocation = item?.last_seen_location || null;
+      const fallbackPrice = Number(lastSeenLocation?.avg_price ?? lastSeenLocation?.price ?? item?.avg_price ?? item?.price);
+      return Number.isNaN(fallbackPrice) || fallbackPrice <= 0 ? sum : sum + fallbackPrice;
     }, 0);
   };
 
@@ -2003,14 +2544,15 @@ export default function App() {
   // smartCartItems: used for general cart display (all items, store-agnostic)
   const smartCartItems = shoppingListItems
     .map((item, originalIndex) => {
-      const aisleText = String(item?.aisle || "").trim();
-      const confidenceScore = Number(item?.confidence_score || 0);
+      const lastSeenLocation = item?.last_seen_location || null;
+      const aisleText = String(lastSeenLocation?.aisle || "").trim();
+      const confidenceScore = Number(lastSeenLocation?.confidence_score || 0);
       return {
         product_name: item?.product_name || "",
         brand: item?.brand || "",
         aisle: aisleText,
-        section: item?.section || "",
-        shelf: item?.shelf || "",
+        section: lastSeenLocation?.section || "",
+        shelf: lastSeenLocation?.shelf || "",
         confidence_score: Number.isFinite(confidenceScore) ? confidenceScore : 0,
         isKnownLocation: Boolean(aisleText),
         needsContribution: !aisleText,
@@ -2043,10 +2585,6 @@ export default function App() {
       const routeLocationStoreId = String(rawRouteLocation?.store_id || "").trim();
       const routeLocation = rawRouteLocation && routeLocationStoreId === selectedStoreId ? rawRouteLocation : null;
 
-      // Priority 2: fall back to cart item's own location only when store_id matches.
-      const itemStoreId = String(item?.store_id || "").trim();
-      const itemStoreMatches = selectedStoreId && itemStoreId === selectedStoreId;
-
       let aisleText = "";
       let section = "";
       let shelf = "";
@@ -2057,11 +2595,6 @@ export default function App() {
         section = routeLocation.section || "";
         shelf = routeLocation.shelf || "";
         confidenceScore = Number(routeLocation.confidence_score || 0);
-      } else if (itemStoreMatches) {
-        aisleText = String(item?.aisle || "").trim();
-        section = item?.section || "";
-        shelf = item?.shelf || "";
-        confidenceScore = Number(item?.confidence_score || 0);
       }
 
       return {
@@ -2072,8 +2605,8 @@ export default function App() {
         shelf,
         confidence_score: Number.isFinite(confidenceScore) ? confidenceScore : 0,
         routeLocation,
-        isKnownLocation: Boolean(aisleText),
-        needsContribution: !aisleText,
+        isKnownLocation: Boolean(routeLocation),
+        needsContribution: !routeLocation,
         originalIndex,
         item,
       };
@@ -2220,34 +2753,48 @@ export default function App() {
   const normalizeMatchValue = (value) => String(value || "").trim().toLowerCase();
 
   const doesCartItemMatchProduct = (item, productLike) => {
-    const targetBarcode = String(productLike?.barcode || "").trim();
-    const itemBarcode = String(item?.barcode || "").trim();
-
-    if (targetBarcode) {
-      return itemBarcode === targetBarcode;
+    const targetKey = buildComparableProductKey(productLike);
+    const itemKey = buildComparableProductKey(item);
+    if (targetKey && itemKey && targetKey === itemKey) {
+      return true;
     }
 
-    const targetName = normalizeMatchValue(productLike?.product_name || productLike?.name);
-    const targetStoreId = String(productLike?.store_id || "").trim();
+    const targetBarcode = String(productLike?.barcode || "").trim();
+    const itemBarcode = String(item?.barcode || "").trim();
+    if (targetBarcode && itemBarcode && targetBarcode === itemBarcode) {
+      return true;
+    }
 
-    const itemName = normalizeMatchValue(item?.product_name);
-    const itemStoreId = String(item?.store_id || "").trim();
+    const targetName = normalizeComparableText(productLike?.product_name || productLike?.name);
+    const targetBrand = normalizeComparableText(productLike?.brand);
+    const targetSizeValue = normalizeComparableText(productLike?.size_value);
+    const targetSizeUnit = normalizeComparableText(productLike?.size_unit);
+    const targetDisplaySize = normalizeComparableText(productLike?.display_size);
+
+    const itemName = normalizeComparableText(item?.product_name || item?.name);
+    const itemBrand = normalizeComparableText(item?.brand);
+    const itemSizeValue = normalizeComparableText(item?.size_value);
+    const itemSizeUnit = normalizeComparableText(item?.size_unit);
+    const itemDisplaySize = normalizeComparableText(item?.display_size);
 
     if (!targetName) return false;
 
-    return itemName === targetName && itemStoreId === targetStoreId;
+    return (
+      itemName === targetName &&
+      itemBrand === targetBrand &&
+      (itemSizeValue === targetSizeValue || itemDisplaySize === targetDisplaySize) &&
+      itemSizeUnit === targetSizeUnit
+    );
   };
 
   const currentProductBarcode = product?.barcode || barcode;
   const currentProductName = product?.name || "";
   const currentProductBrand = product?.brand || "";
-  const currentProductStoreId = selectedStore?.id || "";
   const isCurrentProductInCart = shoppingListItems.some((item) =>
     doesCartItemMatchProduct(item, {
       barcode: currentProductBarcode,
       product_name: currentProductName,
       brand: currentProductBrand,
-      store_id: currentProductStoreId,
     })
   );
   const effectiveScreen = activePanel === "location" ? "location" : activeScreen;
@@ -4329,28 +4876,37 @@ export default function App() {
       setLocationSaved(true);
 
       const locationMemory = {
+        store_id: selectedStore.id,
+        store_name: selectedStore.name,
         aisle,
         section,
         shelf,
-        store_id: selectedStore.id,
-        store_name: selectedStore.name,
-        price_type: bestKnownLocation?.price_type || "each",
+        price: bestKnownLocation?.price ?? null,
         avg_price: bestKnownLocation?.avg_price ?? null,
+        price_type: bestKnownLocation?.price_type || "each",
         notes: bestKnownLocation?.notes ?? "",
+        updated_at: nowIso,
       };
 
-      if (bestKnownLocation?.price != null) {
-        locationMemory.price = bestKnownLocation.price;
-      }
+      const locationMatchCandidate = {
+        barcode,
+        product_name: product?.product_name || product?.name || bestKnownLocation?.product_name || "Unknown product",
+        brand: product?.brand || bestKnownLocation?.brand || "",
+        size_value: product?.size_value || bestKnownLocation?.size_value || "",
+        size_unit: product?.size_unit || bestKnownLocation?.size_unit || "",
+        display_size: product?.display_size || bestKnownLocation?.display_size || "",
+      };
 
       setShoppingListItems((prev) => {
-        const existingIndex = prev.findIndex((item) => item.barcode === barcode);
+        const existingIndex = prev.findIndex((item) =>
+          doesCartItemMatchProduct(item, locationMatchCandidate)
+        );
 
         if (existingIndex >= 0) {
           const next = [...prev];
           next[existingIndex] = {
             ...next[existingIndex],
-            ...locationMemory,
+            last_seen_location: locationMemory,
           };
           return next;
         }
@@ -4363,8 +4919,9 @@ export default function App() {
             brand: product?.brand || "",
             size_value: product?.size_value || "",
             size_unit: product?.size_unit || "",
+            display_size: product?.display_size || "",
             quantity: product?.quantity || "1",
-            ...locationMemory,
+            last_seen_location: locationMemory,
           },
         ];
       });
@@ -4722,8 +5279,62 @@ export default function App() {
         throw new Error(`Could not save product size details: ${productUpdateError.message}`);
       }
 
+      const finalizedProductForLocation = buildFinalProductObject({
+        product,
+        correctionForm,
+        locationForm: {
+          ...locationForm,
+          size_value: sizeValue,
+          size_unit: sizeUnit,
+          quantity,
+          price: enteredPrice,
+          price_type: finalPriceType,
+          price_source: selectedPriceSource,
+          detected_price_unit: selectedDetectedUnit,
+        },
+        savedLocation: {
+          price,
+          price_type: finalPriceType,
+          price_source: selectedPriceSource || null,
+          price_unit_detected: selectedDetectedUnit || "unknown",
+          avg_price: nextAvgPrice,
+          price_count: nextPriceCount,
+          price_confidence: weightedPriceConfidence,
+          confidence_score: weightedConfidenceScore,
+          notes: notes || null,
+          source: submissionMethod || "manual",
+          ai_confidence: aiConfidenceForWeight,
+          photo_evidence_count: hasPhotoEvidence ? 1 : 0,
+        },
+        submissionMethod,
+        barcodeValue,
+      });
+      const finalizedLocationProductKey =
+        buildComparableProductKey(finalizedProductForLocation) ||
+        buildComparableProductKey({
+          barcode: barcodeValue,
+          product_name: finalizedProductForLocation?.product_name || finalizedProductForLocation?.name || product?.name || "",
+          brand: finalizedProductForLocation?.brand || product?.brand || "",
+          size_value: sizeValue || finalizedProductForLocation?.size_value || "",
+          size_unit: sizeUnit || finalizedProductForLocation?.size_unit || "",
+          display_size: finalizedProductForLocation?.display_size || "",
+        });
+
+      console.info("LOCATION PRODUCT KEY", {
+        productName: finalizedProductForLocation?.product_name || finalizedProductForLocation?.name || null,
+        barcode: barcodeValue,
+        productKey: finalizedLocationProductKey || null,
+      });
+
       const locationPayload = {
         barcode: barcodeValue,
+        product_name: finalizedProductForLocation?.product_name || finalizedProductForLocation?.name || product?.name || null,
+        brand: finalizedProductForLocation?.brand || product?.brand || null,
+        category: finalizedProductForLocation?.category || correctionForm?.category || null,
+        size_value: sizeValue || finalizedProductForLocation?.size_value || null,
+        size_unit: sizeUnit || finalizedProductForLocation?.size_unit || null,
+        display_size: finalizedProductForLocation?.display_size || null,
+        canonical_product_key: finalizedLocationProductKey || null,
         aisle,
         section,
         shelf,
@@ -4737,6 +5348,7 @@ export default function App() {
         source: submissionMethod || "manual",
         last_confirmed_at: nowIso,
         store_id: selectedStore.id,
+        store_name: selectedStore.name,
       };
 
       if (selectedPriceSource) {
@@ -4765,7 +5377,7 @@ export default function App() {
         )
         .single();
 
-      const hasOptionalPriceFieldError = /price_source|price_unit_detected|ai_confidence|photo_evidence_count|last_user_trust_score|last_user|trust_score|column|schema cache/i.test(
+      const hasOptionalPriceFieldError = /price_source|price_unit_detected|ai_confidence|photo_evidence_count|last_user_trust_score|last_user|trust_score|canonical_product_key|product_name|brand|category|size_value|size_unit|display_size|store_name|column|schema cache/i.test(
         String(locationUpsertResult.error?.message || "")
       );
 
@@ -4968,6 +5580,13 @@ export default function App() {
 
       const savedLocation = {
         barcode: barcodeValue,
+        product_name: finalizedProductForLocation?.product_name || finalizedProductForLocation?.name || product?.name || null,
+        brand: finalizedProductForLocation?.brand || product?.brand || null,
+        category: finalizedProductForLocation?.category || correctionForm?.category || null,
+        size_value: sizeValue || finalizedProductForLocation?.size_value || null,
+        size_unit: sizeUnit || finalizedProductForLocation?.size_unit || null,
+        display_size: finalizedProductForLocation?.display_size || null,
+        canonical_product_key: finalizedLocationProductKey || null,
         aisle,
         section,
         shelf,
@@ -4994,23 +5613,40 @@ export default function App() {
       setActivePanel(null);
 
       // Use the single authoritative resolver so cart always gets cleaned data.
-      const finalizedProduct = buildFinalProductObject({
+      const finalizedProductForCartBase = buildFinalProductObject({
         product,
         correctionForm,
-        locationForm: { ...locationForm, size_value: sizeValue, size_unit: sizeUnit, quantity },
+        locationForm: {
+          ...locationForm,
+          size_value: sizeValue,
+          size_unit: sizeUnit,
+          quantity,
+          price: enteredPrice,
+          price_type: finalPriceType,
+          price_source: selectedPriceSource,
+          detected_price_unit: selectedDetectedUnit,
+        },
         savedLocation,
         submissionMethod,
         barcodeValue,
       });
+      const finalizedProductForCart = {
+        ...finalizedProductForCartBase,
+        canonical_product_key:
+          savedLocation?.canonical_product_key ||
+          finalizedLocationProductKey ||
+          buildComparableProductKey(finalizedProductForCartBase) ||
+          null,
+      };
 
       const rawAiIdentityScore = Number(aiIdentityConfidence ?? 0);
       const normalizedAiIdentityScore = rawAiIdentityScore > 1 ? (rawAiIdentityScore / 100) : rawAiIdentityScore;
       const shouldBlockForLowAiIdentity =
-        !Boolean(finalizedProduct?.product_identity_confirmed) &&
+        !Boolean(finalizedProductForCart?.product_identity_confirmed) &&
         normalizedAiIdentityScore < 0.7;
       if (shouldBlockForLowAiIdentity) {
         const reviewProduct = {
-          ...finalizedProduct,
+          ...finalizedProductForCart,
           name: "Review needed",
           product_name: "Review needed",
           needs_review: true,
@@ -5020,9 +5656,9 @@ export default function App() {
         setProduct(reviewProduct);
         setCorrectionForm((prev) => ({
           ...prev,
-          product_name: String(finalizedProduct?.product_name || finalizedProduct?.name || "").trim() || "Review needed",
-          brand: String(finalizedProduct?.brand || "").trim(),
-          category: String(finalizedProduct?.category || "").trim(),
+          product_name: String(finalizedProductForCart?.product_name || finalizedProductForCart?.name || "").trim() || "Review needed",
+          brand: String(finalizedProductForCart?.brand || "").trim(),
+          category: String(finalizedProductForCart?.category || "").trim(),
         }));
         setAwaitingProductConfirmation(true);
         setShowAiSummaryCard(true);
@@ -5032,10 +5668,10 @@ export default function App() {
         return;
       }
 
-      const finalNameCandidate = String(finalizedProduct?.product_name || finalizedProduct?.name || "").trim();
+      const finalNameCandidate = String(finalizedProductForCart?.product_name || finalizedProductForCart?.name || "").trim();
       if (!isValidProductName(finalNameCandidate)) {
         const reviewProduct = {
-          ...finalizedProduct,
+          ...finalizedProductForCart,
           name: "Review needed",
           product_name: "Review needed",
           needs_review: true,
@@ -5046,8 +5682,8 @@ export default function App() {
         setCorrectionForm((prev) => ({
           ...prev,
           product_name: finalNameCandidate || "Review needed",
-          brand: String(finalizedProduct?.brand || "").trim(),
-          category: String(finalizedProduct?.category || "").trim(),
+          brand: String(finalizedProductForCart?.brand || "").trim(),
+          category: String(finalizedProductForCart?.category || "").trim(),
         }));
         setAwaitingProductConfirmation(true);
         setShowAiSummaryCard(false);
@@ -5057,13 +5693,13 @@ export default function App() {
         return;
       }
 
-      setProduct(finalizedProduct);
+      setProduct(finalizedProductForCart);
       console.log("CART INSERT IMAGE CHECK:", {
-        image: finalizedProduct.image,
-        verified: finalizedProduct.verified_image_url,
-        cart: finalizedProduct.cart_image_url,
+        image: finalizedProductForCart.image,
+        verified: finalizedProductForCart.verified_image_url,
+        cart: finalizedProductForCart.cart_image_url,
       });
-      await handleAddToShoppingList(finalizedProduct, {
+      await handleAddToShoppingList(finalizedProductForCart, {
         ...locationForm,
         ...savedLocation,
         store_id: selectedStore.id,
@@ -5116,6 +5752,476 @@ export default function App() {
     } catch (err) {
       console.error("STORE SEARCH EXCEPTION:", err);
     }
+  };
+
+  const searchSharedCatalogItems = async (term) => {
+    const trimmedTerm = String(term || "").trim();
+    if (trimmedTerm.length < 2) {
+      setCatalogSearchResults([]);
+      setCatalogSearchMessage("");
+      setIsSearchingCatalog(false);
+      return;
+    }
+
+    setIsSearchingCatalog(true);
+    setCatalogSearchMessage("");
+
+    try {
+      const safeTerm = trimmedTerm.replace(/,/g, " ").trim();
+      const wildcardTerm = `%${safeTerm}%`;
+
+      const isMissingOptionalColumnError = (err) => {
+        const message = String(err?.message || "").toLowerCase();
+        const details = String(err?.details || "").toLowerCase();
+        const hint = String(err?.hint || "").toLowerCase();
+        const code = String(err?.code || "").toLowerCase();
+        const combined = `${message} ${details} ${hint} ${code}`;
+
+        return (
+          combined.includes("column") ||
+          combined.includes("schema cache") ||
+          combined.includes("does not exist") ||
+          combined.includes("could not find") ||
+          combined.includes("pgrst") ||
+          combined.includes("42703")
+        );
+      };
+
+      let { data: catalogRows, error: catalogError } = await supabase
+        .from("catalog_products")
+        .select("id, barcode, product_name, brand, category, image_url, verified_image_url, size_value, size_unit, quantity, source")
+        .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},category.ilike.${wildcardTerm}`)
+        .limit(25);
+
+      if (catalogError && isMissingOptionalColumnError(catalogError)) {
+        const fallbackResult = await supabase
+          .from("catalog_products")
+          .select("id, barcode, product_name, brand, image_url, size_value, size_unit, quantity, source")
+          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm}`)
+          .limit(25);
+
+        catalogRows = fallbackResult.data;
+        catalogError = fallbackResult.error;
+      }
+
+      if (catalogError) {
+        console.warn("CATALOG SEARCH WARNING:", catalogError.message);
+        setCatalogSearchResults([]);
+        setCatalogSearchMessage("No catalog matches yet.");
+        return;
+      }
+
+      const safeRows = Array.isArray(catalogRows) ? catalogRows : [];
+      const searchTerms = [
+        safeTerm,
+        ...safeRows.flatMap((row) => [row?.product_name, row?.brand, row?.category]),
+      ].map(normalizeComparableText).filter(Boolean);
+      const barcodes = [...new Set(safeRows.map((row) => String(row?.barcode || "").trim()).filter(Boolean))];
+
+      let locationRows = [];
+      try {
+        locationRows = await fetchComparableProductLocationRows({ terms: searchTerms, barcodes });
+      } catch (locationMergeError) {
+        console.warn("CATALOG LOCATION MERGE WARNING:", locationMergeError?.message || locationMergeError);
+      }
+
+      const locationIndex = buildPriceObservationIndex(locationRows);
+      const mergedMap = new Map();
+
+      const addMergedRow = (row, source = "catalog") => {
+        const key = buildComparableProductKey(row) || String(row?.barcode || "").trim() || `${normalizeComparableText(row?.product_name)}|${normalizeComparableText(row?.brand)}`;
+        if (!key) return;
+
+        const summary = locationIndex[key] || null;
+        const cheapestRow = summary?.cheapestRow || null;
+        const bestLocation = cheapestRow || null;
+        const hasImage = Boolean(row?.verified_image_url || row?.image_url || cheapestRow?.verified_image_url || cheapestRow?.image_url);
+        const otherKnownPrices = summary
+          ? Object.entries(summary.rowsByStore || {})
+              .map(([, storeRow]) => storeRow)
+              .filter((storeRow) => storeRow !== cheapestRow)
+              .map((storeRow) => ({
+                store_id: storeRow?.store_id || null,
+                store_name: storeRow?.stores?.name || storeRow?.store_name || "Unknown store",
+                price: Number(storeRow?.avg_price ?? storeRow?.price ?? 0) || null,
+                price_type: storeRow?.price_type || "each",
+              }))
+          : [];
+
+        const merged = {
+          ...row,
+          source,
+          selected_store_location: bestLocation,
+          cheapest_known_store_name: cheapestRow?.stores?.name || cheapestRow?.store_name || null,
+          cheapest_known_price: Number(cheapestRow?.avg_price ?? cheapestRow?.price ?? 0) || null,
+          other_known_prices: otherKnownPrices,
+          aisle: bestLocation?.aisle || row?.aisle || "",
+          section: bestLocation?.section || row?.section || "",
+          shelf: bestLocation?.shelf || row?.shelf || "",
+          price: bestLocation?.price ?? row?.price ?? null,
+          avg_price: bestLocation?.avg_price ?? row?.avg_price ?? null,
+          price_type: bestLocation?.price_type || row?.price_type || "each",
+          confidence_score: Number(bestLocation?.confidence_score || row?.confidence_score || 0),
+          hasImage,
+          hasSelectedStoreLocation: Boolean(bestLocation?.aisle || bestLocation?.section || bestLocation?.shelf),
+        };
+
+        const existing = mergedMap.get(key);
+        if (!existing || Boolean(merged.hasSelectedStoreLocation) || Boolean(merged.hasImage && !existing.hasImage)) {
+          mergedMap.set(key, merged);
+        }
+      };
+
+      safeRows.forEach((row) => addMergedRow(row, "catalog"));
+
+      Object.entries(locationIndex).forEach(([key, summary]) => {
+        if (mergedMap.has(key)) return;
+        const bestLocation = summary?.cheapestRow || null;
+        if (!bestLocation) return;
+
+        addMergedRow({
+          product_name: bestLocation?.product_name || "Unknown product",
+          brand: bestLocation?.brand || "",
+          category: bestLocation?.category || "",
+          size_value: bestLocation?.size_value || "",
+          size_unit: bestLocation?.size_unit || "",
+          display_size: bestLocation?.display_size || "",
+          barcode: bestLocation?.barcode || "",
+          image_url: null,
+          verified_image_url: null,
+          canonical_product_key: key,
+        }, "location");
+      });
+
+      const mergedResults = Array.from(mergedMap.values()).sort((a, b) => {
+        if (a.hasSelectedStoreLocation !== b.hasSelectedStoreLocation) {
+          return a.hasSelectedStoreLocation ? -1 : 1;
+        }
+
+        if (a.cheapest_known_price != null && b.cheapest_known_price != null && a.cheapest_known_price !== b.cheapest_known_price) {
+          return a.cheapest_known_price - b.cheapest_known_price;
+        }
+
+        if (a.hasImage !== b.hasImage) {
+          return a.hasImage ? -1 : 1;
+        }
+
+        return String(a?.product_name || "").localeCompare(String(b?.product_name || ""), undefined, {
+          sensitivity: "base",
+          numeric: true,
+        });
+      });
+
+      setCatalogSearchResults(mergedResults);
+      setCatalogSearchMessage(mergedResults.length ? "" : "No catalog matches yet.");
+    } catch (err) {
+      console.warn("CATALOG SEARCH EXCEPTION:", err?.message || err);
+      setCatalogSearchResults([]);
+      setCatalogSearchMessage("No catalog matches yet.");
+    } finally {
+      setIsSearchingCatalog(false);
+    }
+  };
+
+  const canUseSavedShoppingList = () => {
+    return Boolean(
+      authUser?.id &&
+      currentUserProfile?.id &&
+      !currentUserProfile?.is_guest &&
+      String(authUser.id) === String(currentUserProfile.id)
+    );
+  };
+
+  const isAuthDebugBannerEnabled = Boolean(
+    import.meta.env.DEV || window.localStorage.getItem("mvpDebug") === "true"
+  );
+
+  const renderAuthDebugBanner = () => {
+    if (!isAuthDebugBannerEnabled) return null;
+
+    const hasAuthUser = Boolean(authUser?.id);
+    const hasProfile = Boolean(currentUserProfile?.id);
+    const isGuest = Boolean(currentUserProfile?.is_guest);
+    const idsMatch = String(authUser?.id || "") === String(currentUserProfile?.id || "");
+    const canUseCloudList = canUseSavedShoppingList();
+
+    return (
+      <div style={{
+        marginBottom: 12,
+        padding: "10px 12px",
+        borderRadius: 12,
+        border: "1px solid #cbd5e1",
+        background: "#f8fafc",
+        color: "#0f172a",
+        fontSize: 12,
+        lineHeight: 1.5,
+      }}>
+        <div style={{ fontWeight: 900, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.4 }}>Auth Debug</div>
+        <div>authUser present: {hasAuthUser ? "yes" : "no"}</div>
+        <div>profile present: {hasProfile ? "yes" : "no"}</div>
+        <div>guest: {isGuest ? "yes" : "no"}</div>
+        <div>cloud eligible: {canUseCloudList ? "yes" : "no"}</div>
+        <div>ids match: {idsMatch ? "yes" : "no"}</div>
+        <div>activeScreen: {activeScreen}</div>
+      </div>
+    );
+  };
+
+  const normalizeCartItemForStoreNeutral = (item) => {
+    if (!item || typeof item !== "object") return null;
+
+    const existingLastSeen = item.last_seen_location && typeof item.last_seen_location === "object"
+      ? { ...item.last_seen_location }
+      : null;
+    const hadStoreSpecificFields = Boolean(
+      item.store_id ||
+      item.store_name ||
+      item.aisle ||
+      item.section ||
+      item.shelf ||
+      item.price != null ||
+      item.avg_price != null ||
+      item.price_type ||
+      item.price_source ||
+      item.price_unit_detected ||
+      item.confidence_score != null
+    );
+
+    const lastSeen = existingLastSeen ? { ...existingLastSeen } : null;
+    if (hadStoreSpecificFields) {
+      const nextLastSeen = lastSeen || {};
+      if (item.store_id != null && nextLastSeen.store_id == null) nextLastSeen.store_id = item.store_id;
+      if (item.store_name != null && nextLastSeen.store_name == null) nextLastSeen.store_name = item.store_name;
+      if (item.aisle != null && nextLastSeen.aisle == null) nextLastSeen.aisle = item.aisle;
+      if (item.section != null && nextLastSeen.section == null) nextLastSeen.section = item.section;
+      if (item.shelf != null && nextLastSeen.shelf == null) nextLastSeen.shelf = item.shelf;
+      if (item.price != null && nextLastSeen.price == null) nextLastSeen.price = item.price;
+      if (item.avg_price != null && nextLastSeen.avg_price == null) nextLastSeen.avg_price = item.avg_price;
+      if (item.price_type != null && nextLastSeen.price_type == null) nextLastSeen.price_type = item.price_type;
+      if (item.price_source != null && nextLastSeen.price_source == null) nextLastSeen.price_source = item.price_source;
+      if (item.price_unit_detected != null && nextLastSeen.price_unit_detected == null) nextLastSeen.price_unit_detected = item.price_unit_detected;
+      if (item.confidence_score != null && nextLastSeen.confidence_score == null) nextLastSeen.confidence_score = Number(item.confidence_score || 0);
+      if (item.notes && !nextLastSeen.notes) nextLastSeen.notes = item.notes;
+      if (!nextLastSeen.updated_at) nextLastSeen.updated_at = new Date().toISOString();
+    }
+
+    const normalized = {
+      cart_item_id: item.cart_item_id || null,
+      id: item.id || null,
+      catalog_id: item.catalog_id || null,
+      barcode: item.barcode || "",
+      product_name: item.product_name || "",
+      name: item.name || item.product_name || "",
+      brand: item.brand || "",
+      category: item.category || "",
+      size_value: item.size_value || "",
+      size_unit: item.size_unit || "",
+      quantity: item.quantity || "1",
+      display_size: item.display_size || "",
+      secondary_size_value: item.secondary_size_value || "",
+      secondary_size_unit: item.secondary_size_unit || "",
+      image: item.image || null,
+      cart_image_url: item.cart_image_url || item.image || null,
+      verified_image_url: item.verified_image_url || null,
+      image_url: item.image_url || null,
+      source: item.source || "manual",
+      notes: item.notes || "",
+      needs_review: Boolean(item.needs_review),
+      brand_lock: Boolean(item.brand_lock),
+      found_in_trip: Boolean(item.found_in_trip),
+      found_at: item.found_at || null,
+      price_badge_source: item.price_badge_source || null,
+    };
+
+    if (lastSeen && Object.keys(lastSeen).length > 0) {
+      normalized.last_seen_location = lastSeen;
+    }
+
+    return normalized;
+  };
+
+  const sanitizeShoppingListForSave = (items) => {
+    if (!Array.isArray(items)) return [];
+
+    return items.map(normalizeCartItemForStoreNeutral).filter(Boolean);
+  };
+
+  const isRlsOrTableAccessError = (err) => {
+    const message = String(err?.message || "").toLowerCase();
+    const details = String(err?.details || "").toLowerCase();
+    const hint = String(err?.hint || "").toLowerCase();
+    const code = String(err?.code || "").toLowerCase();
+    const combined = `${message} ${details} ${hint} ${code}`;
+
+    return (
+      combined.includes("row-level security") ||
+      combined.includes("permission denied") ||
+      combined.includes("42501") ||
+      combined.includes("42p01") ||
+      combined.includes("relation \"user_shopping_lists\"") ||
+      combined.includes("does not exist")
+    );
+  };
+
+  const saveShoppingListToCloud = async (nextItems, { allowEmptySave = false } = {}) => {
+    if (!canUseSavedShoppingList()) return;
+
+    try {
+      const sanitizedItems = sanitizeShoppingListForSave(nextItems);
+      if (sanitizedItems.length === 0 && !allowEmptySave) {
+        console.info("CLOUD LIST SKIPPED EMPTY INITIAL SAVE");
+        return;
+      }
+
+      console.info("CLOUD LIST SAVE START", { itemCount: sanitizedItems.length });
+      const { data, error } = await supabase
+        .from("user_shopping_lists")
+        .upsert(
+          {
+            user_profile_id: currentUserProfile.id,
+            list_name: "My Shopping List",
+            list_items: sanitizedItems,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "user_profile_id,list_name" }
+        )
+        .select("id, user_profile_id, list_name, updated_at")
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      console.info("CLOUD LIST SAVE SUCCESS", {
+        itemCount: sanitizedItems.length,
+        savedRow: data,
+      });
+    } catch (err) {
+      const warningLabel = isRlsOrTableAccessError(err)
+        ? "CLOUD LIST RLS OR TABLE ACCESS WARNING"
+        : "SHOPPING LIST CLOUD SAVE WARNING";
+      console.warn(`${warningLabel}:`, err?.message || err);
+    }
+  };
+
+  const handleManualCloudListTest = async () => {
+    console.info("MANUAL CLOUD TEST START");
+    console.info("MANUAL CLOUD TEST ELIGIBILITY", {
+      canUseCloudList: canUseSavedShoppingList(),
+      authUserId: authUser?.id || null,
+      profileId: currentUserProfile?.id || null,
+      cartCount: shoppingListItems.length,
+    });
+
+    if (!canUseSavedShoppingList()) {
+      setToast({ message: "Cloud list unavailable: sign in first.", type: "error" });
+      return;
+    }
+
+    await saveShoppingListToCloud(shoppingListItems, { allowEmptySave: shoppingListItems.length === 0 });
+    await loadShoppingListFromCloud();
+    console.info("MANUAL CLOUD TEST COMPLETE");
+  };
+
+  const loadShoppingListFromCloud = async () => {
+    if (!canUseSavedShoppingList()) return;
+
+    try {
+      console.info("CLOUD LIST LOAD START", { userProfileId: currentUserProfile.id });
+      const { data, error } = await supabase
+        .from("user_shopping_lists")
+        .select("list_items")
+        .eq("user_profile_id", currentUserProfile.id)
+        .eq("list_name", "My Shopping List")
+        .maybeSingle();
+
+      if (error) {
+        const warningLabel = isRlsOrTableAccessError(error)
+          ? "CLOUD LIST RLS OR TABLE ACCESS WARNING"
+          : "SHOPPING LIST CLOUD LOAD WARNING";
+        console.warn(`${warningLabel}:`, error.message);
+        return;
+      }
+
+      const cloudItems = Array.isArray(data?.list_items) ? data.list_items : [];
+      const normalizedCloudItems = cloudItems.map(normalizeCartItemForStoreNeutral).filter(Boolean);
+      const localItemsAtLoad = latestShoppingListItemsRef.current || [];
+
+      if (normalizedCloudItems.length > 0 && localItemsAtLoad.length === 0) {
+        setShoppingListItems(normalizedCloudItems);
+        localStorage.setItem("shoppingListItems", JSON.stringify(normalizedCloudItems));
+      } else if (normalizedCloudItems.length === 0 && localItemsAtLoad.length > 0) {
+        await saveShoppingListToCloud(localItemsAtLoad, { allowEmptySave: false });
+      } else if (normalizedCloudItems.length > 0 && localItemsAtLoad.length > 0) {
+        console.info("CLOUD LIST BOTH LOCAL AND CLOUD EXIST - KEEPING LOCAL");
+      }
+
+      console.info("CLOUD LIST LOAD SUCCESS", {
+        cloudCount: normalizedCloudItems.length,
+        localCount: localItemsAtLoad.length,
+      });
+    } catch (err) {
+      const warningLabel = isRlsOrTableAccessError(err)
+        ? "CLOUD LIST RLS OR TABLE ACCESS WARNING"
+        : "SHOPPING LIST CLOUD LOAD WARNING";
+      console.warn(`${warningLabel}:`, err?.message || err);
+    }
+  };
+
+  const addSharedCatalogResultToCart = async (result) => {
+    const productName = String(result?.product_name || "").trim();
+    const barcode = String(result?.barcode || "").trim();
+
+    if (!productName && !barcode) {
+      setError("Could not add this item.");
+      setToast({ message: "Could not add this item.", type: "error" });
+      return;
+    }
+
+    const productToAdd = {
+      catalog_id: result?.catalog_id || result?.id || null,
+      id: result?.id || Date.now(),
+      barcode,
+      name: productName,
+      product_name: productName,
+      brand: result?.brand || "",
+      category: result?.category || "",
+      size_value: result?.size_value || "",
+      size_unit: result?.size_unit || "",
+      quantity: result?.quantity || "1",
+      image: result?.cart_image_url || result?.verified_image_url || result?.image_url || null,
+      cart_image_url: result?.cart_image_url || result?.verified_image_url || result?.image_url || null,
+      verified_image_url: result?.verified_image_url || null,
+      image_url: result?.image_url || null,
+      source: "shared_catalog",
+    };
+
+    const hasSelectedStoreLocation = Boolean(
+      result?.aisle ||
+      result?.section ||
+      result?.shelf ||
+      result?.price != null ||
+      result?.avg_price != null ||
+      result?.selected_store_location
+    );
+
+    const selectedLocation = result?.selected_store_location || {};
+    const lastSeenLocation = hasSelectedStoreLocation
+      ? {
+          store_id: selectedStore?.id || selectedLocation?.store_id || null,
+          store_name: selectedStore?.name || "",
+          aisle: result?.aisle || selectedLocation?.aisle || "",
+          section: result?.section || selectedLocation?.section || "",
+          shelf: result?.shelf || selectedLocation?.shelf || "",
+          price: result?.price ?? selectedLocation?.price ?? null,
+          avg_price: result?.avg_price ?? selectedLocation?.avg_price ?? null,
+          price_type: result?.price_type || selectedLocation?.price_type || "each",
+          confidence_score: Number(result?.confidence_score ?? selectedLocation?.confidence_score ?? 0),
+        }
+      : null;
+
+    await handleAddToShoppingList(productToAdd, lastSeenLocation);
+    setToast({ message: "Added from shared catalog.", type: "success" });
   };
 
   // ============================================================================
@@ -5451,79 +6557,134 @@ export default function App() {
     };
 
     const itemBarcode = productToAdd.barcode || barcode || null;
-    const itemStoreId = locationToUse?.store_id || selectedStore?.id || "";
     const itemProductName = resolveBestCartName(productToAdd, null);
     const itemBrand = String(productToAdd.brand || "").trim();
+    const itemComparableKey = buildComparableProductKey(productToAdd);
+
+    console.info("CART PRODUCT KEY", {
+      productName: itemProductName,
+      barcode: itemBarcode || null,
+      productKey: itemComparableKey || null,
+    });
 
     const hasLocation = Boolean(locationToUse?.aisle || locationToUse?.section || locationToUse?.shelf);
 
-    if (
-      shoppingListItems.some((item) =>
-        doesCartItemMatchProduct(item, {
-          barcode: itemBarcode,
-          product_name: itemProductName,
-          store_id: itemStoreId,
-        })
-      )
-    ) {
+    const buildLastSeenLocation = () => {
+      if (!locationToUse) return null;
+
+      const lastSeen = {
+        store_id: locationToUse?.store_id || selectedStore?.id || null,
+        store_name: locationToUse?.store_name || selectedStore?.name || "",
+        aisle: locationToUse?.aisle || "",
+        section: locationToUse?.section || "",
+        shelf: locationToUse?.shelf || "",
+        confidence_score: locationToUse?.confidence_score ?? null,
+        price: locationToUse?.price ?? null,
+        avg_price: locationToUse?.avg_price ?? null,
+        price_type: locationToUse?.price_type ?? "each",
+        product_name: itemProductName,
+        brand: itemBrand || null,
+        category: productToAdd?.category || null,
+        size_value: productToAdd?.size_value || "",
+        size_unit: productToAdd?.size_unit || "",
+        display_size: productToAdd?.display_size || "",
+        canonical_product_key: itemComparableKey || null,
+        notes: locationToUse?.notes ?? "",
+        updated_at: new Date().toISOString(),
+      };
+
+      const hasMetadata =
+        Boolean(lastSeen.store_id) ||
+        Boolean(lastSeen.aisle) ||
+        Boolean(lastSeen.section) ||
+        Boolean(lastSeen.shelf) ||
+        lastSeen.price !== null ||
+        lastSeen.avg_price !== null;
+
+      return hasMetadata ? lastSeen : null;
+    };
+
+    const latestLastSeenLocation = buildLastSeenLocation();
+
+    const getMatchStrategy = (item) => {
+      const existingKey = buildComparableProductKey(item);
+      const targetBarcode = String(itemBarcode || "").trim();
+
+      if (itemComparableKey && existingKey && itemComparableKey === existingKey) {
+        return "canonical_product_key";
+      }
+
+      if (targetBarcode && String(item?.barcode || "").trim() === targetBarcode) {
+        return "barcode";
+      }
+
+      const targetFallback = normalizeComparableText([
+        itemProductName,
+        itemBrand,
+        productToAdd?.size_value || "",
+        productToAdd?.size_unit || "",
+      ].filter(Boolean).join(" "));
+      const existingFallback = normalizeComparableText([
+        item?.product_name || item?.name || "",
+        item?.brand || "",
+        item?.size_value || "",
+        item?.size_unit || "",
+      ].filter(Boolean).join(" "));
+
+      if (targetFallback && targetFallback === existingFallback) {
+        return "fallback_identity";
+      }
+
+      return null;
+    };
+
+    const existingMatchIndex = shoppingListItems.findIndex((item) => Boolean(getMatchStrategy(item)));
+
+    if (existingMatchIndex >= 0) {
       setShoppingListItems((prev) =>
         prev.map((item) => {
-          const isMatch = doesCartItemMatchProduct(item, {
-            barcode: itemBarcode,
-            product_name: itemProductName,
-            store_id: itemStoreId,
-          });
+          const isMatch = Boolean(getMatchStrategy(item));
 
           if (!isMatch) return item;
 
           const updatedName = resolveBestCartName(productToAdd, item);
           const resolvedImage = resolveProductImage(productToAdd);
+          const nextImage = item.image || resolvedImage;
+          const nextCartImage = item.cart_image_url || nextImage;
 
           return {
             ...item,
             id: item.id || productToAdd.id || item.cart_item_id,
+            catalog_id: productToAdd.catalog_id || item.catalog_id || null,
             name: updatedName,
             product_name: updatedName,
-            brand: itemBrand || item.brand,
+            canonical_product_key: itemComparableKey || item.canonical_product_key || buildComparableProductKey(item) || null,
+            brand: itemBrand || item.brand || "",
+            category: productToAdd.category || item.category || "",
             source: productToAdd.source || item.source || "manual",
-            size: productToAdd.size ?? productToAdd.size_value ?? item.size ?? item.size_value ?? null,
-            unit: productToAdd.unit ?? productToAdd.size_unit ?? item.unit ?? item.size_unit ?? null,
             size_value: productToAdd.size_value || item.size_value || "",
             size_unit: productToAdd.size_unit || item.size_unit || "",
             display_size: productToAdd.display_size || item.display_size || "",
             secondary_size_value: productToAdd.secondary_size_value || item.secondary_size_value || "",
             secondary_size_unit: productToAdd.secondary_size_unit || item.secondary_size_unit || "",
-            quantity: productToAdd.quantity || item.quantity || "1",
-            notes: locationToUse?.notes ?? productToAdd.notes ?? item.notes ?? "",
-            price: locationToUse?.price ?? productToAdd.price ?? item.price ?? null,
-            avg_price: locationToUse?.avg_price ?? productToAdd.avg_price ?? item.avg_price ?? null,
-            price_type: locationToUse?.price_type ?? productToAdd.price_type ?? item.price_type ?? "each",
-            price_source: locationToUse?.price_source ?? productToAdd.price_source ?? item.price_source ?? null,
-            price_badge_source:
-              locationToUse?.price_badge_source ??
-              productToAdd.price_badge_source ??
-              item.price_badge_source ??
-              (productToAdd.source === "ai" ? "ai" : "manual"),
-            price_unit_detected:
-              locationToUse?.price_unit_detected ??
-              productToAdd.price_unit_detected ??
-              item.price_unit_detected ??
-              "unknown",
-            aisle: locationToUse?.aisle || item.aisle || "",
-            section: locationToUse?.section || item.section || "",
-            shelf: locationToUse?.shelf || item.shelf || "",
-            confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? item.confidence_score ?? 0,
-            store_id: itemStoreId || item.store_id || null,
-            store_name: locationToUse?.store_name || item.store_name || selectedStore?.name || "",
-            image: resolvedImage,
-            cart_image_url: resolvedImage,
+            quantity: item.quantity || productToAdd.quantity || "1",
+            notes: locationToUse ? (item.notes || "") : (productToAdd.notes ?? item.notes ?? ""),
+            last_seen_location: latestLastSeenLocation || item.last_seen_location || null,
+            image: nextImage,
+            cart_image_url: nextCartImage,
             image_url: productToAdd.image_url || item.image_url || null,
             verified_image_url: productToAdd.verified_image_url || item.verified_image_url || null,
-            raw_photo_url: productToAdd.raw_photo_url || item.raw_photo_url || null,
-            category: productToAdd.category || item.category || "",
+            needs_review: Boolean(productToAdd.needs_review || item.needs_review),
           };
         })
       );
+      console.info("CART DEDUPE MERGE RESULT", {
+        productKey: itemComparableKey || null,
+        barcode: itemBarcode || null,
+        matchedIndex: existingMatchIndex,
+        strategy: getMatchStrategy(shoppingListItems[existingMatchIndex]),
+        cartCount: shoppingListItems.length,
+      });
       setToast({ message: "Added to Smart Cart", type: "success" });
       return { added: false, updated: true, hasLocation };
     }
@@ -5533,44 +6694,27 @@ export default function App() {
     const cartItem = {
       cart_item_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       id: productToAdd.id || Date.now(),
+      catalog_id: productToAdd.catalog_id || null,
       name: itemProductName,
       barcode: itemBarcode,
       product_name: itemProductName,
+      canonical_product_key: itemComparableKey || null,
       brand: itemBrand,
       category: productToAdd.category || "",
-      store_id: itemStoreId || null,
-      store_name: locationToUse?.store_name || selectedStore?.name || "",
       source: productToAdd.source || "manual",
-      size: productToAdd.size ?? productToAdd.size_value ?? null,
-      unit: productToAdd.unit ?? productToAdd.size_unit ?? null,
       size_value: productToAdd.size_value || "",
       size_unit: productToAdd.size_unit || "",
       display_size: productToAdd.display_size || "",
       secondary_size_value: productToAdd.secondary_size_value || "",
       secondary_size_unit: productToAdd.secondary_size_unit || "",
       quantity: productToAdd.quantity || "1",
-      notes: locationToUse?.notes ?? productToAdd.notes ?? "",
-      price: locationToUse?.price ?? productToAdd.price ?? null,
-      avg_price: locationToUse?.avg_price ?? productToAdd.avg_price ?? null,
-      price_type: locationToUse?.price_type ?? productToAdd.price_type ?? "each",
-      price_source: locationToUse?.price_source ?? productToAdd.price_source ?? null,
-      price_badge_source:
-        locationToUse?.price_badge_source ??
-        productToAdd.price_badge_source ??
-        (productToAdd.source === "ai" ? "ai" : "manual"),
-      price_unit_detected:
-        locationToUse?.price_unit_detected ?? productToAdd.price_unit_detected ?? "unknown",
-      aisle: locationToUse?.aisle || "",
-      section: locationToUse?.section || "",
-      shelf: locationToUse?.shelf || "",
-      confidence_score: locationToUse?.confidence_score ?? productToAdd.confidence_score ?? 0,
-      brand_lock: false,
+      notes: locationToUse ? "" : (productToAdd.notes ?? ""),
+      last_seen_location: latestLastSeenLocation,
       needs_review: productToAdd.needs_review || false,
       image: resolvedImage,
       cart_image_url: resolvedImage,
       image_url: productToAdd.image_url || null,
       verified_image_url: productToAdd.verified_image_url || null,
-      raw_photo_url: productToAdd.raw_photo_url || null,
     };
 
     console.log("CART IMAGE RESOLUTION:", {
@@ -5590,7 +6734,6 @@ export default function App() {
           barcode: currentProductBarcode,
           product_name: currentProductName,
           brand: currentProductBrand,
-          store_id: currentProductStoreId,
         });
       })
     );
@@ -5629,6 +6772,9 @@ export default function App() {
     ]);
 
     setManualListItemName("");
+    setCatalogSearchTerm("");
+    setCatalogSearchResults([]);
+    setCatalogSearchMessage("");
     setToast({ message: "Item added to shopping list", type: "success" });
   };
 
@@ -5673,7 +6819,7 @@ export default function App() {
   const handleUpdateCartItemLocation = (item) => {
     if (!item) return;
 
-    const parsedPrice = Number(item?.avg_price ?? item?.price);
+    const parsedPrice = Number(item?.last_seen_location?.avg_price ?? item?.last_seen_location?.price ?? item?.avg_price ?? item?.price);
     const priceInCents = Number.isFinite(parsedPrice) && parsedPrice > 0
       ? String(Math.round(parsedPrice * 100))
       : "";
@@ -5702,17 +6848,17 @@ export default function App() {
     }));
     setLocationForm((prev) => ({
       ...prev,
-      aisle: item?.aisle || "",
-      section: item?.section || "",
-      shelf: item?.shelf || "",
-      notes: item?.notes || "",
+      aisle: item?.last_seen_location?.aisle || item?.aisle || "",
+      section: item?.last_seen_location?.section || item?.section || "",
+      shelf: item?.last_seen_location?.shelf || item?.shelf || "",
+      notes: item?.notes || item?.last_seen_location?.notes || "",
       size_value: item?.size_value || prev.size_value || "",
       size_unit: item?.size_unit || prev.size_unit || "",
       quantity: item?.quantity || prev.quantity || "1",
       price: priceInCents || prev.price || "",
-      price_type: item?.price_type || prev.price_type || "each",
-      price_source: item?.price_source || prev.price_source || "",
-      detected_price_unit: item?.price_unit_detected || prev.detected_price_unit || "unknown",
+      price_type: item?.last_seen_location?.price_type || item?.price_type || prev.price_type || "each",
+      price_source: item?.last_seen_location?.price_source || item?.price_source || prev.price_source || "",
+      detected_price_unit: item?.last_seen_location?.price_unit_detected || item?.price_unit_detected || prev.detected_price_unit || "unknown",
     }));
 
     setToast({ message: `Update location for ${item?.product_name || "item"}`, type: "success" });
@@ -5721,9 +6867,8 @@ export default function App() {
   const handleSmartCartUpdateLocation = (smartItem) => {
     const item = smartItem.item;
     // Use the selected-store's route location fields for route entry (aisle/section/shelf/price).
-    // Fall back to the cart item's own fields only for product identity.
     const routeLoc = smartItem.routeLocation || null;
-    const routePrice = Number(routeLoc?.avg_price ?? routeLoc?.price ?? item?.avg_price ?? item?.price);
+    const routePrice = Number(routeLoc?.avg_price ?? routeLoc?.price);
 
     setProduct({
       name: item.product_name,
@@ -5744,26 +6889,26 @@ export default function App() {
     setBestKnownLocation(null);
     setLocationForm((prev) => ({
       ...prev,
-      // Route location fields — prefer selected-store's DB row, fall back to cart item.
+      // Route location fields — selected-store DB row only.
       aisle: smartItem.aisle || "",
       section: smartItem.section || "",
       shelf: smartItem.shelf || "",
-      notes: routeLoc?.notes ?? item.notes ?? "",
+      notes: routeLoc?.notes ?? item?.last_seen_location?.notes ?? item.notes ?? "",
       // Product identity fields — always from cart item.
       size_value: item.size_value || item.size || "",
       size_unit: item.size_unit || item.unit || "",
       quantity: item.quantity || "1",
       price: Number.isFinite(routePrice) && routePrice > 0 ? String(Math.round(routePrice * 100)) : "",
-      price_type: routeLoc?.price_type || item.price_type || prev.price_type || "each",
-      price_source: item.price_source || prev.price_source || "",
-      detected_price_unit: item.price_unit_detected || prev.detected_price_unit || "unknown",
+      price_type: routeLoc?.price_type || item?.last_seen_location?.price_type || item.price_type || prev.price_type || "each",
+      price_source: routeLoc?.price_source || item?.last_seen_location?.price_source || item.price_source || prev.price_source || "",
+      detected_price_unit: routeLoc?.price_unit_detected || item?.last_seen_location?.price_unit_detected || item.price_unit_detected || prev.detected_price_unit || "unknown",
     }));
 
     setToast({ message: `Update location for ${item?.product_name || "item"}`, type: "success" });
   };
 
   const startEditingCartItem = (item, indexToEdit) => {
-    const parsedPrice = Number(item?.avg_price ?? item?.price);
+    const parsedPrice = Number(item?.last_seen_location?.avg_price ?? item?.last_seen_location?.price ?? item?.avg_price ?? item?.price);
     setEditingCartItemIndex(indexToEdit);
     setCartEditError("");
     setCartEditForm({
@@ -5771,7 +6916,7 @@ export default function App() {
       quantity: item?.quantity || "1",
       size_value: item?.size_value || item?.size || "",
       size_unit: item?.size_unit || item?.unit || "",
-      notes: item?.notes || "",
+      notes: item?.notes || item?.last_seen_location?.notes || "",
       price: Number.isFinite(parsedPrice) && parsedPrice >= 0 ? parsedPrice.toFixed(2) : "",
     });
   };
@@ -5819,9 +6964,15 @@ export default function App() {
               size_value: sizeValue,
               size_unit: sizeUnit,
               notes,
-              price: parsedPrice,
-              avg_price: parsedPrice,
-              price_badge_source: "manual",
+              last_seen_location: parsedPrice != null
+                ? {
+                    ...(item?.last_seen_location || {}),
+                    price: parsedPrice,
+                    avg_price: parsedPrice,
+                    price_type: item?.last_seen_location?.price_type || "each",
+                    updated_at: new Date().toISOString(),
+                  }
+                : item?.last_seen_location || null,
             }
           : item
       )
@@ -6004,7 +7155,26 @@ export default function App() {
 
     const isRealProfile = Boolean(currentUserProfile && !currentUserProfile?.is_guest);
     const profileDisplayName = String(currentUserProfile?.display_name || "").trim();
-    if (isRealProfile && profileDisplayName) return profileDisplayName.slice(0, 2).toUpperCase();
+    if (isRealProfile && profileDisplayName) {
+      const nameParts = profileDisplayName
+        .split(/\s+/)
+        .map((part) => String(part || "").trim())
+        .filter(Boolean);
+
+      const initials = nameParts
+        .map((part) => part.charAt(0))
+        .filter(Boolean)
+        .slice(0, 2)
+        .join("")
+        .toUpperCase();
+
+      if (initials.length >= 2) return initials;
+      if (initials.length === 1) {
+        return (initials + profileDisplayName.slice(1, 2)).toUpperCase();
+      }
+
+      return profileDisplayName.slice(0, 2).toUpperCase();
+    }
 
     const profileEmail = String(currentUserProfile?.email || "").trim();
     if (isRealProfile && profileEmail) return profileEmail.slice(0, 2).toUpperCase();
@@ -6091,86 +7261,66 @@ export default function App() {
   };
 
   const calculateBestStore = (shoppingList, product_locations, brandMode = "flexible") => {
-    const barcodes = [...new Set((shoppingList || []).map((item) => item.barcode).filter(Boolean))];
-    const totalItems = (shoppingList || []).length;
+    const cartItems = Array.isArray(shoppingList) ? shoppingList : [];
+    const totalItems = cartItems.length;
+    const priceIndex = buildPriceObservationIndex(product_locations || []);
+    const storeGroups = {};
+    let matchedItemCount = 0;
 
-    const cartByBarcode = Object.fromEntries(
-      (shoppingList || []).filter((i) => i.barcode).map((i) => [i.barcode, i])
-    );
+    cartItems.forEach((cartItem) => {
+      const itemKey = buildComparableProductKey(cartItem);
+      const priceBucket = itemKey ? priceIndex[itemKey] : null;
+      if (!priceBucket) return;
 
-    const groupedByStore = (product_locations || []).reduce((acc, row) => {
-      const storeId = row.store_id;
-      const price = Number(row.avg_price || row.price);
+      matchedItemCount += 1;
 
-      if (!storeId || Number.isNaN(price) || !barcodes.includes(row.barcode)) {
-        return acc;
-      }
+      Object.entries(priceBucket.rowsByStore || {}).forEach(([storeId, row]) => {
+        if (!storeId) return;
 
-      if (!acc[storeId]) {
-        acc[storeId] = {
-          store_id: storeId,
-          store: row.stores || null,
-          rowsByBarcode: {},
-        };
-      }
+        if (!storeGroups[storeId]) {
+          storeGroups[storeId] = {
+            store_id: storeId,
+            store: row?.stores || (row?.store_name ? { name: row.store_name } : null),
+            itemsByKey: {},
+          };
+        }
 
-      const existing = acc[storeId].rowsByBarcode[row.barcode];
-      if (!existing || price < Number(existing.avg_price || existing.price)) {
-        acc[storeId].rowsByBarcode[row.barcode] = row;
-      }
+        const current = storeGroups[storeId].itemsByKey[itemKey];
+        if (!current || isBetterPriceObservation(row, current.row)) {
+          storeGroups[storeId].itemsByKey[itemKey] = { row, cartItem };
+        }
+      });
+    });
 
-      return acc;
-    }, {});
-
-    return Object.values(groupedByStore)
+    return Object.values(storeGroups)
       .map((storeGroup) => {
-        const matchedBarcodes = Object.keys(storeGroup.rowsByBarcode);
-        const matched = matchedBarcodes.length;
-        const missingCount = Math.max(totalItems - matched, 0);
-        const coverage = totalItems > 0 ? Math.round((matched / totalItems) * 100) : 0;
-
-        let totalPrice = 0;
-        let totalConfidence = 0;
-        let exactBrandMatches = 0;
-        let brandLockItems = 0;
-        let hasEstimate = false;
-
-        matchedBarcodes.forEach((bc) => {
-          const row = storeGroup.rowsByBarcode[bc];
-          const cartItem = cartByBarcode[bc];
-          const price = Number(row.avg_price || row.price);
-          totalPrice += price;
-          totalConfidence += Number(row.price_confidence || 0);
-
-          if (cartItem?.brand && row.brand) {
-            if (cartItem.brand_lock) brandLockItems++;
-            if (cartItem.brand && row.brand && cartItem.brand.toLowerCase() === row.brand.toLowerCase()) {
-              exactBrandMatches++;
-            }
-          }
-
-          if (!row.avg_price || Number(row.price_confidence || 0) < 40) {
-            hasEstimate = true;
-          }
-        });
-
-        const avgConfidence = matched > 0 ? Math.round(totalConfidence / matched) : 0;
+        const matches = Object.values(storeGroup.itemsByKey || {});
+        const matched = matches.length;
+        const totalPrice = matches.reduce((sum, match) => {
+          const price = Number(match?.row?.avg_price ?? match?.row?.price);
+          return Number.isFinite(price) && price > 0 ? sum + price : sum;
+        }, 0);
+        const totalConfidence = matches.reduce((sum, match) => sum + Number(match?.row?.confidence_score || 0), 0);
+        const exactBrandMatches = matches.reduce((sum, match) => {
+          const cartBrand = normalizeComparableText(match?.cartItem?.brand);
+          const rowBrand = normalizeComparableText(match?.row?.brand);
+          return cartBrand && rowBrand && cartBrand === rowBrand ? sum + 1 : sum;
+        }, 0);
         const brandMatchPct = matched > 0 ? Math.round((exactBrandMatches / matched) * 100) : 0;
-        const missingPenalty = missingCount * 5;
-        const brandPenalty = brandMode === "brand_match" ? (matched - exactBrandMatches) * 3 : 0;
-        const score = totalPrice + missingPenalty + brandPenalty;
+        const avgConfidence = matched > 0 ? Math.round(totalConfidence / matched) : 0;
+        const hasEstimate = matches.some((match) => !Number.isFinite(Number(match?.row?.avg_price ?? match?.row?.price)));
 
         return {
           store_id: storeGroup.store_id,
           store: storeGroup.store,
           matched_count: matched,
           total_price: totalPrice,
-          coverage,
-          score,
-          missing_count: missingCount,
+          coverage: totalItems > 0 ? Math.round((matched / totalItems) * 100) : 0,
           avg_confidence: avgConfidence,
           brand_match_pct: brandMatchPct,
           is_estimate: hasEstimate,
+          itemsByKey: storeGroup.itemsByKey,
+          total_items: totalItems,
         };
       })
       .sort((a, b) => {
@@ -6186,32 +7336,31 @@ export default function App() {
       return;
     }
 
-    const barcodes = [...new Set(
-      shoppingListItems.map((item) => item.barcode).filter(Boolean)
-    )];
-
-    if (barcodes.length === 0) {
-      setError("No barcodes found in shopping list items");
-      return;
-    }
-
     setIsComparingCart(true);
     setError("");
 
     try {
-      const { data, error: compareError } = await supabase
-        .from("product_locations")
-        .select("barcode, price, price_type, avg_price, price_count, price_confidence, store_id, stores(name, address, city, state)")
-        .in("barcode", barcodes)
-        .not("price", "is", null);
+      const cartBarcodes = [...new Set(shoppingListItems.map((item) => String(item?.barcode || "").trim()).filter(Boolean))];
+      const cartKeys = [...new Set(shoppingListItems.map((item) => buildComparableProductKey(item)).filter(Boolean))];
+      const cartTerms = [...new Set(shoppingListItems.flatMap((item) => [item?.product_name, item?.name, item?.brand, item?.category, item?.size_value, item?.size_unit, item?.display_size]).map(normalizeComparableText).filter(Boolean))];
 
-      if (compareError) {
-        throw compareError;
-      }
+      const priceRows = await fetchComparableProductLocationRows({
+        barcodes: cartBarcodes,
+        canonicalKeys: cartKeys,
+        terms: cartTerms,
+      });
 
-      const sortedResults = calculateBestStore(shoppingListItems, data || [], brandComparisonMode)
-        .filter((result) => result.matched_count > 0);
+      console.info("PRICE MATCH ROWS", {
+        cartItemCount: shoppingListItems.length,
+        rowCount: priceRows.length,
+      });
 
+      const priceIndex = buildPriceObservationIndex(priceRows);
+      setCartPriceInsightsByKey(priceIndex);
+
+      const sortedResults = calculateBestStore(shoppingListItems, priceRows || [], brandComparisonMode);
+
+      console.info("CHEAPEST STORE RESULT", sortedResults?.[0] || null);
       setCartComparison(sortedResults);
       setToast({ message: "Cart comparison complete", type: "success" });
     } catch (err) {
@@ -6870,6 +8019,7 @@ export default function App() {
     return (
       <div style={styles.introPage}>
         <div style={styles.introHeroCard}>
+          {renderAuthDebugBanner()}
           <img
             src={mvpLogo}
             alt="MVP logo"
@@ -6910,6 +8060,7 @@ export default function App() {
     return (
       <div style={styles.introPage}>
         <div style={styles.introHeroCard}>
+          {renderAuthDebugBanner()}
 
           {/* ── Header row ── */}
           <div style={styles.introHeaderRow}>
@@ -7094,6 +8245,7 @@ export default function App() {
     return (
       <div style={styles.introPage}>
         <div style={styles.introHeroCard}>
+          {renderAuthDebugBanner()}
           <img
             src={mvpLogo}
             alt="MVP logo"
@@ -7159,6 +8311,7 @@ export default function App() {
     return (
       <div style={styles.introPage}>
         <div style={styles.introHeroCard}>
+          {renderAuthDebugBanner()}
           <div style={styles.introHeaderRow}>
             <img
               src={mvpLogo}
@@ -7550,6 +8703,7 @@ export default function App() {
     return (
       <div style={styles.page}>
         <div style={styles.container}>
+          {renderAuthDebugBanner()}
           {showItemRequestModal && (
             <div style={styles.modalOverlay}>
               <div style={styles.itemRequestModalCard}>
@@ -7841,8 +8995,8 @@ export default function App() {
                               size_value: item.size_value || "",
                               size_unit: item.size_unit || "",
                               quantity: item.quantity || "",
-                              price: item.price ? String(Math.round(item.price * 100)) : "",
-                              price_type: item.price_type || "each",
+                              price: item.last_seen_location?.price != null ? String(Math.round(Number(item.last_seen_location.price) * 100)) : "",
+                              price_type: item.last_seen_location?.price_type || "each",
                               price_source: "",
                               detected_price_unit: "unknown",
                             });
@@ -7907,6 +9061,7 @@ export default function App() {
                             {group.items.map((smartItem, itemIndex) => {
                               const itemBadge = getConfidenceBadge(smartItem.confidence_score);
                               const score = Number(smartItem.confidence_score || 0);
+                              const routeItemImage = resolveProductImage(smartItem.item || {});
                               const confidenceText = score >= 90
                                 ? "High confidence"
                                 : score >= 70
@@ -7921,6 +9076,16 @@ export default function App() {
                                     borderTop: itemIndex > 0 ? "1px solid #e2e8f0" : "none",
                                   }}
                                 >
+                                  <div style={{ width: "100%", marginBottom: 8 }}>
+                                    <img
+                                      src={routeItemImage}
+                                      alt={smartItem.product_name || "Route item"}
+                                      style={styles.cartItemImage}
+                                      onError={(e) => {
+                                        e.currentTarget.src = MVP_PLACEHOLDER_IMAGE;
+                                      }}
+                                    />
+                                  </div>
                                   <div style={{ fontSize: 15, fontWeight: 800, color: "#0f172a", marginBottom: 2 }}>
                                     {smartItem.product_name || "Unknown item"}
                                   </div>
@@ -7994,15 +9159,15 @@ export default function App() {
                                         });
                                         setBarcode(item.barcode || "");
                                         setLocationForm({
-                                          aisle: item.aisle || "",
-                                          section: item.section || "",
-                                          shelf: item.shelf || "",
-                                          notes: item.notes || "",
+                                          aisle: item.last_seen_location?.aisle || "",
+                                          section: item.last_seen_location?.section || "",
+                                          shelf: item.last_seen_location?.shelf || "",
+                                          notes: item.last_seen_location?.notes || item.notes || "",
                                           size_value: item.size_value || "",
                                           size_unit: item.size_unit || "",
                                           quantity: item.quantity || "",
-                                          price: item.price ? String(Math.round(item.price * 100)) : "",
-                                          price_type: item.price_type || "each",
+                                          price: item.last_seen_location?.price != null ? String(Math.round(Number(item.last_seen_location.price) * 100)) : "",
+                                          price_type: item.last_seen_location?.price_type || "each",
                                           price_source: "",
                                           detected_price_unit: "unknown",
                                         });
@@ -8040,172 +9205,8 @@ export default function App() {
               ) : (
                 /* -- Browse Mode: all aisles -- */
                 <>
-                  {activeAisleView ? (
-                    <button
-                      type="button"
-                      onClick={() => setActiveAisleView(null)}
-                      style={{
-                        border: "none",
-                        background: "transparent",
-                        color: "#1e40af",
-                        fontSize: 13,
-                        fontWeight: 800,
-                        padding: 0,
-                        marginBottom: 10,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Back to All Aisles
-                    </button>
-                  ) : null}
-
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
-                    {smartShoppingVisibleAisleGroups.map((group) => {
-                      const aisleBadge = getConfidenceBadge(group.aisleConfidence);
-                      return (
-                        <div
-                          key={`browse-aisle-${group.aisleLabel}`}
-                          style={{ border: "1px solid #dbeafe", background: "#ffffff", borderRadius: 12, padding: 10, cursor: "pointer" }}
-                          onClick={() => setActiveAisleView(group.aisleLabel)}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                            <div style={{ fontSize: 14, fontWeight: 800, color: "#1e40af" }}>{group.aisleLabel}</div>
-                            <div style={{
-                              border: `1px solid ${aisleBadge.border}`,
-                              background: aisleBadge.background,
-                              color: aisleBadge.color,
-                              borderRadius: 999,
-                              padding: "2px 8px",
-                              fontSize: 11,
-                              fontWeight: 800,
-                            }}>
-                              {group.aisleConfidence}% • {aisleBadge.label}
-                            </div>
-                          </div>
-                          <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>
-                            {group.items.length} item{group.items.length !== 1 ? "s" : ""}
-                          </div>
-
-                          <div style={{ border: "1px solid #e2e8f0", borderRadius: 10, background: "#f8fafc" }}>
-                            {group.items.map((smartItem, itemIndex) => {
-                              const itemBadge = getConfidenceBadge(smartItem.confidence_score);
-                              const score = Number(smartItem.confidence_score || 0);
-                              const confidenceText = score >= 90
-                                ? "High confidence"
-                                : score >= 70
-                                  ? "Moderate confidence"
-                                  : "Needs verification";
-                              const isTrustedContributor = currentUserProfile?.trust_score >= 50;
-                              return (
-                                <div
-                                  key={`browse-item-${smartItem.originalIndex}`}
-                                  style={{
-                                    padding: "10px 8px",
-                                    borderTop: itemIndex > 0 ? "1px solid #e2e8f0" : "none",
-                                  }}
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  <div style={{ fontSize: 15, fontWeight: 800, color: "#0f172a", marginBottom: 2 }}>
-                                    {smartItem.product_name || "Unknown item"}
-                                  </div>
-                                  {smartItem.brand ? (
-                                    <div style={{ fontSize: 13, color: "#475569", fontWeight: 700, marginBottom: 3 }}>
-                                      {smartItem.brand}
-                                    </div>
-                                  ) : null}
-                                  {(smartItem.section || smartItem.shelf) ? (
-                                    <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3 }}>
-                                      {[smartItem.section && `Section: ${smartItem.section}`, smartItem.shelf && `Shelf: ${smartItem.shelf}`].filter(Boolean).join(" • ")}
-                                    </div>
-                                  ) : null}
-                                  {smartItem.price ? (
-                                    <div style={{ fontSize: 13, fontWeight: 800, color: "#166534", marginBottom: 4 }}>
-                                      ${Number(smartItem.price).toFixed(2)}
-                                    </div>
-                                  ) : null}
-                                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-                                    <div style={{
-                                      border: `1px solid ${itemBadge.border}`,
-                                      background: itemBadge.background,
-                                      color: itemBadge.color,
-                                      borderRadius: 999,
-                                      padding: "2px 8px",
-                                      fontSize: 11,
-                                      fontWeight: 800,
-                                      display: "inline-block",
-                                    }}>
-                                      {score}% • {itemBadge.label}
-                                    </div>
-                                    <div style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>{confidenceText}</div>
-                                    {isTrustedContributor ? (
-                                      <div style={{ fontSize: 10, color: "#166534", fontWeight: 700, background: "#dcfce7", border: "1px solid #86efac", borderRadius: 999, padding: "1px 6px" }}>
-                                        Trusted contributor impact active
-                                      </div>
-                                    ) : null}
-                                  </div>
-                                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                                    <button
-                                      type="button"
-                                      style={{ ...styles.primaryButton, width: "auto", minHeight: 30, padding: "0 10px", fontSize: 12 }}
-                                      onClick={() => {
-                                        const item = smartItem.item;
-                                        setProduct({
-                                          name: item.product_name || "",
-                                          brand: item.brand || "",
-                                          barcode: item.barcode || "",
-                                          size_value: item.size_value || "",
-                                          size_unit: item.size_unit || "",
-                                          quantity: item.quantity || "",
-                                        });
-                                        setBarcode(item.barcode || "");
-                                        setToast({ message: "Location confirmation ready", type: "success" });
-                                      }}
-                                    >
-                                      Confirm Location (+{LOCATION_CONFIRMATION_POINTS})
-                                    </button>
-                                    <button
-                                      type="button"
-                                      style={{ ...styles.secondaryButton, width: "auto", minHeight: 30, padding: "0 10px", fontSize: 12 }}
-                                      onClick={() => {
-                                        const item = smartItem.item;
-                                        setProduct({
-                                          name: item.product_name || "",
-                                          brand: item.brand || "",
-                                          barcode: item.barcode || "",
-                                          size_value: item.size_value || "",
-                                          size_unit: item.size_unit || "",
-                                          quantity: item.quantity || "",
-                                        });
-                                        setBarcode(item.barcode || "");
-                                        setLocationForm({
-                                          aisle: item.aisle || "",
-                                          section: item.section || "",
-                                          shelf: item.shelf || "",
-                                          notes: item.notes || "",
-                                          size_value: item.size_value || "",
-                                          size_unit: item.size_unit || "",
-                                          quantity: item.quantity || "",
-                                          price: item.price ? String(Math.round(item.price * 100)) : "",
-                                          price_type: item.price_type || "each",
-                                          price_source: "",
-                                          detected_price_unit: "unknown",
-                                        });
-                                        openLocationPanel();
-                                        setLocationPanelMode("quick");
-                                        setLocationStep("aisle");
-                                        setStatus("Update this item location");
-                                      }}
-                                    >
-                                      Fix Location
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })}
+                  <div style={{ fontSize: 13, color: "#475569", marginBottom: 12 }}>
+                    Start Smart Shopping Route to view aisle-by-aisle navigation and location confidence details.
                   </div>
                 </>
               )}
@@ -8220,6 +9221,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
+              cloudShoppingListExplicitClearRef.current = true;
               localStorage.removeItem("shoppingListItems");
               setShoppingListItems([]);
               setToast({ message: "Test cart cleared", type: "success" });
@@ -8235,6 +9237,23 @@ export default function App() {
           >
             Clear Test Cart
           </button>
+          {window.localStorage.getItem("mvpDebug") === "true" ? (
+            <button
+              type="button"
+              onClick={handleManualCloudListTest}
+              style={{
+                ...styles.secondaryButton,
+                minHeight: 36,
+                width: "auto",
+                padding: "0 12px",
+                fontSize: 13,
+                marginBottom: 10,
+                marginLeft: 8,
+              }}
+            >
+              Test Cloud List Save/Load
+            </button>
+          ) : null}
           <div style={styles.rewardDescription}>
             Build your cart first, then MVP can help suggest the most frugal or sensible store based on known prices and item availability.
           </div>
@@ -8243,7 +9262,10 @@ export default function App() {
             <input
               type="text"
               value={manualListItemName}
-              onChange={(e) => setManualListItemName(e.target.value)}
+              onChange={(e) => {
+                setManualListItemName(e.target.value);
+                setCatalogSearchTerm(e.target.value);
+              }}
               placeholder="Add item e.g. ketchup, milk, eggs"
               style={{ ...styles.input, marginBottom: 0, flex: 1 }}
             />
@@ -8255,36 +9277,167 @@ export default function App() {
             </button>
           </div>
 
+          {(catalogSearchTerm.trim().length >= 2 || isSearchingCatalog) && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", textTransform: "uppercase", letterSpacing: 0.5, margin: "0 2px 8px" }}>
+                Shared Catalog Matches
+              </div>
+
+              {isSearchingCatalog ? (
+                <div style={{ fontSize: 13, color: "#64748b", padding: "8px 2px" }}>
+                  Searching catalog...
+                </div>
+              ) : null}
+
+              {!isSearchingCatalog && catalogSearchMessage ? (
+                <div style={{ fontSize: 13, color: "#64748b", padding: "8px 2px" }}>
+                  {catalogSearchMessage}
+                </div>
+              ) : null}
+
+              {!isSearchingCatalog && catalogSearchTerm.trim().length >= 2 && catalogSearchResults.length === 0 ? (
+                <div
+                  style={{
+                    border: "1px solid #dbeafe",
+                    background: "#f8fafc",
+                    borderRadius: 10,
+                    padding: 10,
+                    marginBottom: 8,
+                  }}
+                >
+                  <div style={{ fontSize: 13, color: "#334155", fontWeight: 700, marginBottom: 8 }}>
+                    No scanned item found yet. Add it to the database when you shop.
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      style={{ ...styles.primaryButton, width: "auto", minHeight: 34, padding: "0 12px", marginBottom: 0 }}
+                      onClick={handleStartPhotoFirst}
+                    >
+                      Use Photo
+                    </button>
+                    <button
+                      type="button"
+                      style={{ ...styles.secondaryButton, width: "auto", minHeight: 34, padding: "0 12px", marginBottom: 0 }}
+                      onClick={startScanner}
+                    >
+                      Scan Barcode
+                    </button>
+                    <button
+                      type="button"
+                      style={{ ...styles.secondaryButton, width: "auto", minHeight: 34, padding: "0 12px", marginBottom: 0 }}
+                      onClick={() => {
+                        setShowItemRequestModal(true);
+                        setItemRequestForm((prev) => ({
+                          ...prev,
+                          product_name: catalogSearchTerm.trim(),
+                        }));
+                      }}
+                    >
+                      Request Help Finding This
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {!isSearchingCatalog && catalogSearchResults.length > 0 ? (
+                <div style={{ display: "grid", gap: 8 }}>
+                  {catalogSearchResults.map((result) => {
+                    const location = result.selected_store_location;
+                    const hasStoreLocation = Boolean(location?.aisle || location?.section || location?.shelf);
+                    const displayImage = resolveProductImage(result);
+                    const displayPrice = location?.avg_price ?? location?.price;
+
+                    return (
+                      <div
+                        key={`catalog-${result.id || result.barcode || result.product_name}`}
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "52px 1fr auto",
+                          gap: 10,
+                          alignItems: "center",
+                          border: "1px solid #e2e8f0",
+                          borderRadius: 10,
+                          padding: 8,
+                          background: hasStoreLocation ? "#f0fdf4" : "#f8fafc",
+                        }}
+                      >
+                        <img
+                          src={displayImage}
+                          alt={result.product_name || "Catalog product"}
+                          style={{ width: 52, height: 52, borderRadius: 8, objectFit: "cover", background: "#fff" }}
+                          onError={(e) => {
+                            e.currentTarget.src = MVP_PLACEHOLDER_IMAGE;
+                          }}
+                        />
+
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: "#0f172a", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {result.product_name || "Unknown product"}
+                          </div>
+                          <div style={{ fontSize: 12, color: "#475569" }}>
+                            {result.brand || "Unknown brand"}
+                            {result.category ? ` • ${result.category}` : ""}
+                            {result.size_value || result.size_unit
+                              ? ` • ${String(result.size_value || "").trim()} ${String(result.size_unit || "").trim()}`.trim()
+                              : ""}
+                          </div>
+                          {selectedStore?.id ? (
+                            <div style={{ fontSize: 12, color: hasStoreLocation ? "#166534" : "#64748b", marginTop: 2 }}>
+                              {hasStoreLocation
+                                ? `${location.aisle || "Aisle"}${location.section ? ` • ${location.section}` : ""}${location.shelf ? ` • ${location.shelf}` : ""}`
+                                : "No known location for this store yet"}
+                              {displayPrice != null ? ` • $${Number(displayPrice).toFixed(2)} ${formatPriceType(location?.price_type)}` : ""}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <button
+                          type="button"
+                          style={{ ...styles.secondaryButton, minHeight: 36, width: "auto", padding: "0 12px", whiteSpace: "nowrap" }}
+                          onClick={() => addSharedCatalogResultToCart(result)}
+                        >
+                          Add
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          )}
+
           {shoppingListItems.length > 0 ? (
             <>
               <div style={{ fontSize: 13, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, color: "#475569", margin: "2px 2px 8px" }}>
                 Detailed cart
               </div>
               <div style={styles.rewardsGrid}>
-              {smartCartAisleGroups.map(([aisleLabel, groupedItems]) => (
-                <div key={`aisle-${aisleLabel}`} style={{ gridColumn: "1 / -1" }}>
-                  <div
-                    style={{
-                      fontSize: 13,
-                      fontWeight: 800,
-                      textTransform: "uppercase",
-                      letterSpacing: 0.5,
-                      color: "#1e3a8a",
-                      margin: "8px 2px 10px",
-                    }}
-                  >
-                    {aisleLabel}
-                  </div>
-
-                  <div style={styles.rewardsGrid}>
-                    {groupedItems.map((smartItem) => {
-                      const item = smartItem.item;
-                      const index = smartItem.originalIndex;
+                {!shoppingMode ? shoppingListItems.map((item, cartIndex) => {
                       const itemPrice = item.avg_price ?? item.price;
                       const priceTypeLabel = formatPriceType(item.price_type);
-                      const isEditing = editingCartItemIndex === index;
+                      const isEditing = editingCartItemIndex === cartIndex;
                       const isEggCartItem = isEggText(item.product_name);
+                      const lastSeen = item.last_seen_location || null;
+                      const lastSeenLocationText = [lastSeen?.aisle, lastSeen?.section, lastSeen?.shelf].filter(Boolean).join(" • ");
                       const displayImageUrl = resolveProductImage(item);
+                      const itemKey = buildComparableProductKey(item);
+                      const priceInsight = itemKey ? cartPriceInsightsByKey[itemKey] || null : null;
+                      const cheapestKnownRow = priceInsight?.cheapestRow || null;
+                      const otherKnownPrices = Object.values(priceInsight?.rowsByStore || {})
+                        .filter((row) => row && row !== cheapestKnownRow)
+                        .map((row) => ({
+                          storeName: row?.stores?.name || row?.store_name || "Unknown store",
+                          price: Number(row?.avg_price ?? row?.price ?? 0) || null,
+                          priceType: row?.price_type || "each",
+                        }))
+                        .filter((entry) => entry.price != null);
+                      const cheapestKnownPrice = Number(cheapestKnownRow?.avg_price ?? cheapestKnownRow?.price ?? 0) || null;
+                      const cheapestKnownStoreName = cheapestKnownRow?.stores?.name || cheapestKnownRow?.store_name || null;
+                      const routeStorePrice = selectedStore?.id && item?.barcode
+                        ? storeRouteLocations[String(item.barcode).trim()] || null
+                        : null;
+                      const routeStorePriceValue = Number(routeStorePrice?.avg_price ?? routeStorePrice?.price ?? 0) || null;
 
                       console.log("SMART CART RENDER IMAGE:", {
                         productName: item.product_name,
@@ -8296,10 +9449,10 @@ export default function App() {
 
                       return (
                         <div
-                          key={`${item.barcode || item.product_name || "item"}-${index}`}
+                          key={`${item.barcode || item.product_name || "item"}-${cartIndex}`}
                           style={styles.rewardCard}
                           onClick={() => {
-                            setEditingCartItemIndex(index);
+                            setEditingCartItemIndex(cartIndex);
                             setCartEditForm({
                               ...item,
                               product_name: item.product_name || "",
@@ -8307,33 +9460,48 @@ export default function App() {
                               size_value: item.size_value || "",
                               size_unit: item.size_unit || "",
                               quantity: item.quantity || "",
-                              price: item.price || "",
-                              price_type: item.price_type || "each",
-                              aisle: item.aisle || "",
-                              section: item.section || "",
-                              shelf: item.shelf || "",
+                              price: item.last_seen_location?.price ?? item.price ?? "",
+                              price_type: item.last_seen_location?.price_type || item.price_type || "each",
+                              aisle: item.last_seen_location?.aisle || "",
+                              section: item.last_seen_location?.section || "",
+                              shelf: item.last_seen_location?.shelf || "",
                             });
                             setCartEditError("");
                           }}
                         >
-                  <div style={{ width: "100%", marginBottom: 8 }}>
-                    <img
-                      src={displayImageUrl}
-                      alt={item.product_name || item.name || "Cart item"}
-                      style={styles.cartItemImage}
-                      onError={(e) => {
-                        console.warn("CART IMAGE FALLBACK:", {
-                          productName: item.product_name || item.name,
-                          attemptedSrc: displayImageUrl,
-                        });
-                        e.currentTarget.src = MVP_PLACEHOLDER_IMAGE;
-                      }}
-                    />
-                  </div>
+                          <div style={{ width: "100%", marginBottom: 8 }}>
+                            <img
+                              src={displayImageUrl}
+                              alt={item.product_name || item.name || "Cart item"}
+                              style={styles.cartItemImage}
+                              onError={(e) => {
+                                console.warn("CART IMAGE FALLBACK:", {
+                                  productName: item.product_name || item.name,
+                                  attemptedSrc: displayImageUrl,
+                                });
+                                e.currentTarget.src = MVP_PLACEHOLDER_IMAGE;
+                              }}
+                            />
+                          </div>
                   <div style={styles.rewardTitle}>{item.product_name}</div>
                   {item.needs_review ? (
                     <div style={{ fontSize: 11, fontWeight: 700, color: "#b45309", background: "#fef3c7", borderRadius: 6, padding: "2px 7px", marginBottom: 4, display: "inline-block" }}>
                       ⚠ Needs review
+                    </div>
+                  ) : null}
+                  {cheapestKnownPrice != null ? (
+                    <div style={{ fontSize: 12, color: "#166534", fontWeight: 800, marginBottom: 3 }}>
+                      Cheapest known: {cheapestKnownStoreName || "Unknown store"} ${cheapestKnownPrice.toFixed(2)}
+                    </div>
+                  ) : null}
+                  {otherKnownPrices.length > 0 ? (
+                    <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3 }}>
+                      Other known price: {otherKnownPrices.slice(0, 2).map((entry) => `${entry.storeName} $${entry.price.toFixed(2)}`).join(" • ")}
+                    </div>
+                  ) : null}
+                  {routeStorePriceValue != null && shoppingMode ? (
+                    <div style={{ fontSize: 12, color: "#1d4ed8", marginBottom: 3, fontWeight: 700 }}>
+                      Selected route: ${routeStorePriceValue.toFixed(2)} {formatPriceType(routeStorePrice?.price_type)}
                     </div>
                   ) : null}
                   <div style={styles.rewardDescription}>
@@ -8350,14 +9518,16 @@ export default function App() {
                     {item.notes ? ` • note: ${item.notes}` : ""}
                   </div>
 
-                  <div style={{ ...styles.rewardDescription, marginTop: -2 }}>
-                    Confidence: {Number(smartItem.confidence_score || 0)}%
-                    {smartItem.needsContribution ? " • Needs contribution" : " • Known location"}
-                  </div>
-
-                  <div style={{ ...styles.rewardDescription, marginTop: -2 }}>
-                    {item.price_badge_source === "manual" ? "Price source: User edited" : "Price source: AI detected"}
-                  </div>
+                  {lastSeen ? (
+                    <div style={{ ...styles.rewardDescription, marginTop: -2, fontSize: 12 }}>
+                      {lastSeenLocationText ? `Last seen: ${lastSeenLocationText}` : "Last seen location saved"}
+                      {lastSeen.avg_price != null
+                        ? ` • ${Number(lastSeen.avg_price).toFixed(2)} ${formatPriceType(lastSeen.price_type)}`
+                        : lastSeen.price != null
+                          ? ` • ${Number(lastSeen.price).toFixed(2)} ${formatPriceType(lastSeen.price_type)}`
+                          : ""}
+                    </div>
+                  ) : null}
 
                   {isEditing && cartEditForm ? (
                     <div style={{ marginTop: 8 }}>
@@ -8469,10 +9639,10 @@ export default function App() {
                           onClick={(e) => {
                             e.stopPropagation();
                             logButtonClick("Save", {
-                              originalIndex: smartItem.originalIndex,
+                              originalIndex: cartIndex,
                               productName: item.product_name,
                             });
-                            saveEditedCartItem(smartItem.originalIndex);
+                            saveEditedCartItem(cartIndex);
                           }}
                           style={styles.primaryButton}
                         >
@@ -8495,8 +9665,8 @@ export default function App() {
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            logButtonClick("Remove", { originalIndex: smartItem.originalIndex, productName: item.product_name });
-                            handleRemoveShoppingListItem(smartItem.originalIndex);
+                            logButtonClick("Remove", { originalIndex: cartIndex, productName: item.product_name });
+                            handleRemoveShoppingListItem(cartIndex);
                           }}
                           style={styles.editButton}
                         >
@@ -8513,13 +9683,13 @@ export default function App() {
                         onClick={(e) => {
                           e.stopPropagation();
                           console.log("BRAND LOCK TOGGLE:", {
-                            originalIndex: smartItem.originalIndex,
+                            originalIndex: cartIndex,
                             productName: item.product_name,
                             brandLock: false,
                           });
                           setShoppingListItems((prev) =>
                             prev.map((el, index) =>
-                              index === smartItem.originalIndex
+                              index === cartIndex
                                 ? { ...el, brand_lock: false }
                                 : el
                             )
@@ -8541,13 +9711,13 @@ export default function App() {
                         onClick={(e) => {
                           e.stopPropagation();
                           console.log("BRAND LOCK TOGGLE:", {
-                            originalIndex: smartItem.originalIndex,
+                            originalIndex: cartIndex,
                             productName: item.product_name,
                             brandLock: true,
                           });
                           setShoppingListItems((prev) =>
                             prev.map((el, index) =>
-                              index === smartItem.originalIndex
+                              index === cartIndex
                                 ? { ...el, brand_lock: true }
                                 : el
                             )
@@ -8568,10 +9738,7 @@ export default function App() {
                   ) : null}
                         </div>
                       );
-                    })}
-                  </div>
-                </div>
-              ))}
+                    }) : null}
               </div>
             </>
           ) : (
