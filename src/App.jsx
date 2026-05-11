@@ -1100,6 +1100,7 @@ export default function App() {
   const [cartEditForm, setCartEditForm] = useState(null);
   const [cartEditError, setCartEditError] = useState("");
   const [shoppingListItems, setShoppingListItems] = useState([]);
+  const [contributionItems, setContributionItems] = useState([]);
   const [activeAisleView, setActiveAisleView] = useState(null);
   const [shoppingMode, setShoppingMode] = useState(false);
   const [manualListItemName, setManualListItemName] = useState("");
@@ -1115,6 +1116,13 @@ export default function App() {
   const [storeRouteLocations, setStoreRouteLocations] = useState({});
   const [isLoadingStoreRoute, setIsLoadingStoreRoute] = useState(false);
   const [brandComparisonMode, setBrandComparisonMode] = useState("flexible");
+
+  // Architecture boundary aliases:
+  // - desiredShoppingListItems: user intent list (store-neutral)
+  // - scanCartItems: in-store scan/photo contribution activity (store-specific)
+  const desiredShoppingListItems = shoppingListItems;
+  const setDesiredShoppingListItems = setShoppingListItems;
+  const scanCartItems = contributionItems;
 
   // ============================================================================
   // STATE - User Profile
@@ -2847,6 +2855,19 @@ export default function App() {
         confidenceScore = Number(routeLocation.confidence_score || 0);
       }
 
+      const knownSelectedStoreLocation = item?.selected_store_location || null;
+      const knownCheapestLocation = item?.cheapest_location || null;
+      const knownStorePrices = Array.isArray(item?.known_store_prices)
+        ? item.known_store_prices
+        : (Array.isArray(item?.all_known_store_prices) ? item.all_known_store_prices : []);
+      const hasAnyComparisonContext = Boolean(
+        routeLocation ||
+        knownSelectedStoreLocation ||
+        knownCheapestLocation ||
+        knownStorePrices.length > 0 ||
+        item?.last_seen_location
+      );
+
       return {
         product_name: item?.product_name || "",
         brand: item?.brand || "",
@@ -2856,7 +2877,9 @@ export default function App() {
         confidence_score: Number.isFinite(confidenceScore) ? confidenceScore : 0,
         routeLocation,
         isKnownLocation: Boolean(routeLocation),
-        needsContribution: !routeLocation,
+        hasAnyComparisonContext,
+        needsContribution: !routeLocation && !hasAnyComparisonContext,
+        needsSelectedStoreLocation: !routeLocation && hasAnyComparisonContext,
         originalIndex,
         item,
       };
@@ -2932,6 +2955,9 @@ export default function App() {
     });
 
   const smartShoppingItemsToLocate = storeScopedSmartCartItems.filter((smartItem) => smartItem.needsContribution);
+  const smartShoppingItemsMissingSelectedStoreLocation = storeScopedSmartCartItems.filter(
+    (smartItem) => smartItem.needsSelectedStoreLocation
+  );
   const smartShoppingKnownItemCount = smartShoppingKnownAisleGroups.reduce(
     (sum, group) => sum + group.items.length,
     0
@@ -2952,15 +2978,18 @@ export default function App() {
     ? shoppingModeAisleLabels.indexOf(shoppingModeActiveAisleLabel)
     : -1;
   const smartShoppingNeedsLocationCount = smartShoppingItemsToLocate.length;
-  const isSmartCartEmpty = shoppingListItems.length === 0;
+  const isSmartCartEmpty = desiredShoppingListItems.length === 0;
   const hasKnownSmartCartItems = smartShoppingKnownItemCount > 0;
   const hasUnknownSmartCartItems = smartShoppingNeedsLocationCount > 0;
+  const hasSelectedStoreGapItems = smartShoppingItemsMissingSelectedStoreLocation.length > 0;
   const smartCartStateMessage = isSmartCartEmpty
-    ? "Your Smart Cart is empty. Add items by photo or manual entry."
+    ? "Your desired shopping list is empty. Add items by search or manual entry."
     : hasKnownSmartCartItems && hasUnknownSmartCartItems
-      ? "Some items are ready to shop. Others still need locations."
+      ? "Some items are ready to shop. Others have no known comparison context yet."
+      : hasSelectedStoreGapItems
+        ? "Some items have known prices elsewhere, but not for your selected store route yet."
       : hasUnknownSmartCartItems
-        ? "Start locating these items to build this store's map."
+        ? "Some desired items are unresolved. Scan or map them to build shared intelligence."
         : "Ready to shop by aisle.";
 
   const startShoppingMode = () => {
@@ -3732,6 +3761,7 @@ export default function App() {
                 brand: knownProduct.brand || "",
                 category: knownProduct.category || "",
               });
+              setBestKnownLocation(knownLocation || null);
               setLocationForm((prev) => ({
                 ...prev,
                 size_value: knownProduct.size_value || "",
@@ -3744,19 +3774,31 @@ export default function App() {
                 setLocationConfidenceScore(
                   Number(knownLocation.confidence_score || 0)
                 );
+                setLocationSaved(true);
+                handleAddToContributionItems(knownProduct, {
+                  ...knownLocation,
+                  store_id: knownLocation?.store_id || selectedStore?.id || null,
+                  store_name: knownLocation?.store_name || selectedStore?.name || "",
+                });
+                resolveUnresolvedDesiredListItemFromContribution(knownProduct, knownLocation);
+              } else {
+                setLocationSaved(false);
               }
 
               setAwaitingPhoto(false);
               setSubmissionMethod("retrieved");
-              const addResult = handleAddToShoppingList(knownProduct, knownLocation);
 
-              if (!knownLocation && !addResult?.updated) {
+              if (!knownLocation) {
                 openLocationPanel();
                 setLocationPanelMode("quick");
                 setLocationStep("aisle");
               }
 
-              setStatus("Known product found. Photo skipped.");
+              setStatus(
+                knownLocation
+                  ? "Known product found. Added to scan contributions. Add to your shopping list if needed."
+                  : "Known product found. Add location to contribute store intelligence."
+              );
               await stopScanner();
               return;
             }
@@ -6012,17 +6054,19 @@ export default function App() {
         verified: finalizedProductForCart.verified_image_url,
         cart: finalizedProductForCart.cart_image_url,
       });
-      await handleAddToShoppingList(finalizedProductForCart, {
+      const contributionLocation = {
         ...locationForm,
         ...savedLocation,
         store_id: selectedStore.id,
         store_name: selectedStore.name,
-      });
+      };
+      handleAddToContributionItems(finalizedProductForCart, contributionLocation);
+      resolveUnresolvedDesiredListItemFromContribution(finalizedProductForCart, contributionLocation);
 
       setAwaitingProductConfirmation(false);
       setShowAiSummaryCard(false);
-      setStatus("Item added to cart");
-      setToast({ message: "Item added to cart", type: "success" });
+      setStatus("Contribution saved to shared product intelligence");
+      setToast({ message: "Contribution saved", type: "success" });
       setShowNextItemPrompt(true);
     } catch (err) {
       console.error("LOCATION SAVE ERROR:", err);
@@ -6642,6 +6686,9 @@ export default function App() {
       image_url: result?.image_url || null,
       cheapest_known_price: cheapestKnownPrice,
       cheapest_known_store_name: cheapestKnownStoreName,
+      known_store_prices: Array.isArray(result?.known_store_prices)
+        ? result.known_store_prices
+        : (Array.isArray(result?.all_known_store_prices) ? result.all_known_store_prices : []),
       all_known_store_prices: Array.isArray(result?.all_known_store_prices) ? result.all_known_store_prices : [],
       other_known_prices: Array.isArray(result?.other_known_prices) ? result.other_known_prices : [],
       price: cheapestKnownPrice,
@@ -7023,6 +7070,9 @@ export default function App() {
     const itemProductName = resolveBestCartName(productToAdd, null);
     const itemBrand = String(productToAdd.brand || "").trim();
     const itemComparableKey = buildComparableProductKey(productToAdd);
+    const knownStorePrices = Array.isArray(productToAdd?.known_store_prices)
+      ? productToAdd.known_store_prices
+      : (Array.isArray(productToAdd?.all_known_store_prices) ? productToAdd.all_known_store_prices : []);
 
     console.info("CART PRODUCT KEY", {
       productName: itemProductName,
@@ -7134,9 +7184,12 @@ export default function App() {
             notes: locationToUse ? (item.notes || "") : (productToAdd.notes ?? item.notes ?? ""),
             last_seen_location: latestLastSeenLocation || item.last_seen_location || null,
             selected_store_location: productToAdd.selected_store_location || item.selected_store_location || null,
+            cheapest_location: productToAdd.cheapest_location || item.cheapest_location || null,
+            known_store_prices: knownStorePrices.length > 0 ? knownStorePrices : (item.known_store_prices || []),
             cheapest_known_price: productToAdd.cheapest_known_price ?? item.cheapest_known_price ?? null,
             cheapest_known_store_name: productToAdd.cheapest_known_store_name || item.cheapest_known_store_name || null,
             other_known_prices: Array.isArray(productToAdd.other_known_prices) ? productToAdd.other_known_prices : (item.other_known_prices || []),
+            all_known_store_prices: Array.isArray(productToAdd.all_known_store_prices) ? productToAdd.all_known_store_prices : (item.all_known_store_prices || []),
             price: productToAdd.price ?? item.price ?? null,
             avg_price: productToAdd.avg_price ?? item.avg_price ?? null,
             price_type: productToAdd.price_type || item.price_type || "each",
@@ -7155,7 +7208,7 @@ export default function App() {
         strategy: getMatchStrategy(shoppingListItems[existingMatchIndex]),
         cartCount: shoppingListItems.length,
       });
-      setToast({ message: "Added to Smart Cart", type: "success" });
+      setToast({ message: "Updated shopping list", type: "success" });
       return { added: false, updated: true, hasLocation };
     }
 
@@ -7181,9 +7234,12 @@ export default function App() {
       notes: locationToUse ? "" : (productToAdd.notes ?? ""),
       last_seen_location: latestLastSeenLocation,
       selected_store_location: productToAdd.selected_store_location || null,
+      cheapest_location: productToAdd.cheapest_location || null,
+      known_store_prices: knownStorePrices,
       cheapest_known_price: productToAdd.cheapest_known_price ?? null,
       cheapest_known_store_name: productToAdd.cheapest_known_store_name || null,
       other_known_prices: Array.isArray(productToAdd.other_known_prices) ? productToAdd.other_known_prices : [],
+      all_known_store_prices: Array.isArray(productToAdd.all_known_store_prices) ? productToAdd.all_known_store_prices : knownStorePrices,
       price: productToAdd.price ?? null,
       avg_price: productToAdd.avg_price ?? null,
       price_type: productToAdd.price_type || "each",
@@ -7201,6 +7257,126 @@ export default function App() {
     setShoppingListItems((prev) => [...prev, cartItem]);
     setToast({ message: "Added to shopping list", type: "success" });
     return { added: true, updated: false, hasLocation };
+  };
+
+  const handleAddToContributionItems = (productToRecord = product, locationToUse = bestKnownLocation) => {
+    if (!productToRecord) return;
+
+    const itemName = String(productToRecord?.product_name || productToRecord?.name || "").trim();
+    const itemBrand = String(productToRecord?.brand || "").trim();
+    const itemBarcode = String(productToRecord?.barcode || "").trim();
+    const itemCanonicalKey = normalizeComparableKey(
+      productToRecord?.canonical_product_key || buildComparableProductKey(productToRecord)
+    ) || "";
+
+    const storeScopedLocation = locationToUse || null;
+    const storeId = String(storeScopedLocation?.store_id || selectedStore?.id || "").trim();
+    const contributionKey = normalizeComparableKey([
+      itemCanonicalKey || itemBarcode || itemName,
+      storeId,
+      String(storeScopedLocation?.aisle || "").trim(),
+      String(storeScopedLocation?.section || "").trim(),
+      String(storeScopedLocation?.shelf || "").trim(),
+    ].join("|")) || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const contributionItem = {
+      contribution_key: contributionKey,
+      created_at: new Date().toISOString(),
+      source: productToRecord?.source || submissionMethod || "scan",
+      store_id: storeId || null,
+      store_name: storeScopedLocation?.store_name || selectedStore?.name || "",
+      barcode: itemBarcode || null,
+      catalog_id: productToRecord?.catalog_id || null,
+      canonical_product_key: itemCanonicalKey || null,
+      product_name: itemName || "Unknown product",
+      brand: itemBrand,
+      category: String(productToRecord?.category || "").trim(),
+      size_value: String(productToRecord?.size_value || "").trim(),
+      size_unit: String(productToRecord?.size_unit || "").trim(),
+      display_size: String(productToRecord?.display_size || "").trim(),
+      quantity: String(productToRecord?.quantity || "1").trim() || "1",
+      location: storeScopedLocation,
+      price: productToRecord?.price ?? storeScopedLocation?.price ?? null,
+      avg_price: productToRecord?.avg_price ?? storeScopedLocation?.avg_price ?? null,
+      price_type: productToRecord?.price_type || storeScopedLocation?.price_type || "each",
+    };
+
+    setContributionItems((prev) => {
+      const existingIndex = prev.findIndex((item) => item?.contribution_key === contributionKey);
+      if (existingIndex >= 0) {
+        return prev.map((item, index) => (index === existingIndex ? { ...item, ...contributionItem } : item));
+      }
+      return [...prev, contributionItem];
+    });
+  };
+
+  const resolveUnresolvedDesiredListItemFromContribution = (productToResolve, locationToUse = null) => {
+    if (!productToResolve) return;
+
+    const targetName = normalizeComparableText(productToResolve?.product_name || productToResolve?.name);
+    const targetBrand = normalizeComparableText(productToResolve?.brand);
+    const targetCanonicalKey = normalizeComparableKey(
+      productToResolve?.canonical_product_key || buildComparableProductKey(productToResolve)
+    );
+    const targetBarcode = String(productToResolve?.barcode || "").trim();
+    const knownStorePrices = Array.isArray(productToResolve?.known_store_prices)
+      ? productToResolve.known_store_prices
+      : (Array.isArray(productToResolve?.all_known_store_prices) ? productToResolve.all_known_store_prices : []);
+
+    let resolvedAny = false;
+
+    setDesiredShoppingListItems((prev) =>
+      prev.map((item) => {
+        if (resolvedAny) return item;
+
+        const isAlreadyResolved = Boolean(
+          String(item?.barcode || "").trim() ||
+          normalizeComparableKey(item?.canonical_product_key) ||
+          item?.catalog_id
+        );
+        if (isAlreadyResolved) return item;
+
+        const itemName = normalizeComparableText(item?.product_name || item?.name);
+        const itemBrand = normalizeComparableText(item?.brand);
+        const nameMatches = Boolean(targetName && itemName && targetName === itemName);
+        const brandCompatible = !targetBrand || !itemBrand || targetBrand === itemBrand;
+
+        if (!nameMatches || !brandCompatible) return item;
+
+        resolvedAny = true;
+        return {
+          ...item,
+          is_unresolved_desired: false,
+          catalog_id: productToResolve?.catalog_id || item?.catalog_id || null,
+          barcode: targetBarcode || item?.barcode || "",
+          canonical_product_key: targetCanonicalKey || item?.canonical_product_key || null,
+          product_name: String(productToResolve?.product_name || productToResolve?.name || item?.product_name || item?.name || "").trim(),
+          name: String(productToResolve?.product_name || productToResolve?.name || item?.product_name || item?.name || "").trim(),
+          brand: String(productToResolve?.brand || item?.brand || "").trim(),
+          size_value: String(productToResolve?.size_value || item?.size_value || "").trim(),
+          size_unit: String(productToResolve?.size_unit || item?.size_unit || "").trim(),
+          display_size: String(productToResolve?.display_size || item?.display_size || "").trim(),
+          quantity: String(item?.quantity || productToResolve?.quantity || "1").trim() || "1",
+          selected_store_location: productToResolve?.selected_store_location || locationToUse || item?.selected_store_location || null,
+          cheapest_location: productToResolve?.cheapest_location || item?.cheapest_location || null,
+          known_store_prices: knownStorePrices.length > 0 ? knownStorePrices : (item?.known_store_prices || []),
+          all_known_store_prices: Array.isArray(productToResolve?.all_known_store_prices)
+            ? productToResolve.all_known_store_prices
+            : (item?.all_known_store_prices || knownStorePrices),
+          cheapest_known_price: productToResolve?.cheapest_known_price ?? item?.cheapest_known_price ?? null,
+          cheapest_known_store_name: productToResolve?.cheapest_known_store_name || item?.cheapest_known_store_name || null,
+          price: productToResolve?.price ?? item?.price ?? null,
+          avg_price: productToResolve?.avg_price ?? item?.avg_price ?? null,
+          price_type: productToResolve?.price_type || item?.price_type || "each",
+          last_seen_location: locationToUse || item?.last_seen_location || null,
+          source: item?.source === "manual" ? "manual_resolved" : (item?.source || "manual"),
+        };
+      })
+    );
+
+    if (resolvedAny) {
+      setToast({ message: "Resolved a shopping-list item using new scan data", type: "success" });
+    }
   };
 
   const handleRemoveProductFromCart = () => {
@@ -7230,17 +7406,27 @@ export default function App() {
       ...prev,
       {
         id: Date.now(),
+        catalog_id: null,
         name: trimmed,
         barcode: "",
         product_name: trimmed,
+        canonical_product_key: null,
         brand: "",
         source: "manual",
+        is_unresolved_desired: true,
         size: null,
         unit: null,
         size_value: "",
         size_unit: "",
+        display_size: "",
         quantity: "1",
         notes: "",
+        known_store_prices: [],
+        all_known_store_prices: [],
+        selected_store_location: null,
+        cheapest_location: null,
+        cheapest_known_price: null,
+        cheapest_known_store_name: null,
         image: manualImage,
         cart_image_url: manualImage,
         price_badge_source: "manual",
@@ -8029,18 +8215,32 @@ export default function App() {
         brand: knownProduct.brand || "",
         category: knownProduct.category || "",
       });
+      setBestKnownLocation(knownLocation || null);
       setAwaitingPhoto(false);
       setSubmissionMethod("manual barcode");
+      if (knownLocation) {
+        setLocationSaved(true);
+        handleAddToContributionItems(knownProduct, {
+          ...knownLocation,
+          store_id: knownLocation?.store_id || selectedStore?.id || null,
+          store_name: knownLocation?.store_name || selectedStore?.name || "",
+        });
+        resolveUnresolvedDesiredListItemFromContribution(knownProduct, knownLocation);
+      } else {
+        setLocationSaved(false);
+      }
 
-      const addResult = handleAddToShoppingList(knownProduct, knownLocation);
-
-      if (!knownLocation && !addResult?.updated) {
+      if (!knownLocation) {
         openLocationPanel();
         setLocationPanelMode("quick");
         setLocationStep("aisle");
       }
 
-      setStatus("Known product found from manual barcode.");
+      setStatus(
+        knownLocation
+          ? "Known product found from barcode. Added to scan contributions. Add to your shopping list if needed."
+          : "Known product found from barcode. Add location to contribute store intelligence."
+      );
       return;
     }
 
@@ -8761,9 +8961,9 @@ export default function App() {
             </button>
           </div>
 
-          {/* ── Smart Cart & Route summary ── */}
+          {/* ── Desired Shopping List & Route summary ── */}
           <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 14, padding: "12px 16px", marginBottom: 12 }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: "#334155", marginBottom: 6, textTransform: "uppercase" }}>Smart Cart</div>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#334155", marginBottom: 6, textTransform: "uppercase" }}>Desired Shopping List</div>
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
               <div style={{ fontSize: 13, color: "#0f172a" }}>Items: <strong>{listCount}</strong></div>
               <div style={{ fontSize: 13, color: "#0f172a" }}>Est. total: <strong>${shoppingListEstimatedTotal.toFixed(2)}</strong></div>
@@ -8775,7 +8975,7 @@ export default function App() {
                 </div>
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
                   <div style={{ fontSize: 13, color: "#166534" }}>Located: <strong>{knownCount}</strong></div>
-                  <div style={{ fontSize: 13, color: "#92400e" }}>Needs location: <strong>{missingCount}</strong></div>
+                  <div style={{ fontSize: 13, color: "#92400e" }}>Unresolved: <strong>{missingCount}</strong></div>
                 </div>
               </>
             ) : (
@@ -8787,7 +8987,7 @@ export default function App() {
                 style={{ ...styles.secondaryButton, minHeight: 34, padding: "6px 12px" }}
                 onClick={() => setAppScreen("cart")}
               >
-                Open Smart Cart
+                Open Shopping List
               </button>
               <button
                 type="button"
@@ -9513,12 +9713,17 @@ export default function App() {
           </div>
         </div>
 
-        {/* ================= SMART CART ================= */}
+        {/* ================= DESIRED SHOPPING LIST + ROUTE ================= */}
         {effectiveScreen === "cart" && (
         <div style={{ ...styles.infoBox, marginBottom: 14, borderRadius: 14, boxShadow: "0 6px 18px rgba(15, 23, 42, 0.08)" }}>
           {/* Header */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 10 }}>
-            <div style={{ fontSize: 19, fontWeight: 900, color: "#0f172a" }}>Smart Shopping</div>
+            <div>
+              <div style={{ fontSize: 19, fontWeight: 900, color: "#0f172a" }}>Shopping List (Desired Items)</div>
+              <div style={{ fontSize: 12, color: "#475569", fontWeight: 700 }}>
+                Comparison uses shared product intelligence; route remains selected-store only.
+              </div>
+            </div>
             <button
               type="button"
               style={{ ...styles.secondaryButton, width: "auto", minHeight: 34, padding: "0 10px", fontSize: 12, flexShrink: 0 }}
@@ -9539,10 +9744,20 @@ export default function App() {
               <div style={{ fontSize: 18, fontWeight: 900, color: "#0f172a" }}>{smartShoppingKnownItemCount}</div>
             </div>
             <div style={{ border: "1px solid #fde68a", background: "#fffbeb", borderRadius: 10, padding: 8 }}>
-              <div style={{ fontSize: 11, fontWeight: 800, color: "#92400e", textTransform: "uppercase" }}>Needs Location</div>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "#92400e", textTransform: "uppercase" }}>Unresolved Items</div>
               <div style={{ fontSize: 18, fontWeight: 900, color: "#0f172a" }}>{smartShoppingNeedsLocationCount}</div>
             </div>
+            <div style={{ border: "1px solid #ddd6fe", background: "#f5f3ff", borderRadius: 10, padding: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "#5b21b6", textTransform: "uppercase" }}>Scan Contributions</div>
+              <div style={{ fontSize: 18, fontWeight: 900, color: "#0f172a" }}>{scanCartItems.length}</div>
+            </div>
           </div>
+
+          {smartShoppingItemsMissingSelectedStoreLocation.length > 0 ? (
+            <div style={{ marginBottom: 10, fontSize: 12, color: "#6d28d9", fontWeight: 700 }}>
+              {smartShoppingItemsMissingSelectedStoreLocation.length} item(s) have known price/location context in shared data but not for this selected store route yet.
+            </div>
+          ) : null}
 
           {/* State message */}
           <div style={{
@@ -9562,7 +9777,7 @@ export default function App() {
           {/* Empty state */}
           {smartShoppingKnownItemCount + smartShoppingNeedsLocationCount === 0 ? (
             <div style={{ fontSize: 14, fontWeight: 700, color: "#334155" }}>
-              Your Smart Cart is empty. Add items to begin.
+              Your desired shopping list is empty. Add items to begin.
             </div>
           ) : (
             <>
@@ -12151,7 +12366,7 @@ export default function App() {
             }}
           >
             <h2 style={{ fontSize: 24, fontWeight: 900, marginBottom: 10 }}>
-              Item added to cart. What next?
+              Contribution saved. What next?
             </h2>
 
             <p style={{ color: "#64748b", fontSize: 16, lineHeight: 1.5, marginBottom: 20 }}>
