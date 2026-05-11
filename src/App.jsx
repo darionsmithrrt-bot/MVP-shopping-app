@@ -1721,6 +1721,89 @@ export default function App() {
     );
   };
 
+  // Hydrate a catalog product with store-specific price offers from product_locations
+  const hydratePriceOffers = async (catalogProduct) => {
+    if (!catalogProduct) return { offers: [], bestOffer: null };
+
+    const barcode = String(catalogProduct?.barcode || "").trim() || null;
+    const canonicalKey = normalizeComparableKey(
+      catalogProduct?.canonical_product_key || buildComparableProductKey(catalogProduct)
+    ) || null;
+    const productName = String(catalogProduct?.product_name || catalogProduct?.name || "").trim();
+    const brand = String(catalogProduct?.brand || "").trim();
+    const sizeValue = String(catalogProduct?.size_value || "").trim();
+    const sizeUnit = String(catalogProduct?.size_unit || "").trim();
+
+    try {
+      const searchCandidates = {
+        barcodes: barcode ? [barcode] : [],
+        canonicalKeys: canonicalKey ? [canonicalKey] : [],
+        terms: [productName, brand, sizeValue].filter(Boolean),
+        lookupTerms: [productName, brand, sizeValue, sizeUnit].filter(Boolean),
+      };
+
+      const priceRows = await fetchComparableProductLocationRows(searchCandidates);
+
+      const debugEnabled = import.meta.env.DEV || window.localStorage.getItem("mvpDebug") === "true";
+      if (debugEnabled) {
+        console.debug("PRICE_HYDRATION_SEARCH", {
+          searchedProduct: `${productName} ${brand}`.trim(),
+          barcode,
+          canonicalKey,
+          matchingStrategy: barcode ? "barcode" : canonicalKey ? "canonical_key" : "normalized_fields",
+          offersFound: priceRows.length,
+        });
+      }
+
+      // Group by store and pick best price per store
+      const offersByStore = {};
+      priceRows.forEach((row) => {
+        const storeId = String(row?.store_id || "").trim();
+        if (!storeId) return;
+
+        const price = Number(row?.avg_price ?? row?.price);
+        if (!Number.isFinite(price) || price <= 0) return;
+
+        const offer = {
+          store_id: storeId,
+          store_name: row?.store_name || "Unknown store",
+          price: price,
+          aisle: row?.aisle || "",
+          section: row?.section || "",
+          shelf: row?.shelf || "",
+          confidence_score: Number(row?.confidence_score || 0),
+          updated_at: row?.last_confirmed_at || new Date().toISOString(),
+          price_type: row?.price_type || "each",
+        };
+
+        // Keep the best (lowest) price for each store
+        if (!offersByStore[storeId] || price < offersByStore[storeId].price) {
+          offersByStore[storeId] = offer;
+        }
+      });
+
+      const offers = Object.values(offersByStore).sort((a, b) => a.price - b.price);
+      const bestOffer = offers.length > 0 ? offers[0] : null;
+
+      if (debugEnabled) {
+        console.debug("PRICE_HYDRATION_RESULT", {
+          productName,
+          storesWithOffers: offers.length,
+          bestStoreAndPrice: bestOffer ? `${bestOffer.store_name} $${bestOffer.price.toFixed(2)}` : null,
+          allStores: offers.map((o) => ({ store: o.store_name, price: o.price })),
+        });
+      }
+
+      return { offers, bestOffer };
+    } catch (err) {
+      console.warn("PRICE_HYDRATION_ERROR", {
+        productName,
+        error: err?.message || String(err),
+      });
+      return { offers: [], bestOffer: null };
+    }
+  };
+
   const loadProfileFromLocalStorage = ({ guestOnly = false } = {}) => {
     const saved = localStorage.getItem("currentUserProfile");
 
@@ -2745,6 +2828,17 @@ export default function App() {
       const routeBarcode = String(item?.barcode || "").trim();
       const selectedStoreId = String(selectedStore?.id || "").trim();
 
+      // Priority 1: Check offers array (from hydrated catalog items)
+      const itemOffers = Array.isArray(item?.offers) ? item.offers : [];
+      if (itemOffers.length > 0) {
+        const bestOffer = itemOffers[0];
+        const bestOfferPrice = Number(bestOffer?.price);
+        if (Number.isFinite(bestOfferPrice) && bestOfferPrice > 0) {
+          return sum + bestOfferPrice;
+        }
+      }
+
+      // Priority 2: Use route location if in shopping mode for selected store
       if (shoppingMode && selectedStoreId && routeBarcode) {
         const routeLocation = storeRouteLocations[routeBarcode] || null;
         const locationStoreId = String(routeLocation?.store_id || "").trim();
@@ -2756,6 +2850,7 @@ export default function App() {
         }
       }
 
+      // Priority 3: Use price index from search/compare
       const priceInsights = itemKey ? cartPriceInsightsByKey[itemKey] || null : null;
       const cheapestRow = priceInsights?.cheapestRow || null;
       const cheapestPrice = Number(cheapestRow?.avg_price ?? cheapestRow?.price);
@@ -2763,6 +2858,7 @@ export default function App() {
         return sum + cheapestPrice;
       }
 
+      // Priority 4: Use last seen location or item price
       const lastSeenLocation = item?.last_seen_location || null;
       const fallbackPrice = Number(lastSeenLocation?.avg_price ?? lastSeenLocation?.price ?? item?.avg_price ?? item?.price);
       return Number.isNaN(fallbackPrice) || fallbackPrice <= 0 ? sum : sum + fallbackPrice;
@@ -6698,6 +6794,11 @@ export default function App() {
       return;
     }
 
+    // Hydrate with store-specific price offers
+    const { offers: priceOffers, bestOffer } = await hydratePriceOffers(result);
+    const bestOfferPrice = bestOffer?.price || cheapestKnownPrice;
+    const bestOfferStore = bestOffer?.store_name || cheapestKnownStoreName;
+
     const productToAdd = {
       catalog_id: result?.catalog_id || result?.id || null,
       id: result?.id || Date.now(),
@@ -6715,22 +6816,23 @@ export default function App() {
       cart_image_url: result?.cart_image_url || result?.verified_image_url || result?.image_url || null,
       verified_image_url: result?.verified_image_url || null,
       image_url: result?.image_url || null,
-      cheapest_known_price: cheapestKnownPrice,
-      cheapest_known_store_name: cheapestKnownStoreName,
+      cheapest_known_price: bestOfferPrice,
+      cheapest_known_store_name: bestOfferStore,
       known_store_prices: Array.isArray(result?.known_store_prices)
         ? result.known_store_prices
         : (Array.isArray(result?.all_known_store_prices) ? result.all_known_store_prices : []),
       all_known_store_prices: Array.isArray(result?.all_known_store_prices) ? result.all_known_store_prices : [],
       other_known_prices: Array.isArray(result?.other_known_prices) ? result.other_known_prices : [],
-      price: cheapestKnownPrice,
-      avg_price: cheapestKnownPrice,
-      price_type: cheapestLocation?.price_type || selectedLocation?.price_type || result?.price_type || "each",
+      offers: priceOffers,
+      price: bestOfferPrice,
+      avg_price: bestOfferPrice,
+      price_type: bestOffer?.price_type || cheapestLocation?.price_type || selectedLocation?.price_type || result?.price_type || "each",
       price_insights: {
         selected_store_location: result?.selected_store_location || null,
         cheapest_location: result?.cheapest_location || null,
         all_known_store_prices: Array.isArray(result?.all_known_store_prices) ? result.all_known_store_prices : [],
-        cheapest_known_price: cheapestKnownPrice,
-        cheapest_known_store_name: cheapestKnownStoreName,
+        cheapest_known_price: bestOfferPrice,
+        cheapest_known_store_name: bestOfferStore,
       },
       selected_store_location: selectedLocation || null,
       source: "shared_catalog",
@@ -10491,7 +10593,12 @@ export default function App() {
                         ? storeRouteLocations[String(item.barcode).trim()] || null
                         : null;
                       const routeStorePriceValue = Number(routeStorePrice?.avg_price ?? routeStorePrice?.price ?? 0) || null;
-                      const hasKnownPrice = cheapestKnownPrice != null || itemPrice != null || routeStorePriceValue != null;
+                      // Check offers array for best known price (from catalog hydration)
+                      const itemOffers = Array.isArray(item?.offers) ? item.offers : [];
+                      const bestOffer = itemOffers.length > 0 ? itemOffers[0] : null;
+                      const bestOfferPrice = bestOffer ? Number(bestOffer.price) : null;
+                      const bestOfferStore = bestOffer?.store_name || null;
+                      const hasKnownPrice = bestOfferPrice != null || cheapestKnownPrice != null || itemPrice != null || routeStorePriceValue != null;
 
                       console.log("SMART CART RENDER IMAGE:", {
                         productName: item.product_name,
@@ -10543,12 +10650,20 @@ export default function App() {
                       ⚠ Needs review
                     </div>
                   ) : null}
-                  {cheapestKnownPrice != null ? (
+                  {bestOfferPrice != null ? (
+                    <div style={{ fontSize: 12, color: "#166534", fontWeight: 800, marginBottom: 3 }}>
+                      Best known price: ${bestOfferPrice.toFixed(2)} at {bestOfferStore || "Unknown store"}
+                    </div>
+                  ) : cheapestKnownPrice != null ? (
                     <div style={{ fontSize: 12, color: "#166534", fontWeight: 800, marginBottom: 3 }}>
                       Cheapest known: {cheapestKnownStoreName || "Unknown store"} ${cheapestKnownPrice.toFixed(2)}
                     </div>
                   ) : null}
-                  {otherKnownPrices.length > 0 ? (
+                  {bestOfferPrice != null && otherKnownPrices.length > 0 ? (
+                    <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3 }}>
+                      Other stores: {itemOffers.slice(1, 3).map((offer) => `${offer.store_name} $${Number(offer.price).toFixed(2)}`).join(" • ")}
+                    </div>
+                  ) : !bestOfferPrice && otherKnownPrices.length > 0 ? (
                     <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3 }}>
                       Other known price: {otherKnownPrices.slice(0, 2).map((entry) => `${entry.storeName} $${entry.price.toFixed(2)}`).join(" • ")}
                     </div>
