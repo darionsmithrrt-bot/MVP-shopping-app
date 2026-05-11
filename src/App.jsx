@@ -182,17 +182,35 @@ const getStoreAddressSubtitle = (store) => {
   return cityState || "Address unavailable";
 };
 
-const identifyProductFromPhoto = async (imageUrls, barcode, imageRoles = [], visionContext = null) => {
+const identifyProductFromPhoto = async (imageUrls, barcode, imageRoles = [], visionContext = null, visionByRole = {}) => {
   const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls].filter(Boolean);
   const normalizedRoles = urls.map((_, index) => normalizeImageRole(imageRoles[index], index));
+  
+  // Extract role-specific vision data
+  const productLabelVision = visionByRole?.product_label || {};
+  const sizeLabelVision = visionByRole?.size_label || {};
+  const priceSignVision = visionByRole?.price_sign || {};
+  
   const payload = {
     imageUrls: urls,
     imageRoles: normalizedRoles,
     barcode,
+    // Merged vision context (backward compatible)
     visionText: visionContext?.text || "",
     visionLogos: visionContext?.logos || [],
     visionLabels: visionContext?.labels || [],
     visionObjects: visionContext?.objects || [],
+    // New: visionByRole for role-specific extraction
+    visionByRole: visionByRole || {},
+    productLabelText: productLabelVision?.text || "",
+    productLabelLabels: productLabelVision?.labels || [],
+    productLabelLogos: productLabelVision?.logos || [],
+    sizeLabelText: sizeLabelVision?.text || "",
+    sizeLabelLabels: sizeLabelVision?.labels || [],
+    sizeLabelObjects: sizeLabelVision?.objects || [],
+    priceSignText: priceSignVision?.text || "",
+    priceSignLabels: priceSignVision?.labels || [],
+    priceSignObjects: priceSignVision?.objects || [],
   };
   console.log("INVOKING identify-product WITH PAYLOAD:", payload);
   const { data, error } = await supabase.functions.invoke("identify-product", {
@@ -1092,6 +1110,8 @@ export default function App() {
   const [cartComparison, setCartComparison] = useState(null);
   const [cartPriceInsightsByKey, setCartPriceInsightsByKey] = useState({});
   const [isComparingCart, setIsComparingCart] = useState(false);
+  const [isManualCloudSaveInProgress, setIsManualCloudSaveInProgress] = useState(false);
+  const [manualCloudSaveStatus, setManualCloudSaveStatus] = useState("");
   const [storeRouteLocations, setStoreRouteLocations] = useState({});
   const [isLoadingStoreRoute, setIsLoadingStoreRoute] = useState(false);
   const [brandComparisonMode, setBrandComparisonMode] = useState("flexible");
@@ -1272,6 +1292,89 @@ export default function App() {
     pushCandidate([brand, productName, sizeKey].filter(Boolean).join("|"));
 
     return candidates;
+  };
+
+  const getProductIdentityParts = (value) => {
+    const barcode = String(value?.barcode || value?.last_seen_location?.barcode || "").trim();
+    const canonicalKey = normalizeComparableKey(
+      value?.canonical_product_key || value?.last_seen_location?.canonical_product_key
+    );
+    const brand = normalizeComparableText(value?.brand || value?.last_seen_location?.brand);
+    const productName = normalizeComparableText(
+      value?.product_name || value?.name || value?.title || value?.last_seen_location?.product_name || value?.last_seen_location?.name
+    );
+    const sizeValue = normalizeComparableText(value?.size_value || value?.last_seen_location?.size_value);
+    const sizeUnit = normalizeComparableText(
+      value?.size_unit || value?.last_seen_location?.size_unit || value?.unit || value?.last_seen_location?.unit
+    );
+    const sizePair = [sizeValue, sizeUnit].filter(Boolean).join(" ");
+    const displaySize = normalizeComparableText(value?.display_size || value?.last_seen_location?.display_size);
+    const category = normalizeComparableText(value?.category || value?.last_seen_location?.category);
+
+    return {
+      barcode,
+      canonicalKey,
+      brand,
+      productName,
+      sizePair,
+      displaySize,
+      category,
+    };
+  };
+
+  const getProductMatchMethod = (cartItem, row) => {
+    const cart = getProductIdentityParts(cartItem);
+    const candidate = getProductIdentityParts(row);
+
+    const normalizedBrandMode = String(brandComparisonMode || "flexible").toLowerCase();
+    const requireExactBrand = normalizedBrandMode === "brand_match" || normalizedBrandMode === "match exact brand";
+
+    // Priority 1: exact barcode always wins.
+    if (cart.barcode && candidate.barcode && cart.barcode === candidate.barcode) {
+      return "barcode";
+    }
+
+    // Priority 2: canonical key is strong identity, but exact-brand mode still enforces brand.
+    if (cart.canonicalKey && candidate.canonicalKey && cart.canonicalKey === candidate.canonicalKey) {
+      if (!requireExactBrand) return "canonical_key";
+      if (cart.brand && candidate.brand && cart.brand === candidate.brand) {
+        return "canonical_key";
+      }
+      return null;
+    }
+
+    // Size comparison is strict: prefer explicit size value+unit, otherwise allow exact display_size fallback.
+    const hasExactSizePair = Boolean(cart.sizePair && candidate.sizePair && cart.sizePair === candidate.sizePair);
+    const hasExactDisplaySizeFallback = Boolean(
+      !hasExactSizePair &&
+      cart.productName &&
+      candidate.productName &&
+      (cart.sizePair === "" || candidate.sizePair === "") &&
+      cart.displaySize &&
+      candidate.displaySize &&
+      cart.displaySize === candidate.displaySize
+    );
+    const hasExactSize = hasExactSizePair || hasExactDisplaySizeFallback;
+
+    if (!cart.productName || !candidate.productName || cart.productName !== candidate.productName || !hasExactSize) {
+      return null;
+    }
+
+    // Priority 3: strict identity requires exact brand + name + size.
+    if (cart.brand && candidate.brand && cart.brand === candidate.brand) {
+      return "strict_identity";
+    }
+
+    // Priority 4: flexible identity allows missing brand only when name+size are already exact and category does not conflict.
+    if (!requireExactBrand) {
+      const categoryCompatible = !cart.category || !candidate.category || cart.category === candidate.category;
+      const hasMissingBrand = !cart.brand || !candidate.brand;
+      if (hasMissingBrand && categoryCompatible) {
+        return "flexible_identity";
+      }
+    }
+
+    return null;
   };
 
   const isBetterPriceObservation = (candidate, current) => {
@@ -2661,6 +2764,12 @@ export default function App() {
   const shoppingListEstimatedTotal = calculateCartTotal(shoppingListItems);
 
   const cartComparisonBestStore = Array.isArray(cartComparison) && cartComparison.length > 0 ? cartComparison[0] : null;
+  const cartComparisonBestStoreTotalItems = Number(
+    cartComparisonBestStore?.total_item_count ?? cartComparisonBestStore?.total_items ?? shoppingListItems.length
+  ) || shoppingListItems.length;
+  const cartComparisonBestStoreCoverage = Number(
+    cartComparisonBestStore?.coverage_pct ?? cartComparisonBestStore?.coverage ?? 0
+  ) || 0;
   const cartComparisonWinningRows = cartComparisonBestStore
     ? Object.values(cartComparisonBestStore.itemsByKey || {}).map((entry) => ({
         product_name: entry?.cartItem?.product_name || entry?.cartItem?.name || entry?.row?.product_name || "Unknown product",
@@ -2671,8 +2780,16 @@ export default function App() {
         shelf: entry?.row?.shelf || "",
         store_name: entry?.row?.store_name || entry?.row?.stores?.name || "Unknown store",
         confidence_score: Number(entry?.row?.confidence_score || 0),
+        match_method: entry?.row?.match_method || "strict_identity",
       })).sort((a, b) => String(a.product_name).localeCompare(String(b.product_name), undefined, { sensitivity: "base", numeric: true }))
     : [];
+  const cartComparisonAlternativeStores = Array.isArray(cartComparison)
+    ? cartComparison.slice(1, 4)
+    : [];
+  const cartComparisonDebugKeys = shoppingListItems.flatMap((item) => buildComparableProductKeyCandidates(item));
+  const cartComparisonMissingCanonicalCount = shoppingListItems.filter(
+    (item) => !normalizeComparableKey(item?.canonical_product_key || item?.last_seen_location?.canonical_product_key)
+  ).length;
 
   // smartCartItems: used for general cart display (all items, store-agnostic)
   const smartCartItems = shoppingListItems
@@ -3900,40 +4017,103 @@ export default function App() {
 
       if (saveError) throw new Error(`Database save failed: ${saveError.message}`);
 
-      // -- Call AI with all uploaded URLs --------------------------------------
+      // -- Call AI vision analysis for all uploaded images ----------------------
       setPhotoAnalysisStatus('analyzing');
       setStatus(`Analyzing ${uploadedUrls.length} photo${uploadedUrls.length > 1 ? "s" : ""} with AI...`);
-
-      const imageUrl = uploadedUrls[0];
-      const isValidPublicImageUrl =
-        /^https?:\/\//i.test(String(imageUrl || "")) &&
-        !/^blob:/i.test(String(imageUrl || "")) &&
-        !/^file:/i.test(String(imageUrl || ""));
-
-      let visionData = null;
-      let visionError = null;
-
-      if (isValidPublicImageUrl) {
-        const visionInvokeResult = await supabase.functions.invoke("analyze-vision", {
-          body: { imageUrl }
-        });
-        visionData = visionInvokeResult.data;
-        visionError = visionInvokeResult.error;
-      }
-
-      console.log("VISION RESULT:", visionData);
-      console.log("VISION ERROR:", visionError);
-
-      const visionContext = visionError ? null : visionData;
 
       const imageRoles = capturedPhotos
         .slice(0, files.length)
         .map((photo, index) => normalizeImageRole(photo?.role, index));
+
+      // Build visionByRole structure by calling analyze-vision for each image
+      const visionByRole = {};
+      const visionResults = [];
+
+      for (let i = 0; i < uploadedUrls.length; i++) {
+        const imageUrl = uploadedUrls[i];
+        const role = imageRoles[i] || "unknown";
+        const isValidPublicImageUrl =
+          /^https?:\/\//i.test(String(imageUrl || "")) &&
+          !/^blob:/i.test(String(imageUrl || "")) &&
+          !/^file:/i.test(String(imageUrl || ""));
+
+        if (isValidPublicImageUrl) {
+          try {
+            const visionInvokeResult = await supabase.functions.invoke("analyze-vision", {
+              body: { imageUrl, role }
+            });
+            const visionData = visionInvokeResult.data;
+            const visionError = visionInvokeResult.error;
+
+            if (!visionError && visionData) {
+              visionByRole[role] = visionData;
+              visionResults.push(visionData);
+              console.log(`VISION RESULT FOR ${role}:`, visionData);
+            } else {
+              console.warn(`VISION ERROR FOR ${role}:`, visionError);
+              visionByRole[role] = { text: "", labels: [], logos: [], objects: [], confidence: 0 };
+            }
+          } catch (err) {
+            console.warn(`VISION INVOKE EXCEPTION FOR ${role}:`, err);
+            visionByRole[role] = { text: "", labels: [], logos: [], objects: [], confidence: 0 };
+          }
+        } else {
+          console.warn(`INVALID URL FOR ${role}:`, imageUrl);
+          visionByRole[role] = { text: "", labels: [], logos: [], objects: [], confidence: 0 };
+        }
+      }
+
+      // Build merged vision context from all results
+      const mergedVisionText = visionResults.map((r) => r.text || "").filter(Boolean).join(" ");
+      const mergedVisionLabels = [];
+      const mergedVisionLogos = [];
+      const mergedVisionObjects = [];
+      const seenLabels = new Set();
+      const seenLogos = new Set();
+      const seenObjects = new Set();
+
+      for (const result of visionResults) {
+        if (Array.isArray(result.labels)) {
+          for (const label of result.labels) {
+            if (!seenLabels.has(label.description)) {
+              mergedVisionLabels.push(label);
+              seenLabels.add(label.description);
+            }
+          }
+        }
+        if (Array.isArray(result.logos)) {
+          for (const logo of result.logos) {
+            if (!seenLogos.has(logo.description)) {
+              mergedVisionLogos.push(logo);
+              seenLogos.add(logo.description);
+            }
+          }
+        }
+        if (Array.isArray(result.objects)) {
+          for (const obj of result.objects) {
+            if (!seenObjects.has(obj.name)) {
+              mergedVisionObjects.push(obj);
+              seenObjects.add(obj.name);
+            }
+          }
+        }
+      }
+
+      const visionContext = {
+        text: mergedVisionText,
+        labels: mergedVisionLabels.slice(0, 20),
+        logos: mergedVisionLogos.slice(0, 10),
+        objects: mergedVisionObjects.slice(0, 20),
+      };
+
+      console.log("MERGED VISION CONTEXT:", visionContext);
+
       let aiResponse = await identifyProductFromPhoto(
         uploadedUrls,
         normalizedBarcode,
         imageRoles,
-        visionContext
+        visionContext,
+        visionByRole
       );
       console.log("FULL AI RESPONSE:", aiResponse);
       
@@ -5922,14 +6102,14 @@ export default function App() {
 
       let { data: catalogRows, error: catalogError } = await supabase
         .from("catalog_products")
-        .select("id, barcode, product_name, brand, category, image_url, verified_image_url, size_value, size_unit, quantity, source")
+        .select("id, barcode, canonical_product_key, product_name, brand, category, image_url, verified_image_url, size_value, size_unit, display_size, quantity, source")
         .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},category.ilike.${wildcardTerm}`)
         .limit(25);
 
       if (catalogError && isMissingOptionalColumnError(catalogError)) {
         const fallbackResult = await supabase
           .from("catalog_products")
-          .select("id, barcode, product_name, brand, image_url, size_value, size_unit, quantity, source")
+          .select("id, barcode, canonical_product_key, product_name, brand, image_url, size_value, size_unit, display_size, quantity, source")
           .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm}`)
           .limit(25);
 
@@ -5945,58 +6125,166 @@ export default function App() {
       }
 
       const safeRows = Array.isArray(catalogRows) ? catalogRows : [];
-      const searchTerms = [
-        safeTerm,
-        ...safeRows.flatMap((row) => [row?.product_name, row?.brand, row?.category]),
-      ].map(normalizeComparableText).filter(Boolean);
       const barcodes = [...new Set(safeRows.map((row) => String(row?.barcode || "").trim()).filter(Boolean))];
+      const canonicalKeys = [...new Set(safeRows.map((row) => normalizeComparableKey(row?.canonical_product_key)).filter(Boolean))];
+
+      const makeStrictIdentitySignature = (value) => {
+        const brand = normalizeComparableText(value?.brand || value?.last_seen_location?.brand);
+        const productName = normalizeComparableText(
+          value?.product_name || value?.name || value?.title || value?.last_seen_location?.product_name || value?.last_seen_location?.name
+        );
+        const sizeValue = normalizeComparableText(value?.size_value || value?.last_seen_location?.size_value);
+        const sizeUnit = normalizeComparableText(value?.size_unit || value?.last_seen_location?.size_unit || value?.unit || value?.last_seen_location?.unit);
+        const displaySize = normalizeComparableText(value?.display_size || value?.last_seen_location?.display_size);
+        const sizeKey = [sizeValue, sizeUnit].filter(Boolean).join(" ") || displaySize;
+
+        if (!brand || !productName || !sizeKey) return "";
+        return normalizeComparableKey([brand, productName, sizeKey].join("|"));
+      };
+
+      const strictSignatures = [...new Set(safeRows.map(makeStrictIdentitySignature).filter(Boolean))];
+      const searchProductNames = [...new Set(safeRows.map((row) => String(row?.product_name || "").trim()).filter(Boolean))];
 
       let locationRows = [];
       try {
-        locationRows = await fetchComparableProductLocationRows({ terms: searchTerms, barcodes });
+        const mapRows = [];
+        const mapSelect = "store_id, store_name, barcode, canonical_product_key, product_name, brand, category, size_value, size_unit, display_size, aisle, section, shelf, price, avg_price, price_type, price_count, price_confidence, confidence_score, last_confirmed_at, updated_at";
+
+        const appendRows = (rows) => {
+          if (Array.isArray(rows)) {
+            mapRows.push(...rows);
+          }
+        };
+
+        if (barcodes.length > 0) {
+          const { data: barcodeRows } = await supabase
+            .from("store_product_price_map_v1")
+            .select(mapSelect)
+            .in("barcode", barcodes)
+            .limit(300);
+          appendRows(barcodeRows);
+        }
+
+        if (canonicalKeys.length > 0) {
+          const { data: canonicalRows } = await supabase
+            .from("store_product_price_map_v1")
+            .select(mapSelect)
+            .in("canonical_product_key", canonicalKeys)
+            .limit(300);
+          appendRows(canonicalRows);
+        }
+
+        if (searchProductNames.length > 0) {
+          const { data: nameRows } = await supabase
+            .from("store_product_price_map_v1")
+            .select(mapSelect)
+            .in("product_name", searchProductNames.slice(0, 25))
+            .limit(500);
+          appendRows(nameRows);
+        }
+
+        const deduped = [];
+        const seen = new Set();
+        for (const row of mapRows) {
+          const key = [
+            String(row?.store_id || ""),
+            String(row?.barcode || ""),
+            String(row?.canonical_product_key || ""),
+            String(row?.product_name || ""),
+            String(row?.brand || ""),
+            String(row?.display_size || ""),
+            String(row?.avg_price || row?.price || ""),
+          ].join("|");
+          if (seen.has(key)) continue;
+          seen.add(key);
+          deduped.push(row);
+        }
+
+        locationRows = deduped;
       } catch (locationMergeError) {
         console.warn("CATALOG LOCATION MERGE WARNING:", locationMergeError?.message || locationMergeError);
       }
 
-      const locationIndex = buildPriceObservationIndex(locationRows);
       const mergedMap = new Map();
 
       const addMergedRow = (row, source = "catalog") => {
         const key = buildComparableProductKey(row) || String(row?.barcode || "").trim() || `${normalizeComparableText(row?.product_name)}|${normalizeComparableText(row?.brand)}`;
         if (!key) return;
 
-        const summary = locationIndex[key] || null;
-        const cheapestRow = summary?.cheapestRow || null;
-        const bestLocation = cheapestRow || null;
+        const rowBarcode = String(row?.barcode || "").trim();
+        const rowCanonical = normalizeComparableKey(row?.canonical_product_key) || normalizeComparableKey(buildComparableProductKey(row));
+        const rowStrictSignature = makeStrictIdentitySignature(row);
+
+        const matchedRows = (locationRows || []).filter((locRow) => {
+          const locBarcode = String(locRow?.barcode || "").trim();
+          if (rowBarcode && locBarcode && rowBarcode === locBarcode) return true;
+
+          const locCanonical = normalizeComparableKey(locRow?.canonical_product_key);
+          if (rowCanonical && locCanonical && rowCanonical === locCanonical) return true;
+
+          const locStrictSignature = makeStrictIdentitySignature(locRow);
+          return Boolean(rowStrictSignature && locStrictSignature && rowStrictSignature === locStrictSignature);
+        });
+
+        const rowsByStore = {};
+        matchedRows.forEach((matchedRow) => {
+          const storeId = String(matchedRow?.store_id || "").trim();
+          if (!storeId) return;
+          const existingRow = rowsByStore[storeId];
+          if (!existingRow || isBetterPriceObservation(matchedRow, existingRow)) {
+            rowsByStore[storeId] = matchedRow;
+          }
+        });
+
+        const bestRows = Object.values(rowsByStore);
+        const selectedStoreId = String(selectedStore?.id || "").trim();
+        const selectedLocation = selectedStoreId ? (rowsByStore[selectedStoreId] || null) : null;
+        const cheapestRow = bestRows.reduce((current, candidate) => {
+          if (!current) return candidate;
+          return isBetterPriceObservation(candidate, current) ? candidate : current;
+        }, null);
+
+        const allKnownStorePrices = bestRows
+          .map((storeRow) => ({
+            store_id: storeRow?.store_id || null,
+            store_name: storeRow?.store_name || "Unknown store",
+            price: Number(storeRow?.avg_price ?? storeRow?.price ?? 0) || null,
+            price_type: storeRow?.price_type || "each",
+            aisle: storeRow?.aisle || "",
+            section: storeRow?.section || "",
+            shelf: storeRow?.shelf || "",
+            confidence_score: Number(storeRow?.confidence_score || 0),
+          }))
+          .filter((entry) => entry.price != null)
+          .sort((a, b) => {
+            if (a.price !== b.price) return a.price - b.price;
+            return Number(b.confidence_score || 0) - Number(a.confidence_score || 0);
+          });
+
         const hasImage = Boolean(row?.verified_image_url || row?.image_url || cheapestRow?.verified_image_url || cheapestRow?.image_url);
-        const otherKnownPrices = summary
-          ? Object.entries(summary.rowsByStore || {})
-              .map(([, storeRow]) => storeRow)
-              .filter((storeRow) => storeRow !== cheapestRow)
-              .map((storeRow) => ({
-                store_id: storeRow?.store_id || null,
-                store_name: storeRow?.stores?.name || storeRow?.store_name || "Unknown store",
-                price: Number(storeRow?.avg_price ?? storeRow?.price ?? 0) || null,
-                price_type: storeRow?.price_type || "each",
-              }))
-          : [];
+        const otherKnownPrices = allKnownStorePrices
+          .filter((entry) => entry.store_id !== String(cheapestRow?.store_id || ""));
 
         const merged = {
           ...row,
           source,
-          selected_store_location: bestLocation,
-          cheapest_known_store_name: cheapestRow?.stores?.name || cheapestRow?.store_name || null,
+          canonical_product_key: rowCanonical || row?.canonical_product_key || null,
+          selected_store_location: selectedLocation,
+          cheapest_location: cheapestRow,
+          cheapest_known_store_name: cheapestRow?.store_name || null,
           cheapest_known_price: Number(cheapestRow?.avg_price ?? cheapestRow?.price ?? 0) || null,
+          all_known_store_prices: allKnownStorePrices,
           other_known_prices: otherKnownPrices,
-          aisle: bestLocation?.aisle || row?.aisle || "",
-          section: bestLocation?.section || row?.section || "",
-          shelf: bestLocation?.shelf || row?.shelf || "",
-          price: bestLocation?.price ?? row?.price ?? null,
-          avg_price: bestLocation?.avg_price ?? row?.avg_price ?? null,
-          price_type: bestLocation?.price_type || row?.price_type || "each",
-          confidence_score: Number(bestLocation?.confidence_score || row?.confidence_score || 0),
+          aisle: selectedLocation?.aisle || row?.aisle || "",
+          section: selectedLocation?.section || row?.section || "",
+          shelf: selectedLocation?.shelf || row?.shelf || "",
+          price: selectedLocation?.price ?? row?.price ?? null,
+          avg_price: selectedLocation?.avg_price ?? row?.avg_price ?? null,
+          price_type: selectedLocation?.price_type || row?.price_type || "each",
+          confidence_score: Number(selectedLocation?.confidence_score || row?.confidence_score || 0),
           hasImage,
-          hasSelectedStoreLocation: Boolean(bestLocation?.aisle || bestLocation?.section || bestLocation?.shelf),
+          hasSelectedStoreLocation: Boolean(selectedLocation?.aisle || selectedLocation?.section || selectedLocation?.shelf),
+          hasKnownPriceAtAnotherStore: Boolean(!selectedLocation && allKnownStorePrices.length > 0),
         };
 
         const existing = mergedMap.get(key);
@@ -6006,25 +6294,6 @@ export default function App() {
       };
 
       safeRows.forEach((row) => addMergedRow(row, "catalog"));
-
-      Object.entries(locationIndex).forEach(([key, summary]) => {
-        if (mergedMap.has(key)) return;
-        const bestLocation = summary?.cheapestRow || null;
-        if (!bestLocation) return;
-
-        addMergedRow({
-          product_name: bestLocation?.product_name || "Unknown product",
-          brand: bestLocation?.brand || "",
-          category: bestLocation?.category || "",
-          size_value: bestLocation?.size_value || "",
-          size_unit: bestLocation?.size_unit || "",
-          display_size: bestLocation?.display_size || "",
-          barcode: bestLocation?.barcode || "",
-          image_url: null,
-          verified_image_url: null,
-          canonical_product_key: key,
-        }, "location");
-      });
 
       const mergedResults = Array.from(mergedMap.values()).sort((a, b) => {
         if (a.hasSelectedStoreLocation !== b.hasSelectedStoreLocation) {
@@ -6256,6 +6525,42 @@ export default function App() {
     console.info("MANUAL CLOUD TEST COMPLETE");
   };
 
+  const handleManualCloudListSave = async () => {
+    if (!canUseSavedShoppingList()) {
+      setManualCloudSaveStatus("Could not save list");
+      return;
+    }
+
+    setIsManualCloudSaveInProgress(true);
+    setManualCloudSaveStatus("Saving...");
+
+    try {
+      const normalizedItems = (shoppingListItems || []).map((item) => {
+        const existingKey = normalizeComparableKey(item?.canonical_product_key || item?.last_seen_location?.canonical_product_key);
+        if (existingKey) return item;
+
+        const derivedKey = buildComparableProductKey(item);
+        if (!derivedKey) return item;
+
+        return {
+          ...item,
+          canonical_product_key: derivedKey,
+        };
+      });
+
+      setShoppingListItems(normalizedItems);
+      await saveShoppingListToCloud(normalizedItems, { allowEmptySave: true });
+      setManualCloudSaveStatus("Saved to your profile");
+      setToast({ message: "Saved to your profile", type: "success" });
+    } catch (err) {
+      console.warn("MANUAL CLOUD LIST SAVE WARNING:", err?.message || err);
+      setManualCloudSaveStatus("Could not save list");
+      setToast({ message: "Could not save list", type: "error" });
+    } finally {
+      setIsManualCloudSaveInProgress(false);
+    }
+  };
+
   const loadShoppingListFromCloud = async () => {
     if (!canUseSavedShoppingList()) return;
 
@@ -6305,11 +6610,12 @@ export default function App() {
     const productName = String(result?.product_name || "").trim();
     const barcode = String(result?.barcode || "").trim();
     const selectedLocation = result?.selected_store_location || {};
+    const cheapestLocation = result?.cheapest_location || {};
     const canonicalProductKey = normalizeComparableKey(
-      result?.canonical_product_key || selectedLocation?.canonical_product_key || buildComparableProductKey(result)
+      result?.canonical_product_key || selectedLocation?.canonical_product_key || cheapestLocation?.canonical_product_key || buildComparableProductKey(result)
     ) || null;
-    const cheapestKnownPrice = Number(result?.cheapest_known_price ?? selectedLocation?.avg_price ?? selectedLocation?.price ?? 0) || null;
-    const cheapestKnownStoreName = result?.cheapest_known_store_name || selectedLocation?.store_name || null;
+    const cheapestKnownPrice = Number(result?.cheapest_known_price ?? cheapestLocation?.avg_price ?? cheapestLocation?.price ?? selectedLocation?.avg_price ?? selectedLocation?.price ?? 0) || null;
+    const cheapestKnownStoreName = result?.cheapest_known_store_name || cheapestLocation?.store_name || selectedLocation?.store_name || null;
 
     if (!productName && !barcode) {
       setError("Could not add this item.");
@@ -6336,10 +6642,18 @@ export default function App() {
       image_url: result?.image_url || null,
       cheapest_known_price: cheapestKnownPrice,
       cheapest_known_store_name: cheapestKnownStoreName,
+      all_known_store_prices: Array.isArray(result?.all_known_store_prices) ? result.all_known_store_prices : [],
       other_known_prices: Array.isArray(result?.other_known_prices) ? result.other_known_prices : [],
       price: cheapestKnownPrice,
       avg_price: cheapestKnownPrice,
-      price_type: selectedLocation?.price_type || result?.price_type || "each",
+      price_type: cheapestLocation?.price_type || selectedLocation?.price_type || result?.price_type || "each",
+      price_insights: {
+        selected_store_location: result?.selected_store_location || null,
+        cheapest_location: result?.cheapest_location || null,
+        all_known_store_prices: Array.isArray(result?.all_known_store_prices) ? result.all_known_store_prices : [],
+        cheapest_known_price: cheapestKnownPrice,
+        cheapest_known_store_name: cheapestKnownStoreName,
+      },
       selected_store_location: selectedLocation || null,
       source: "shared_catalog",
     };
@@ -6353,17 +6667,18 @@ export default function App() {
       selectedLocation?.store_id
     );
 
-    const lastSeenLocation = hasSelectedStoreLocation
+    const fallbackLocation = hasSelectedStoreLocation ? selectedLocation : cheapestLocation;
+    const lastSeenLocation = fallbackLocation && Object.keys(fallbackLocation).length > 0
       ? {
-          store_id: selectedLocation?.store_id || null,
-          store_name: selectedLocation?.store_name || selectedLocation?.stores?.name || "",
-          aisle: selectedLocation?.aisle || "",
-          section: selectedLocation?.section || "",
-          shelf: selectedLocation?.shelf || "",
-          price: selectedLocation?.price ?? result?.price ?? cheapestKnownPrice ?? null,
-          avg_price: selectedLocation?.avg_price ?? result?.avg_price ?? cheapestKnownPrice ?? null,
-          price_type: selectedLocation?.price_type || result?.price_type || "each",
-          confidence_score: Number(result?.confidence_score ?? selectedLocation?.confidence_score ?? 0),
+          store_id: fallbackLocation?.store_id || null,
+          store_name: fallbackLocation?.store_name || fallbackLocation?.stores?.name || "",
+          aisle: fallbackLocation?.aisle || "",
+          section: fallbackLocation?.section || "",
+          shelf: fallbackLocation?.shelf || "",
+          price: fallbackLocation?.price ?? result?.price ?? cheapestKnownPrice ?? null,
+          avg_price: fallbackLocation?.avg_price ?? result?.avg_price ?? cheapestKnownPrice ?? null,
+          price_type: fallbackLocation?.price_type || result?.price_type || "each",
+          confidence_score: Number(result?.confidence_score ?? fallbackLocation?.confidence_score ?? 0),
           canonical_product_key: canonicalProductKey,
         }
       : null;
@@ -7450,10 +7765,14 @@ export default function App() {
       Object.entries(priceBucket.rowsByStore || {}).forEach(([storeId, row]) => {
         if (!storeId) return;
 
-        if (brandMode === "brand_match") {
+        // Token lookups can fetch candidate rows broadly; final store comparison must pass strict identity checks.
+        const matchMethod = getProductMatchMethod(cartItem, row);
+        if (!matchMethod) return;
+
+        if (brandMode === "brand_match" || brandMode === "match exact brand") {
           const cartBrand = normalizeComparableText(cartItem?.brand);
           const rowBrand = normalizeComparableText(row?.brand);
-          if (cartBrand && rowBrand && cartBrand !== rowBrand) {
+          if (matchMethod !== "barcode" && (!cartBrand || !rowBrand || cartBrand !== rowBrand)) {
             return;
           }
         }
@@ -7468,7 +7787,10 @@ export default function App() {
 
         const current = storeGroups[storeId].itemsByKey[itemKey];
         if (!current || isBetterPriceObservation(row, current.row)) {
-          storeGroups[storeId].itemsByKey[itemKey] = { row, cartItem };
+          storeGroups[storeId].itemsByKey[itemKey] = {
+            row: { ...row, match_method: matchMethod },
+            cartItem,
+          };
         }
       });
     });
@@ -7521,57 +7843,152 @@ export default function App() {
     setError("");
 
     try {
-      const cartBarcodes = [...new Set(shoppingListItems.map((item) => String(item?.barcode || "").trim()).filter(Boolean))];
-      const cartKeys = [...new Set(shoppingListItems.flatMap((item) => buildComparableProductKeyCandidates(item)).filter(Boolean))];
-      const cartTerms = [...new Set(shoppingListItems.flatMap((item) => [item?.product_name, item?.name, item?.brand, item?.category, item?.size_value, item?.size_unit, item?.display_size]).map(normalizeComparableText).filter(Boolean))];
-      const cartLookupTerms = [...new Set(shoppingListItems.flatMap((item) => buildComparableLookupTerms(item)))];
+      const rpcCartItems = shoppingListItems.map((item) => ({
+        barcode: String(item?.barcode || "").trim() || null,
+        canonical_product_key: normalizeComparableKey(
+          item?.canonical_product_key || item?.last_seen_location?.canonical_product_key || buildComparableProductKey(item)
+        ) || null,
+        product_name: String(item?.product_name || item?.name || "").trim() || null,
+        brand: String(item?.brand || "").trim() || null,
+        category: String(item?.category || "").trim() || null,
+        size_value: String(item?.size_value || "").trim() || null,
+        size_unit: String(item?.size_unit || "").trim() || null,
+        display_size: String(item?.display_size || "").trim() || null,
+        quantity: String(item?.quantity || "1").trim() || "1",
+      }));
 
-      console.info("CART ITEMS BEING COMPARED", shoppingListItems.map((item) => ({
-        product_name: item?.product_name || item?.name || null,
-        brand: item?.brand || null,
-        barcode: item?.barcode || null,
-      })));
-      console.info("CART COMPARABLE KEYS", cartKeys);
+      console.info("RPC CART ITEM COUNT", rpcCartItems.length);
 
-      const priceRows = await fetchComparableProductLocationRows({
-        barcodes: cartBarcodes,
-        canonicalKeys: cartKeys,
-        terms: cartTerms,
-        lookupTerms: cartLookupTerms,
-      });
+      const runLocalFallbackComparison = async () => {
+        const cartBarcodes = [...new Set(shoppingListItems.map((item) => String(item?.barcode || "").trim()).filter(Boolean))];
+        const cartKeys = [...new Set(shoppingListItems.flatMap((item) => buildComparableProductKeyCandidates(item)).filter(Boolean))];
+        const cartTerms = [...new Set(shoppingListItems.flatMap((item) => [item?.product_name, item?.name, item?.brand, item?.category, item?.size_value, item?.size_unit, item?.display_size]).map(normalizeComparableText).filter(Boolean))];
+        const cartLookupTerms = [...new Set(shoppingListItems.flatMap((item) => buildComparableLookupTerms(item)))];
 
-      console.info("FETCHED PRODUCT_LOCATIONS ROWS", priceRows.map((row) => ({
-        store_id: row?.store_id || null,
-        store_name: row?.store_name || row?.stores?.name || null,
-        barcode: row?.barcode || null,
-        canonical_product_key: row?.canonical_product_key || null,
-        product_name: row?.product_name || null,
-        brand: row?.brand || null,
-        price: row?.avg_price ?? row?.price ?? null,
-      })));
+        console.info("CART ITEMS BEING COMPARED", shoppingListItems.map((item) => ({
+          product_name: item?.product_name || item?.name || null,
+          brand: item?.brand || null,
+          barcode: item?.barcode || null,
+        })));
+        console.info("CART COMPARABLE KEYS", cartKeys);
 
-      console.info("PRICE MATCH ROWS", {
-        cartItemCount: shoppingListItems.length,
-        rowCount: priceRows.length,
-      });
-
-      const priceIndex = buildPriceObservationIndex(priceRows);
-      console.info("PRICE INDEX KEYS", Object.keys(priceIndex || {}));
-      setCartPriceInsightsByKey(priceIndex);
-
-      const sortedResults = calculateBestStore(shoppingListItems, priceRows || [], brandComparisonMode);
-
-      console.info("FINAL STORE COMPARISON RESULTS", sortedResults || []);
-      console.info("CHEAPEST STORE RESULT", sortedResults?.[0] || null);
-      if ((!sortedResults || sortedResults.length === 0) && (import.meta.env.DEV || window.localStorage.getItem("mvpDebug") === "true")) {
-        console.warn("CART COMPARISON NO MATCHES", {
-          cartComparableKeys: cartKeys,
-          fetchedRowCount: priceRows.length,
-          cartItemCount: shoppingListItems.length,
+        const priceRows = await fetchComparableProductLocationRows({
+          barcodes: cartBarcodes,
+          canonicalKeys: cartKeys,
+          terms: cartTerms,
+          lookupTerms: cartLookupTerms,
         });
+
+        console.info("FETCHED PRODUCT_LOCATIONS ROWS", priceRows.map((row) => ({
+          store_id: row?.store_id || null,
+          store_name: row?.store_name || row?.stores?.name || null,
+          barcode: row?.barcode || null,
+          canonical_product_key: row?.canonical_product_key || null,
+          product_name: row?.product_name || null,
+          brand: row?.brand || null,
+          price: row?.avg_price ?? row?.price ?? null,
+        })));
+
+        console.info("PRICE MATCH ROWS", {
+          cartItemCount: shoppingListItems.length,
+          rowCount: priceRows.length,
+        });
+
+        const priceIndex = buildPriceObservationIndex(priceRows);
+        console.info("PRICE INDEX KEYS", Object.keys(priceIndex || {}));
+        setCartPriceInsightsByKey(priceIndex);
+
+        const sortedResults = calculateBestStore(shoppingListItems, priceRows || [], brandComparisonMode);
+
+        console.info("FINAL STORE COMPARISON RESULTS", sortedResults || []);
+        console.info("CHEAPEST STORE RESULT", sortedResults?.[0] || null);
+        if ((!sortedResults || sortedResults.length === 0) && (import.meta.env.DEV || window.localStorage.getItem("mvpDebug") === "true")) {
+          console.warn("CART COMPARISON NO MATCHES", {
+            cartComparableKeys: cartKeys,
+            fetchedRowCount: priceRows.length,
+            cartItemCount: shoppingListItems.length,
+          });
+        }
+
+        setCartComparison(sortedResults);
+        console.info("FALLBACK USED", true);
+        setToast({ message: "Cart comparison complete", type: "success" });
+      };
+
+      try {
+        const { data: rpcRows, error: rpcError } = await supabase.rpc("find_cheapest_store_for_cart_v1", {
+          cart_items: rpcCartItems,
+          brand_mode: brandComparisonMode,
+        });
+
+        if (rpcError) {
+          throw rpcError;
+        }
+
+        const safeRpcRows = Array.isArray(rpcRows) ? rpcRows : [];
+        console.info("RPC RESULT COUNT", safeRpcRows.length);
+        console.info("FALLBACK USED", false);
+
+        if (safeRpcRows.length === 0) {
+          setCartComparison([]);
+          setError("No comparable price records found yet for these cart items.");
+          setToast({ message: "Cart comparison complete", type: "success" });
+          return;
+        }
+
+        const mappedResults = safeRpcRows.map((row) => {
+          const breakdown = Array.isArray(row?.item_breakdown) ? row.item_breakdown : [];
+          const itemsByKey = {};
+
+          breakdown.forEach((entry, index) => {
+            const key = normalizeComparableKey(
+              `${entry?.cart_product_name || "item"}|${entry?.matched_product_name || ""}|${index}`
+            ) || `item-${index}`;
+            itemsByKey[key] = {
+              row: {
+                store_id: row?.store_id || null,
+                store_name: row?.store_name || null,
+                product_name: entry?.matched_product_name || entry?.cart_product_name || "Unknown product",
+                brand: entry?.brand || null,
+                size_value: null,
+                size_unit: null,
+                display_size: entry?.size || null,
+                avg_price: entry?.price_used ?? null,
+                price: entry?.price_used ?? null,
+                price_type: entry?.price_type || "each",
+                aisle: entry?.aisle || "",
+                section: entry?.section || "",
+                shelf: entry?.shelf || "",
+                confidence_score: Number(entry?.confidence_score || 0),
+                match_method: entry?.match_method || null,
+              },
+              cartItem: {
+                product_name: entry?.cart_product_name || entry?.matched_product_name || "Unknown product",
+              },
+            };
+          });
+
+          return {
+            store_id: row?.store_id || null,
+            store: { name: row?.store_name || "Unknown store" },
+            matched_count: Number(row?.matched_count || 0),
+            total_items: Number(row?.total_item_count || shoppingListItems.length),
+            total_price: Number(row?.total_price || 0),
+            coverage: Number(row?.coverage_pct || 0),
+            avg_confidence: Number(row?.avg_confidence || 0),
+            brand_match_pct: null,
+            is_estimate: false,
+            decision_reason: row?.decision_reason || "",
+            itemsByKey,
+          };
+        });
+
+        setCartComparison(mappedResults);
+        setToast({ message: "Cart comparison complete", type: "success" });
+      } catch (rpcErr) {
+        console.warn("CART COMPARISON RPC WARNING:", rpcErr?.message || rpcErr);
+        await runLocalFallbackComparison();
       }
-      setCartComparison(sortedResults);
-      setToast({ message: "Cart comparison complete", type: "success" });
     } catch (err) {
       setError(err.message || "Failed to compare cart");
       setToast({ message: "Failed to compare cart", type: "error" });
@@ -9463,6 +9880,34 @@ export default function App() {
               Test Cloud List Save/Load
             </button>
           ) : null}
+          {canUseSavedShoppingList() && shoppingListItems.length > 0 ? (
+            <div style={{ marginBottom: 10 }}>
+              <button
+                type="button"
+                onClick={handleManualCloudListSave}
+                disabled={isManualCloudSaveInProgress}
+                style={{
+                  ...styles.secondaryButton,
+                  minHeight: 36,
+                  width: "auto",
+                  padding: "0 12px",
+                  fontSize: 13,
+                }}
+              >
+                Save Shopping List
+              </button>
+              {manualCloudSaveStatus ? (
+                <div style={{ fontSize: 12, color: manualCloudSaveStatus === "Could not save list" ? "#b91c1c" : "#166534", marginTop: 6, fontWeight: 700 }}>
+                  {isManualCloudSaveInProgress ? "Saving..." : manualCloudSaveStatus}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {currentUserProfile?.is_guest ? (
+            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 10 }}>
+              Sign in to save this list for next time.
+            </div>
+          ) : null}
           <div style={styles.rewardDescription}>
             Build your cart first, then MVP can help suggest the most frugal or sensible store based on known prices and item availability.
           </div>
@@ -9554,6 +9999,7 @@ export default function App() {
                   {catalogSearchResults.map((result) => {
                     const location = result.selected_store_location;
                     const hasStoreLocation = Boolean(location?.aisle || location?.section || location?.shelf);
+                    const hasKnownPriceElsewhere = Boolean(!hasStoreLocation && result?.hasKnownPriceAtAnotherStore);
                     const displayImage = resolveProductImage(result);
                     const displayPrice = location?.avg_price ?? location?.price;
 
@@ -9595,7 +10041,9 @@ export default function App() {
                             <div style={{ fontSize: 12, color: hasStoreLocation ? "#166534" : "#64748b", marginTop: 2 }}>
                               {hasStoreLocation
                                 ? `${location.aisle || "Aisle"}${location.section ? ` • ${location.section}` : ""}${location.shelf ? ` • ${location.shelf}` : ""}`
-                                : "No known location for this store yet"}
+                                : hasKnownPriceElsewhere
+                                  ? "Known price found at another store; selected store still needs location."
+                                  : "No known location for this store yet"}
                               {displayPrice != null ? ` • $${Number(displayPrice).toFixed(2)} ${formatPriceType(location?.price_type)}` : ""}
                             </div>
                           ) : null}
@@ -10020,22 +10468,22 @@ export default function App() {
               <div style={{ ...styles.rewardsGrid, marginTop: 12 }}>
                 <div style={styles.rewardCard}>
                   <div style={styles.rewardTitle}>
-                    Best Value Store: {cartComparisonBestStore?.store?.name || "Unknown store"}
+                    Best store: {cartComparisonBestStore?.store?.name || "Unknown store"}
                   </div>
                   <div style={styles.rewardDescription}>
-                    Estimated Total: ${Number(cartComparisonBestStore?.total_price || 0).toFixed(2)}
+                    Estimated total: ${Number(cartComparisonBestStore?.total_price || 0).toFixed(2)}
                   </div>
                   <div style={styles.rewardDescription}>
-                    Cart Coverage: {cartComparisonBestStore?.coverage}%
+                    Matched {Number(cartComparisonBestStore?.matched_count || 0)} of {cartComparisonBestStoreTotalItems} items
                   </div>
                   <div style={styles.rewardDescription}>
-                    Brand Match: {cartComparisonBestStore?.brand_match_pct ?? "N/A"}%
+                    Coverage: {Number(cartComparisonBestStoreCoverage).toFixed(2)}%
                   </div>
                   <div style={styles.rewardDescription}>
-                    Price Confidence: {cartComparisonBestStore?.avg_confidence ?? "N/A"}%
+                    Average confidence: {Number(cartComparisonBestStore?.avg_confidence || 0).toFixed(2)}%
                   </div>
                   <div style={styles.rewardDescription}>
-                    Brand mode: {brandComparisonMode === "brand_match" ? "Exact brand preferred" : "Flexible"}
+                    {cartComparisonBestStore?.decision_reason || "Chosen based on coverage, total price, and confidence."}
                   </div>
                   {cartComparisonBestStore?.is_estimate ? (
                     <div style={{ fontSize: 12, color: "#92400e", background: "#fef3c7", borderRadius: 8, padding: "4px 8px", marginTop: 6 }}>
@@ -10055,6 +10503,9 @@ export default function App() {
                             <div style={{ fontWeight: 700 }}>
                               {row.product_name} — ${row.price != null ? Number(row.price).toFixed(2) : "0.00"} {formatPriceType(row.price_type)}
                             </div>
+                            <div style={{ fontSize: 12, color: "#475569" }}>
+                              Confidence: {Number(row.confidence_score || 0).toFixed(0)}% • Match: {String(row.match_method || "unknown").replace("_", " ")}
+                            </div>
                             {locationParts ? (
                               <div style={{ fontSize: 12, color: "#64748b" }}>
                                 {locationParts}
@@ -10067,29 +10518,47 @@ export default function App() {
                   ) : null}
                 </div>
 
-                {cartComparison.length > 1 ? (
+                {cartComparisonAlternativeStores.length > 0 ? (
                   <div style={styles.infoBox}>
                     <div style={styles.rewardTitle}>Alternatives</div>
-                    {cartComparison.slice(1).map((result, index) => (
-                      <div
-                        key={`${result.store_id || "store-alt"}-${index}`}
-                        style={{ ...styles.rewardDescription, marginBottom: 8, paddingBottom: 8, borderBottom: index < cartComparison.length - 2 ? "1px solid #dbeafe" : "none" }}
-                      >
-                        <div style={{ fontWeight: 700, color: "#0f172a" }}>
-                          {`${index + 2}. ${result.store?.name || "Unknown store"}`}
+                    {cartComparisonAlternativeStores.map((result, index) => {
+                      const alternativeTotal = Number(result?.total_price || 0);
+                      const bestTotal = Number(cartComparisonBestStore?.total_price || 0);
+                      const difference = alternativeTotal - bestTotal;
+                      const resultTotalItems = Number(result?.total_item_count ?? result?.total_items ?? shoppingListItems.length) || shoppingListItems.length;
+                      return (
+                        <div
+                          key={`${result.store_id || "store-alt"}-${index}`}
+                          style={{ ...styles.rewardDescription, marginBottom: 8, paddingBottom: 8, borderBottom: index < cartComparisonAlternativeStores.length - 1 ? "1px solid #dbeafe" : "none" }}
+                        >
+                          <div style={{ fontWeight: 700, color: "#0f172a" }}>
+                            {result.store?.name || "Unknown store"}
+                          </div>
+                          <div style={{ fontSize: 12, color: "#475569" }}>
+                            Total: ${alternativeTotal.toFixed(2)} • Matched {Number(result?.matched_count || 0)} of {resultTotalItems} • {difference >= 0 ? "+" : ""}${difference.toFixed(2)} vs best
+                          </div>
                         </div>
-                        <div style={{ fontSize: 12, color: "#475569" }}>
-                          ${Number(result.total_price || 0).toFixed(2)} total • {result.coverage}% coverage • {result.brand_match_pct ?? "N/A"}% brand match
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : null}
               </div>
             ) : (
-              <div style={{ ...styles.rewardEmptyState, marginTop: 12 }}>
-                No comparable price records found yet for these cart items.
-              </div>
+              <>
+                <div style={{ ...styles.rewardEmptyState, marginTop: 12 }}>
+                  No comparable price records found yet for these cart items.
+                </div>
+                {(import.meta.env.DEV || window.localStorage.getItem("mvpDebug") === "true") ? (
+                  <div style={{ ...styles.infoBox, marginTop: 8 }}>
+                    <div style={styles.rewardTitle}>Debug diagnostics</div>
+                    <div style={styles.rewardDescription}>
+                      Cart item keys: {cartComparisonDebugKeys.length > 0 ? cartComparisonDebugKeys.join(" | ") : "none"}
+                    </div>
+                    <div style={styles.rewardDescription}>Matched rows count: 0</div>
+                    <div style={styles.rewardDescription}>Missing canonical keys count: {cartComparisonMissingCanonicalCount}</div>
+                  </div>
+                ) : null}
+              </>
             )
           ) : null}
         </div>

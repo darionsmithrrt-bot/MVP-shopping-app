@@ -56,22 +56,42 @@ const ROLE_LABELS: Record<string, string> = {
 
 const VALID_IMAGE_ROLES = new Set(["product_label", "size_label", "price_sign"]);
 
-const SYSTEM_PROMPT = `You are a grocery product identification assistant.
+const logEnvVars = () => {
+  const debugInfo = {
+    has_openai_api_key: !!Deno.env.get("OPENAI_API_KEY"),
+    has_anthropic_api_key: !!Deno.env.get("ANTHROPIC_API_KEY"),
+    has_google_cloud_vision_api_key: !!Deno.env.get("GOOGLE_CLOUD_VISION_API_KEY"),
+    version: "identify-product-v5",
+  };
+  console.log("IDENTIFY_PRODUCT ENV CHECK:", debugInfo);
+  return debugInfo;
+};
 
-Analyze all provided images together.
+const SYSTEM_PROMPT = `You are a grocery product identification assistant with access to multi-image analysis.
+
+Analyze all provided images together using role-specific reasoning:
 
 Photo roles may include:
-1. product_label
-2. size_label
-3. price_sign
+1. product_label (front/main product label)
+   - Extract: brand name, product name, product category
+2. size_label (net weight or size information label)  
+   - Extract: size/net weight, quantity, unit (oz, lb, g, kg, count, pack, etc.)
+3. price_sign (shelf price tag or promotional sign)
+   - Extract: unit price or total price, price unit (/lb, /oz, each, per pack, etc.)
 
-Use cross-image reasoning:
-- product_label image identifies brand/name
-- size_label image identifies size/net weight
-- price_sign image identifies price/unit
-- combine these into one product result
+Role-specific extraction strategy:
+- From product_label: prioritize product_name and brand (use readable text, logos, and packaging design)
+- From size_label: prioritize size_value and size_unit (look for "NET WT", "FL OZ", "QTY", etc.)
+- From price_sign: prioritize price and price_unit (look for $ signs, unit indicators /lb /oz)
+- Combine evidence from all roles to build one accurate product record
+
+If Cloud Vision data is included:
+- Use detected text blocks to confirm or refine extracted values
+- Use detected labels/objects to identify product category or brand
+- Use detected logos to identify manufacturer/brand
 
 Extract only what is visible or strongly supported by the images.
+Do not invent information not supported by visual evidence.
 
 Return ONLY valid JSON with this exact shape:
 
@@ -92,12 +112,33 @@ Return ONLY valid JSON with this exact shape:
   "raw_text": ""
 }
 
-Rules:
-- product_name must be the consumer-facing product name, not "Unknown product", if any readable label is visible.
-- brand should be the brand/logo name if visible.
-- size_value and size_unit should come from net weight, net wt, fl oz, oz, lb, g, kg, count, pack, etc.
-- quantity should be "1" unless a multipack/count is visible.
-- price should only come from shelf/price sign images.
+Extraction rules:
+- product_name: consumer-facing product name visible on packaging, not "Unknown product"
+- brand: brand/logo name if clearly visible
+- category: inferred from product type or keywords visible (e.g., "dairy", "produce", "frozen", "meat")
+- size_value: numerical portion of size (e.g., "0.97", "16", "2")
+- size_unit: unit of measurement (oz, lb, g, kg, count, pack, case, dozen, etc.) - use lowercase
+- quantity: "1" unless multipack/count label visible (e.g., "6 count", "2 pack", "dozen")
+- price: numeric price value only (e.g., 3.49, 20.17) - no currency symbol
+- price_unit: one of ["each", "price_per_lb", "price_per_oz", "price_per_kg", "price_per_pack", "unknown"]
+- price_confidence: decimal 0-1 indicating confidence in price extraction
+- total_price: total price for weighted items (if both unit and total are visible)
+- confidence: overall confidence 0-1
+- size_confidence: confidence in size extraction
+- quantity_confidence: confidence in quantity extraction
+- raw_text: all visible readable text from images
+
+Special case - weighted products (meat, produce, deli):
+- Extract UNIT PRICE as price field, not total price
+- Set price_unit to "price_per_lb" when label shows lb or /lb
+- Return total price as total_price field
+- Return NET WT as size_value and size_unit
+
+Example: Label shows NET WT 0.97 lb, UNIT PRICE $20.17, TOTAL PRICE $19.56
+Return: {price: 20.17, price_unit: "price_per_lb", total_price: 19.56, size_value: "0.97", size_unit: "lb", ...}
+
+Important:
+Return JSON only. No markdown. No explanation.`;
 - price_unit should be one of:
   "each", "price_per_lb", "price_per_oz", "price_per_kg", "price_per_pack", "unknown"
 - If price sign says $3.49/lb, return price: 3.49 and price_unit: "price_per_lb".
@@ -290,7 +331,7 @@ const SAFE_FALLBACK = {
 
 serve(async (req) => {
   try {
-    const debugVersion = "identify-product-debug-v4";
+    const debugVersion = "identify-product-debug-v5";
     const jsonResponse = (status: number, payload: Record<string, unknown>) =>
       new Response(JSON.stringify(payload), {
         status,
@@ -301,12 +342,29 @@ serve(async (req) => {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
+    logEnvVars();
+
     const body = await req.json();
     const payload = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
 
     console.log("IDENTIFY_PRODUCT RECEIVED PAYLOAD KEYS:", Object.keys(payload));
     console.log("IDENTIFY_PRODUCT imageUrls count:", Array.isArray(payload.imageUrls) ? payload.imageUrls.length : 0);
     console.log("IDENTIFY_PRODUCT imageRoles received:", payload.imageRoles);
+    
+    // Log vision context availability without exposing data
+    const hasVisionByRole = payload.visionByRole && typeof payload.visionByRole === "object";
+    const hasMergedVisionText = typeof payload.visionText === "string" && payload.visionText.length > 0;
+    const hasProductLabelVision = typeof payload.productLabelText === "string" && payload.productLabelText.length > 0;
+    const hasSizeLabelVision = typeof payload.sizeLabelText === "string" && payload.sizeLabelText.length > 0;
+    const hasPriceSignVision = typeof payload.priceSignText === "string" && payload.priceSignText.length > 0;
+    
+    console.log("IDENTIFY_PRODUCT VISION DATA AVAILABILITY:", {
+      hasVisionByRole,
+      hasMergedVisionText,
+      hasProductLabelVision,
+      hasSizeLabelVision,
+      hasPriceSignVision,
+    });
 
     const openAiApiKey = Deno.env.get("OPENAI_API_KEY");
 
@@ -367,6 +425,15 @@ serve(async (req) => {
       { type: "input_text", text: userText },
     ];
 
+    // Add optional vision analysis context if available
+    const visionTextContent = typeof payload.visionText === "string" ? payload.visionText.trim() : "";
+    if (visionTextContent) {
+      contentParts.push({
+        type: "input_text",
+        text: `Cloud Vision detected text from images:\n${visionTextContent.slice(0, 1000)}`,
+      });
+    }
+
     rawUrls.forEach((url, i) => {
       const role = imageRoles[i] || defaultRoleByIndex(i);
       const roleLabel = ROLE_LABELS[role] || role.replace(/_/g, " ");
@@ -375,6 +442,33 @@ serve(async (req) => {
         text: `Image ${i + 1} role: ${roleLabel}`,
       });
       contentParts.push({ type: "input_image", image_url: url });
+      
+      // Add role-specific vision text if available
+      if (role === "product_label") {
+        const productLabelText = typeof payload.productLabelText === "string" ? payload.productLabelText.trim() : "";
+        if (productLabelText) {
+          contentParts.push({
+            type: "input_text",
+            text: `[Product label OCR]: ${productLabelText.slice(0, 500)}`,
+          });
+        }
+      } else if (role === "size_label") {
+        const sizeLabelText = typeof payload.sizeLabelText === "string" ? payload.sizeLabelText.trim() : "";
+        if (sizeLabelText) {
+          contentParts.push({
+            type: "input_text",
+            text: `[Size label OCR]: ${sizeLabelText.slice(0, 500)}`,
+          });
+        }
+      } else if (role === "price_sign") {
+        const priceSignText = typeof payload.priceSignText === "string" ? payload.priceSignText.trim() : "";
+        if (priceSignText) {
+          contentParts.push({
+            type: "input_text",
+            text: `[Price sign OCR]: ${priceSignText.slice(0, 500)}`,
+          });
+        }
+      }
     });
 
     const modelName = Deno.env.get("OPENAI_VISION_MODEL") || "gpt-4.1";
