@@ -8099,6 +8099,7 @@ export default function App() {
         setCartComparison(sortedResults);
         console.info("FALLBACK USED", true);
         setToast({ message: "Cart comparison complete", type: "success" });
+        return sortedResults;
       };
 
       try {
@@ -8116,9 +8117,14 @@ export default function App() {
         console.info("FALLBACK USED", false);
 
         if (safeRpcRows.length === 0) {
-          setCartComparison([]);
-          setError("No comparable price records found yet for these cart items.");
-          setToast({ message: "Cart comparison complete", type: "success" });
+          console.info("RPC returned empty; running local fallback comparison");
+          const fallbackResults = await runLocalFallbackComparison();
+          const hasFallbackResults = Array.isArray(fallbackResults) && fallbackResults.length > 0;
+          if (!hasFallbackResults) {
+            console.warn("NO COMPARABLE PRICE RECORDS AFTER RPC AND FALLBACK");
+            setCartComparison([]);
+            setError("No comparable price records found yet for these cart items.");
+          }
           return;
         }
 
