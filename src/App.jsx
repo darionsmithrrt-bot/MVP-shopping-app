@@ -1233,6 +1233,113 @@ export default function App() {
       .join("|");
   };
 
+  const normalizeCommodityName = (value) => {
+    let normalized = normalizeComparableText(value);
+    if (!normalized) return "";
+
+    // Canonical commodity forms first.
+    if (/\bcilantro\b/.test(normalized)) return "cilantro";
+    if (/\bbanana(s)?\b/.test(normalized)) return "bananas";
+    if (/\bribeye\b/.test(normalized)) return "ribeye steak";
+    if (/\bground\s+beef\b/.test(normalized)) return "ground beef";
+    if (/\bchicken\s+breast\b/.test(normalized)) return "chicken breast";
+    if (/\bchicken\s+thigh\b/.test(normalized)) return "chicken thigh";
+    if (/\bpork\s+chop(s)?\b/.test(normalized)) return "pork chop";
+    if (/\bsalmon\b/.test(normalized)) return "salmon";
+    if (/\bshrimp\b/.test(normalized)) return "shrimp";
+
+    const removableWords = new Set([
+      "fresh",
+      "organic",
+      "bunch",
+      "each",
+      "pack",
+      "package",
+      "tray",
+      "family",
+      "value",
+      "boneless",
+      "skinless",
+      "lb",
+      "lbs",
+      "oz",
+      "count",
+      "ct",
+    ]);
+
+    const tokens = normalized
+      .split(" ")
+      .map((token) => token.trim())
+      .filter(Boolean)
+      .filter((token) => !removableWords.has(token));
+
+    const deNoised = tokens.join(" ").trim();
+    if (!deNoised) return "";
+
+    // Prevent generic commodity collapse.
+    if (["meat", "steak", "produce", "fruit", "vegetable", "seafood"].includes(deNoised)) {
+      return "";
+    }
+
+    return deNoised;
+  };
+
+  const isCommodityItem = (item) => {
+    const category = normalizeComparableText(item?.category || item?.last_seen_location?.category);
+    const productName = normalizeComparableText(
+      item?.product_name || item?.name || item?.title || item?.last_seen_location?.product_name || item?.last_seen_location?.name
+    );
+
+    const commodityCategories = ["produce", "meat", "poultry", "seafood", "deli", "bakery"];
+    const categoryMatch = commodityCategories.some((entry) => category.includes(entry));
+    if (categoryMatch) return true;
+
+    const commodityTerms = [
+      "cilantro", "banana", "bananas", "apple", "avocado", "onion", "tomato",
+      "ribeye", "ground beef", "chicken breast", "chicken thigh", "sirloin", "tenderloin", "chuck",
+      "salmon", "shrimp", "pork chop",
+    ];
+    const packagedTerms = ["milk", "chips", "shampoo", "cereal", "body wash", "detergent", "eggs"];
+
+    const hasCommodityTerm = commodityTerms.some((term) => productName.includes(term));
+    const hasPackagedTerm = packagedTerms.some((term) => productName.includes(term));
+
+    return hasCommodityTerm && !hasPackagedTerm;
+  };
+
+  const buildCommodityCategoryFamily = (item) => {
+    const category = normalizeComparableText(item?.category || item?.last_seen_location?.category);
+    const productName = normalizeComparableText(
+      item?.product_name || item?.name || item?.title || item?.last_seen_location?.product_name || item?.last_seen_location?.name
+    );
+
+    if (category.includes("produce")) return "produce";
+    if (category.includes("poultry")) return "poultry";
+    if (category.includes("seafood")) return "seafood";
+    if (category.includes("meat")) return "meat";
+    if (category.includes("deli")) return "deli";
+    if (category.includes("bakery")) return "bakery";
+
+    if (/\b(chicken breast|chicken thigh)\b/.test(productName)) return "poultry";
+    if (/\b(salmon|shrimp)\b/.test(productName)) return "seafood";
+    if (/\b(ribeye|sirloin|tenderloin|chuck|ground beef|pork chop|steak)\b/.test(productName)) return "meat";
+    if (/\b(cilantro|banana|bananas|apple|avocado|onion|tomato)\b/.test(productName)) return "produce";
+
+    return "";
+  };
+
+  const buildCommodityMatchKey = (item) => {
+    if (!isCommodityItem(item)) return null;
+
+    const family = buildCommodityCategoryFamily(item);
+    const normalizedName = normalizeCommodityName(
+      item?.product_name || item?.name || item?.title || item?.last_seen_location?.product_name || item?.last_seen_location?.name
+    );
+
+    if (!family || !normalizedName) return null;
+    return `${family}|${normalizedName}`;
+  };
+
   const buildComparableProductKey = (value) => {
     if (!value) return "";
 
@@ -1302,6 +1409,12 @@ export default function App() {
     const sizeKey = [sizeValue, sizeUnit].filter(Boolean).join(" ") || displaySize;
     pushCandidate([brand, productName, sizeKey].filter(Boolean).join("|"));
 
+    // Commodity fallback is final-only and commodity-scoped.
+    const commodityKey = buildCommodityMatchKey(value);
+    if (commodityKey) {
+      pushCandidate(`commodity|${commodityKey}`);
+    }
+
     return candidates;
   };
 
@@ -1336,9 +1449,19 @@ export default function App() {
   const getProductMatchMethod = (cartItem, row) => {
     const cart = getProductIdentityParts(cartItem);
     const candidate = getProductIdentityParts(row);
+    const debugEnabled = window.localStorage.getItem("mvpDebug") === "true";
 
     const normalizedBrandMode = String(brandComparisonMode || "flexible").toLowerCase();
     const requireExactBrand = normalizedBrandMode === "brand_match" || normalizedBrandMode === "match exact brand";
+
+    if (debugEnabled) {
+      console.debug("COMMODITY_MATCH_INPUT", {
+        cart_product_name: cartItem?.product_name || cartItem?.name || null,
+        row_product_name: row?.product_name || row?.name || null,
+        cart_category: cartItem?.category || null,
+        row_category: row?.category || null,
+      });
+    }
 
     // Priority 1: exact barcode always wins.
     if (cart.barcode && candidate.barcode && cart.barcode === candidate.barcode) {
@@ -1383,6 +1506,41 @@ export default function App() {
       if (hasMissingBrand && categoryCompatible) {
         return "flexible_identity";
       }
+    }
+
+    const cartCommodityKey = buildCommodityMatchKey(cartItem);
+    const rowCommodityKey = buildCommodityMatchKey(row);
+
+    if (debugEnabled) {
+      console.debug("COMMODITY_MATCH_KEY", {
+        cartCommodityKey: cartCommodityKey || null,
+        rowCommodityKey: rowCommodityKey || null,
+        cart_product_name: cartItem?.product_name || cartItem?.name || null,
+        row_product_name: row?.product_name || row?.name || null,
+      });
+    }
+
+    if (cartCommodityKey && rowCommodityKey && cartCommodityKey === rowCommodityKey) {
+      if (debugEnabled) {
+        console.debug("COMMODITY_MATCH_ACCEPTED", {
+          method: "commodity_identity",
+          cartCommodityKey,
+          rowCommodityKey,
+          cart_product_name: cartItem?.product_name || cartItem?.name || null,
+          row_product_name: row?.product_name || row?.name || null,
+        });
+      }
+      return "commodity_identity";
+    }
+
+    if (debugEnabled && (cartCommodityKey || rowCommodityKey)) {
+      console.debug("COMMODITY_MATCH_REJECTED", {
+        cartCommodityKey: cartCommodityKey || null,
+        rowCommodityKey: rowCommodityKey || null,
+        reason: "commodity_keys_missing_or_mismatch",
+        cart_product_name: cartItem?.product_name || cartItem?.name || null,
+        row_product_name: row?.product_name || row?.name || null,
+      });
     }
 
     return null;
@@ -6553,6 +6711,7 @@ export default function App() {
         const targetBarcode = String(catalogRow?.barcode || "").trim();
         const targetCanonical = normalizeComparableKey(catalogRow?.canonical_product_key);
         const fallbackKey = buildRowMatchFallbackKey(catalogRow);
+        const catalogCommodityKey = buildCommodityMatchKey(catalogRow);
 
         const barcodeMatches = targetBarcode
           ? locationRows.filter((row) => String(row?.barcode || "").trim() === targetBarcode)
@@ -6568,7 +6727,22 @@ export default function App() {
           return canonicalMatches;
         }
 
-        return locationRows.filter((row) => buildRowMatchFallbackKey(row) === fallbackKey && Boolean(fallbackKey));
+        const strictFallbackMatches = locationRows.filter((row) => buildRowMatchFallbackKey(row) === fallbackKey && Boolean(fallbackKey));
+        if (strictFallbackMatches.length > 0) {
+          return strictFallbackMatches;
+        }
+
+        if (catalogCommodityKey) {
+          const commodityMatches = locationRows.filter((row) => {
+            const rowCommodityKey = buildCommodityMatchKey(row);
+            return rowCommodityKey && rowCommodityKey === catalogCommodityKey;
+          });
+          if (commodityMatches.length > 0) {
+            return commodityMatches;
+          }
+        }
+
+        return locationRows.filter((row) => Boolean(getProductMatchMethod(catalogRow, row)));
       };
 
       const buildResultFromRows = (baseRow, locationGroup = [], source = "catalog_products") => {
@@ -6922,6 +7096,7 @@ export default function App() {
       barcode: String(item?.barcode || "").trim() || null,
       catalog_id: item?.catalog_id || item?.id || null,
       canonical_product_key: item?.canonical_product_key || null,
+      commodity_key: buildCommodityMatchKey(item) || null,
       locationRowCount: extras.locationRowCount || 0,
       offersCount: extras.offersCount || 0,
       cheapest_known_price: extras.cheapest_known_price ?? item?.cheapest_known_price ?? null,
@@ -7083,11 +7258,31 @@ export default function App() {
       });
 
       const locationRows = Array.from(dedupedRowsByKey.values());
-      const validPriceRows = locationRows.filter((row) => hasPositivePrice(row?.avg_price ?? row?.price));
+      const exactBarcodeRows = resolvedBarcode
+        ? locationRows.filter((row) => String(row?.barcode || "").trim() === resolvedBarcode)
+        : [];
+      const exactCanonicalRows = resolvedCanonicalKey
+        ? locationRows.filter((row) => normalizeComparableKey(row?.canonical_product_key) === resolvedCanonicalKey)
+        : [];
+      const fallbackMatchedRows = locationRows.filter((row) => Boolean(getProductMatchMethod(resolvedCatalogProduct, row)));
+      const matchedRows = exactBarcodeRows.length > 0
+        ? exactBarcodeRows
+        : (exactCanonicalRows.length > 0 ? exactCanonicalRows : fallbackMatchedRows);
+      const validPriceRows = matchedRows.filter((row) => hasPositivePrice(row?.avg_price ?? row?.price));
+
+      if (debugEnabled && buildCommodityMatchKey(safeItem)) {
+        console.debug("REHYDRATE_COMMODITY_ROWS", {
+          ...toDebugPayload(safeItem, {
+            locationRowCount: matchedRows.length,
+            offersCount: Array.isArray(hydratedOffers) ? hydratedOffers.length : 0,
+          }),
+          matchedRowMethods: matchedRows.slice(0, 8).map((row) => getProductMatchMethod(resolvedCatalogProduct, row)),
+        });
+      }
 
       if (debugEnabled) {
         console.debug("SHOPPING_LIST_REHYDRATE_LOCATION_ROWS", toDebugPayload(safeItem, {
-          locationRowCount: locationRows.length,
+          locationRowCount: matchedRows.length,
           offersCount: Array.isArray(hydratedOffers) ? hydratedOffers.length : 0,
         }));
       }
@@ -7253,7 +7448,7 @@ export default function App() {
 
       if (debugEnabled) {
         console.debug("SHOPPING_LIST_REHYDRATE_ITEM_OUTPUT", toDebugPayload(nextItem, {
-          locationRowCount: locationRows.length,
+          locationRowCount: matchedRows.length,
           offersCount: Array.isArray(nextItem?.offers) ? nextItem.offers.length : 0,
           cheapest_known_price: nextItem?.cheapest_known_price ?? null,
           cheapest_known_store_name: nextItem?.cheapest_known_store_name || null,
