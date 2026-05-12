@@ -1750,21 +1750,38 @@ export default function App() {
     const sizeUnit = String(catalogProduct?.size_unit || "").trim();
 
     try {
-      const searchCandidates = {
-        barcodes: barcode ? [barcode] : [],
-        canonicalKeys: canonicalKey ? [canonicalKey] : [],
+      const debugEnabled = window.localStorage.getItem("mvpDebug") === "true";
+      const normalizedCatalogCanonical = normalizeComparableKey(catalogProduct?.canonical_product_key || canonicalKey);
+
+      // Query order: barcode -> canonical key -> text fallback.
+      const barcodeRows = barcode
+        ? await fetchComparableProductLocationRows({ barcodes: [barcode], canonicalKeys: [], terms: [], lookupTerms: [] })
+        : [];
+      const canonicalRows = normalizedCatalogCanonical
+        ? await fetchComparableProductLocationRows({ barcodes: [], canonicalKeys: [normalizedCatalogCanonical], terms: [], lookupTerms: [] })
+        : [];
+      const fallbackRows = await fetchComparableProductLocationRows({
+        barcodes: [],
+        canonicalKeys: [],
         terms: [productName, brand, sizeValue].filter(Boolean),
         lookupTerms: [productName, brand, sizeValue, sizeUnit].filter(Boolean),
-      };
+      });
 
-      const priceRows = await fetchComparableProductLocationRows(searchCandidates);
-
-      const debugEnabled = import.meta.env.DEV || window.localStorage.getItem("mvpDebug") === "true";
-      const debugFilterEnabled = window.localStorage.getItem("mvpDebug") === "true";
-      const normalizedBrandMode = String(brandComparisonMode || "flexible").toLowerCase();
-      const requireExactBrand = normalizedBrandMode === "brand_match" || normalizedBrandMode === "match exact brand";
-      const normalizedCatalogBrand = normalizeComparableText(catalogProduct?.brand);
-      const normalizedCatalogCanonical = normalizeComparableKey(catalogProduct?.canonical_product_key);
+      const mergedRowsByKey = new Map();
+      [...barcodeRows, ...canonicalRows, ...fallbackRows].forEach((row) => {
+        const dedupeKey = [
+          String(row?.store_id || "").trim(),
+          String(row?.barcode || "").trim(),
+          normalizeComparableKey(row?.canonical_product_key) || "",
+          normalizeComparableText(row?.product_name) || "",
+          normalizeComparableText(row?.brand) || "",
+          String(row?.avg_price ?? row?.price ?? "").trim(),
+        ].join("|");
+        if (!mergedRowsByKey.has(dedupeKey)) {
+          mergedRowsByKey.set(dedupeKey, row);
+        }
+      });
+      const priceRows = Array.from(mergedRowsByKey.values());
 
       const rejectedRows = [];
       const filteredPriceRows = (Array.isArray(priceRows) ? priceRows : []).filter((row) => {
@@ -1777,25 +1794,7 @@ export default function App() {
         }
 
         if (normalizedCatalogCanonical && rowCanonical && normalizedCatalogCanonical === rowCanonical) {
-          if (!requireExactBrand) {
-            return true;
-          }
-
-          const rowBrand = normalizeComparableText(row?.brand);
-          if (normalizedCatalogBrand && rowBrand && normalizedCatalogBrand === rowBrand) {
-            return true;
-          }
-
-          if (rejectedRows.length < 5) {
-            rejectedRows.push({
-              reason: "canonical_brand_mismatch",
-              product_name: row?.product_name || null,
-              brand: row?.brand || null,
-              barcode: rowBarcode || null,
-              canonical_product_key: rowCanonical || null,
-            });
-          }
-          return false;
+          return true;
         }
 
         const matchMethod = getProductMatchMethod(catalogProduct, row);
@@ -1812,36 +1811,9 @@ export default function App() {
           return false;
         }
 
-        if (requireExactBrand) {
-          const rowBrand = normalizeComparableText(row?.brand);
-          if (!(normalizedCatalogBrand && rowBrand && normalizedCatalogBrand === rowBrand)) {
-            if (rejectedRows.length < 5) {
-              rejectedRows.push({
-                reason: "brand_mode_reject",
-                match_method: matchMethod,
-                product_name: row?.product_name || null,
-                brand: row?.brand || null,
-                barcode: rowBarcode || null,
-                canonical_product_key: rowCanonical || null,
-              });
-            }
-            return false;
-          }
-        }
-
         return true;
       });
       if (debugEnabled) {
-        console.debug("PRICE_HYDRATION_SEARCH", {
-          searchedProduct: `${productName} ${brand}`.trim(),
-          barcode,
-          canonicalKey,
-          matchingStrategy: barcode ? "barcode" : canonicalKey ? "canonical_key" : "normalized_fields",
-          offersFound: filteredPriceRows.length,
-        });
-      }
-
-      if (debugFilterEnabled) {
         console.debug("PRICE_HYDRATION_FILTER", {
           product_name: productName || null,
           fetched_row_count: Array.isArray(priceRows) ? priceRows.length : 0,
@@ -1891,10 +1863,13 @@ export default function App() {
 
       if (debugEnabled) {
         console.debug("PRICE_HYDRATION_RESULT", {
-          productName,
+          product_name: productName || null,
+          barcode: barcode || null,
+          canonical_product_key: normalizedCatalogCanonical || null,
+          locationRowCount: filteredPriceRows.length,
           storesWithOffers: offers.length,
-          bestStoreAndPrice: bestOffer ? `${bestOffer.store_name} $${bestOffer.price.toFixed(2)}` : null,
-          allStores: offers.map((o) => ({ store: o.store_name, price: o.price })),
+          cheapest_known_price: bestOffer?.price ?? null,
+          cheapest_known_store_name: bestOffer?.store_name || null,
         });
       }
 
@@ -6297,7 +6272,10 @@ export default function App() {
     try {
       const safeTerm = trimmedTerm.replace(/,/g, " ").trim();
       const wildcardTerm = `%${safeTerm}%`;
-      console.log("CATALOG_SEARCH_START", { term: safeTerm });
+      const debugEnabled = window.localStorage.getItem("mvpDebug") === "true";
+      if (debugEnabled) {
+        console.debug("CATALOG_SEARCH_START", { term: safeTerm });
+      }
 
       const isMissingOptionalColumnError = (err) => {
         const message = String(err?.message || "").toLowerCase();
@@ -6327,61 +6305,23 @@ export default function App() {
         return canonicalKey || (barcodeKey ? `barcode|${barcodeKey}` : nameBrandKey);
       };
 
-      // 1) product_locations MIN-safe query first
-      const productLocationsMinSelect = "barcode, product_name, brand, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at";
-      const productLocationsEnhancedSelect = "barcode, product_name, brand, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at, category, size_value, size_unit, display_size, canonical_product_key, image_url, verified_image_url";
+      const hasPositivePrice = (row) => {
+        const p = Number(row?.avg_price ?? row?.price);
+        return Number.isFinite(p) && p > 0;
+      };
 
-      let productLocationsMinRows = [];
-      let productLocationsEnhancedRows = [];
+      const buildRowMatchFallbackKey = (row) => {
+        const productName = normalizeComparableText(row?.product_name);
+        const brand = normalizeComparableText(row?.brand);
+        const sizeValue = normalizeComparableText(row?.size_value);
+        const sizeUnit = normalizeComparableText(row?.size_unit);
+        const sizePair = [sizeValue, sizeUnit].filter(Boolean).join(" ").trim();
+        return [productName, brand, sizePair].filter(Boolean).join("|");
+      };
 
-      const productLocationsMinQuery = await supabase
-        .from("product_locations")
-        .select(productLocationsMinSelect)
-        .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm}`)
-        .limit(500);
+      const productLocationsBaseSelect = "barcode, canonical_product_key, product_name, brand, category, size_value, size_unit, display_size, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at, image_url, verified_image_url";
 
-      if (productLocationsMinQuery.error) {
-        logCatalogSearchError("product_locations_min", productLocationsMinQuery.error);
-      } else {
-        productLocationsMinRows = Array.isArray(productLocationsMinQuery.data) ? productLocationsMinQuery.data : [];
-      }
-      console.log("PRODUCT_LOCATIONS_MIN_QUERY_COUNT", productLocationsMinRows.length);
-
-      if (!productLocationsMinQuery.error) {
-        const productLocationsEnhancedQuery = await supabase
-          .from("product_locations")
-          .select(productLocationsEnhancedSelect)
-          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm}`)
-          .limit(500);
-
-        if (productLocationsEnhancedQuery.error) {
-          if (!isMissingOptionalColumnError(productLocationsEnhancedQuery.error)) {
-            logCatalogSearchError("product_locations_enhanced", productLocationsEnhancedQuery.error);
-          }
-          productLocationsEnhancedRows = [...productLocationsMinRows];
-        } else {
-          productLocationsEnhancedRows = Array.isArray(productLocationsEnhancedQuery.data)
-            ? productLocationsEnhancedQuery.data
-            : [];
-        }
-      } else {
-        productLocationsEnhancedRows = [...productLocationsMinRows];
-      }
-      console.log("PRODUCT_LOCATIONS_ENHANCED_QUERY_COUNT", productLocationsEnhancedRows.length);
-
-      // Merge min + enhanced rows (prefer enhanced fields)
-      const productLocationsByKey = new Map();
-      productLocationsMinRows.forEach((row) => {
-        const idKey = `${safeIdentityKey(row)}|${String(row?.store_id || "")}`;
-        productLocationsByKey.set(idKey, { ...row });
-      });
-      productLocationsEnhancedRows.forEach((row) => {
-        const idKey = `${safeIdentityKey(row)}|${String(row?.store_id || "")}`;
-        productLocationsByKey.set(idKey, { ...(productLocationsByKey.get(idKey) || {}), ...row });
-      });
-      const locationRows = Array.from(productLocationsByKey.values());
-
-      // 2) catalog_products MIN query SECOND
+      // 1) catalog_products query FIRST (source of truth for typed search)
       const catalogMinSelect = "id, barcode, product_name, brand, image_url, source";
       const catalogEnhancedSelect = "id, barcode, product_name, brand, image_url, source, category, size_value, size_unit, quantity, display_size, verified_image_url, canonical_product_key";
 
@@ -6405,7 +6345,7 @@ export default function App() {
         const catalogEnhancedQuery = await supabase
           .from("catalog_products")
           .select(catalogEnhancedSelect)
-          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm}`)
+          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},category.ilike.${wildcardTerm}`)
           .limit(250);
 
         if (catalogEnhancedQuery.error) {
@@ -6421,7 +6361,104 @@ export default function App() {
       } else {
         catalogEnhancedRows = [...catalogMinRows];
       }
-      console.log("CATALOG_PRODUCTS_ENHANCED_QUERY_COUNT", catalogEnhancedRows.length);
+      if (debugEnabled) {
+        console.debug("CATALOG_PRODUCTS_FOUND", {
+          term: safeTerm,
+          count: catalogEnhancedRows.length,
+          examples: catalogEnhancedRows.slice(0, 5).map((row) => ({
+            product_name: row?.product_name || null,
+            brand: row?.brand || null,
+            barcode: row?.barcode || null,
+            canonical_product_key: row?.canonical_product_key || null,
+          })),
+        });
+      }
+
+      // 2) product_locations lookups driven by catalog barcodes + canonical keys
+      const catalogBarcodes = [...new Set(catalogEnhancedRows.map((row) => String(row?.barcode || "").trim()).filter(Boolean))];
+      const catalogCanonicalKeys = [...new Set(catalogEnhancedRows.map((row) => normalizeComparableKey(row?.canonical_product_key)).filter(Boolean))];
+
+      let locationRowsByBarcode = [];
+      if (catalogBarcodes.length > 0) {
+        const queryByBarcode = await supabase
+          .from("product_locations")
+          .select(productLocationsBaseSelect)
+          .in("barcode", catalogBarcodes)
+          .limit(1000);
+        if (queryByBarcode.error) {
+          logCatalogSearchError("product_locations_by_barcode", queryByBarcode.error);
+        } else {
+          locationRowsByBarcode = Array.isArray(queryByBarcode.data) ? queryByBarcode.data : [];
+        }
+      }
+      if (debugEnabled) {
+        console.debug("PRODUCT_LOCATIONS_BY_BARCODE_FOUND", {
+          barcodeCount: catalogBarcodes.length,
+          rowCount: locationRowsByBarcode.length,
+        });
+      }
+
+      let locationRowsByCanonical = [];
+      if (catalogCanonicalKeys.length > 0) {
+        const queryByCanonical = await supabase
+          .from("product_locations")
+          .select(productLocationsBaseSelect)
+          .in("canonical_product_key", catalogCanonicalKeys)
+          .limit(1000);
+        if (queryByCanonical.error) {
+          if (!isMissingOptionalColumnError(queryByCanonical.error)) {
+            logCatalogSearchError("product_locations_by_canonical", queryByCanonical.error);
+          }
+        } else {
+          locationRowsByCanonical = Array.isArray(queryByCanonical.data) ? queryByCanonical.data : [];
+        }
+      }
+      if (debugEnabled) {
+        console.debug("PRODUCT_LOCATIONS_BY_CANONICAL_FOUND", {
+          canonicalKeyCount: catalogCanonicalKeys.length,
+          rowCount: locationRowsByCanonical.length,
+        });
+      }
+
+      // 3) existing text search fallback on product_locations
+      let locationRowsByTerm = [];
+      const queryByTerm = await supabase
+        .from("product_locations")
+        .select(productLocationsBaseSelect)
+        .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm},category.ilike.${wildcardTerm}`)
+        .limit(500);
+      if (queryByTerm.error) {
+        if (!isMissingOptionalColumnError(queryByTerm.error)) {
+          logCatalogSearchError("product_locations_by_term", queryByTerm.error);
+        }
+        const fallbackTermQuery = await supabase
+          .from("product_locations")
+          .select("barcode, product_name, brand, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at")
+          .or(`product_name.ilike.${wildcardTerm},brand.ilike.${wildcardTerm},barcode.ilike.${wildcardTerm}`)
+          .limit(500);
+        if (!fallbackTermQuery.error) {
+          locationRowsByTerm = Array.isArray(fallbackTermQuery.data) ? fallbackTermQuery.data : [];
+        }
+      } else {
+        locationRowsByTerm = Array.isArray(queryByTerm.data) ? queryByTerm.data : [];
+      }
+
+      // Merge location rows (dedupe by store + identity + price)
+      const mergedLocationMap = new Map();
+      [...locationRowsByBarcode, ...locationRowsByCanonical, ...locationRowsByTerm].forEach((row) => {
+        const rowKey = [
+          String(row?.store_id || "").trim(),
+          String(row?.barcode || "").trim(),
+          normalizeComparableKey(row?.canonical_product_key) || "",
+          normalizeComparableText(row?.product_name) || "",
+          normalizeComparableText(row?.brand) || "",
+          String(row?.avg_price ?? row?.price ?? "").trim(),
+        ].join("|");
+        if (!mergedLocationMap.has(rowKey)) {
+          mergedLocationMap.set(rowKey, row);
+        }
+      });
+      const locationRows = Array.from(mergedLocationMap.values());
 
       const catalogByBarcode = new Map();
       catalogEnhancedRows.forEach((row) => {
@@ -6429,20 +6466,36 @@ export default function App() {
         if (barcodeValue) catalogByBarcode.set(barcodeValue, row);
       });
 
-      const groupedLocationRows = new Map();
-      locationRows.forEach((row) => {
-        const groupKey = safeIdentityKey(row);
-        if (!groupedLocationRows.has(groupKey)) groupedLocationRows.set(groupKey, []);
-        groupedLocationRows.get(groupKey).push(row);
-      });
-
       const mergedMap = new Map();
+
+      const findRowsForCatalogItem = (catalogRow) => {
+        const targetBarcode = String(catalogRow?.barcode || "").trim();
+        const targetCanonical = normalizeComparableKey(catalogRow?.canonical_product_key);
+        const fallbackKey = buildRowMatchFallbackKey(catalogRow);
+
+        const barcodeMatches = targetBarcode
+          ? locationRows.filter((row) => String(row?.barcode || "").trim() === targetBarcode)
+          : [];
+        if (barcodeMatches.length > 0) {
+          return barcodeMatches;
+        }
+
+        const canonicalMatches = targetCanonical
+          ? locationRows.filter((row) => normalizeComparableKey(row?.canonical_product_key) === targetCanonical)
+          : [];
+        if (canonicalMatches.length > 0) {
+          return canonicalMatches;
+        }
+
+        return locationRows.filter((row) => buildRowMatchFallbackKey(row) === fallbackKey && Boolean(fallbackKey));
+      };
 
       const buildResultFromRows = (baseRow, locationGroup = [], source = "catalog_products") => {
         const rowsByStore = {};
         locationGroup.forEach((locRow) => {
           const storeId = String(locRow?.store_id || "").trim();
           if (!storeId) return;
+          if (!hasPositivePrice(locRow) && !(locRow?.aisle || locRow?.section || locRow?.shelf)) return;
           const existing = rowsByStore[storeId];
           if (!existing || isBetterPriceObservation(locRow, existing)) {
             rowsByStore[storeId] = locRow;
@@ -6469,7 +6522,7 @@ export default function App() {
             shelf: storeRow?.shelf || "",
             confidence_score: Number(storeRow?.confidence_score || 0),
           }))
-          .filter((entry) => entry.price != null)
+          .filter((entry) => entry.price != null && entry.price > 0)
           .sort((a, b) => {
             if (a.price !== b.price) return a.price - b.price;
             return Number(b.confidence_score || 0) - Number(a.confidence_score || 0);
@@ -6494,6 +6547,14 @@ export default function App() {
           MVP_PLACEHOLDER_IMAGE;
 
         const cheapestKnownPrice = Number(cheapestLocation?.avg_price ?? cheapestLocation?.price ?? 0) || null;
+        const knownStoreCount = new Set(allKnownStorePrices.map((entry) => String(entry?.store_id || "").trim()).filter(Boolean)).size;
+        const hasSelectedStoreLocation = Boolean(
+          selectedLocation?.aisle ||
+          selectedLocation?.section ||
+          selectedLocation?.shelf ||
+          (Number(selectedLocation?.avg_price ?? selectedLocation?.price) > 0)
+        );
+        const hasKnownPriceAtAnotherStore = Boolean((!hasSelectedStoreLocation || Number(selectedLocation?.avg_price ?? selectedLocation?.price) <= 0) && allKnownStorePrices.length > 0);
 
         return {
           id: baseRow?.id || null,
@@ -6516,6 +6577,7 @@ export default function App() {
           cheapest_location: cheapestLocation,
           selected_store_location: selectedLocation,
           all_known_store_prices: allKnownStorePrices,
+          known_store_prices: allKnownStorePrices,
           offers: allKnownStorePrices.map((entry) => ({
             store_id: entry.store_id || null,
             store_name: entry.store_name || "Unknown store",
@@ -6536,10 +6598,10 @@ export default function App() {
             size_unit: baseRow?.size_unit || "",
             display_size: baseRow?.display_size || "",
           })),
-          known_store_count: allKnownStorePrices.length,
+          known_store_count: knownStoreCount,
           source,
-          hasSelectedStoreLocation: Boolean(selectedLocation?.aisle || selectedLocation?.section || selectedLocation?.shelf),
-          hasKnownPriceAtAnotherStore: Boolean(!selectedLocation && allKnownStorePrices.length > 0),
+          hasSelectedStoreLocation,
+          hasKnownPriceAtAnotherStore,
           price: cheapestKnownPrice,
           avg_price: cheapestKnownPrice,
           price_type: cheapestLocation?.price_type || baseRow?.price_type || "each",
@@ -6550,37 +6612,33 @@ export default function App() {
         };
       };
 
-      // Build results from location intelligence first
-      groupedLocationRows.forEach((rows, groupKey) => {
-        const representative = rows[0] || {};
-        const result = buildResultFromRows(representative, rows, "product_locations");
-        mergedMap.set(groupKey, result);
-      });
-
-      // Supplement with catalog rows where missing
+      // Build results from catalog rows first, then enrich with matching location rows.
       catalogEnhancedRows.forEach((row) => {
         const groupKey = safeIdentityKey(row);
-        const linkedLocationRows = groupedLocationRows.get(groupKey) || groupedLocationRows.get(`barcode|${String(row?.barcode || "").trim()}`) || [];
+        const linkedLocationRows = findRowsForCatalogItem(row);
         const nextResult = buildResultFromRows(row, linkedLocationRows, "catalog_products");
-        const existing = mergedMap.get(groupKey);
+        mergedMap.set(groupKey, nextResult);
 
-        if (!existing) {
-          mergedMap.set(groupKey, nextResult);
-          return;
-        }
-
-        const shouldUpgradeImage =
-          (!existing?.verified_image_url && Boolean(nextResult?.verified_image_url)) ||
-          (!existing?.image_url && Boolean(nextResult?.image_url));
-
-        if (shouldUpgradeImage) {
-          mergedMap.set(groupKey, {
-            ...existing,
-            image_url: existing?.image_url || nextResult?.image_url || null,
-            verified_image_url: existing?.verified_image_url || nextResult?.verified_image_url || null,
-            cart_image_url: existing?.cart_image_url || nextResult?.cart_image_url || MVP_PLACEHOLDER_IMAGE,
+        if (debugEnabled) {
+          console.debug("CATALOG_RESULT_ENRICHED", {
+            product_name: nextResult?.product_name || null,
+            barcode: nextResult?.barcode || null,
+            catalog_id: nextResult?.catalog_id || null,
+            locationRowCount: linkedLocationRows.length,
+            cheapest_known_price: nextResult?.cheapest_known_price ?? null,
+            cheapest_known_store_name: nextResult?.cheapest_known_store_name || null,
+            selected_store_location: nextResult?.selected_store_location || null,
+            cheapest_location: nextResult?.cheapest_location || null,
           });
         }
+      });
+
+      // Keep location-only results as fallback so existing behavior remains intact.
+      locationRows.forEach((locRow) => {
+        const locKey = safeIdentityKey(locRow);
+        if (mergedMap.has(locKey)) return;
+        const fallbackResult = buildResultFromRows(locRow, [locRow], "product_locations");
+        mergedMap.set(locKey, fallbackResult);
       });
 
       const mergedResults = Array.from(mergedMap.values()).sort((a, b) => {
@@ -6595,9 +6653,6 @@ export default function App() {
           numeric: true,
         });
       });
-
-      console.log("CATALOG_SEARCH_MERGED_RESULTS", mergedResults.length);
-      console.log("CATALOG_SEARCH_FINAL_RESULTS", mergedResults.length);
 
       if (window.localStorage.getItem("mvpDebug") === "true") {
         console.debug("CATALOG_SEARCH_WITH_LOCATION_INTELLIGENCE", {
@@ -6620,7 +6675,7 @@ export default function App() {
       setCatalogSearchMessage(
         mergedResults.length > 0
           ? ""
-          : (productLocationsMinRows.length === 0 && catalogMinRows.length === 0 ? "No catalog matches yet." : "")
+          : (locationRows.length === 0 && catalogMinRows.length === 0 ? "No catalog matches yet." : "")
       );
     } catch (err) {
       console.warn("CATALOG_SEARCH_ERROR", { label: "searchSharedCatalogItems.catch", error: err });
@@ -6943,8 +6998,12 @@ export default function App() {
 
     const productName = String(result?.product_name || "").trim();
     const barcode = String(result?.barcode || "").trim();
-    const selectedLocation = result?.selected_store_location || {};
-    const cheapestLocation = result?.cheapest_location || {};
+    const selectedLocation = result?.selected_store_location && typeof result.selected_store_location === "object"
+      ? result.selected_store_location
+      : null;
+    const cheapestLocation = result?.cheapest_location && typeof result.cheapest_location === "object"
+      ? result.cheapest_location
+      : null;
     const canonicalProductKey = normalizeComparableKey(
       result?.canonical_product_key || selectedLocation?.canonical_product_key || cheapestLocation?.canonical_product_key || buildComparableProductKey(result)
     ) || null;
@@ -6998,6 +7057,7 @@ export default function App() {
         cheapest_known_store_name: bestOfferStore,
       },
       selected_store_location: selectedLocation || null,
+      cheapest_location: cheapestLocation || null,
       source: "shared_catalog",
     };
 
@@ -7006,8 +7066,7 @@ export default function App() {
       selectedLocation?.section ||
       selectedLocation?.shelf ||
       selectedLocation?.price != null ||
-      selectedLocation?.avg_price != null ||
-      selectedLocation?.store_id
+      selectedLocation?.avg_price != null
     );
 
     const fallbackLocation = hasSelectedStoreLocation ? selectedLocation : cheapestLocation;
@@ -7015,7 +7074,7 @@ export default function App() {
     // fall back to the best hydrated offer so last_seen_location is always populated
     // with real database intelligence even when the selected store has no mapping yet.
     const bestOfferAsLocation = bestOffer
-      ? {
+        ? {
           store_id: bestOffer.store_id || null,
           store_name: bestOffer.store_name || "",
           aisle: bestOffer.aisle || "",
@@ -10646,7 +10705,23 @@ export default function App() {
                     const hasStoreLocation = Boolean(location?.aisle || location?.section || location?.shelf);
                     const hasKnownPriceElsewhere = Boolean(!hasStoreLocation && result?.hasKnownPriceAtAnotherStore);
                     const displayImage = resolveProductImage(result);
-                    const displayPrice = location?.avg_price ?? location?.price;
+                    const selectedPrice = Number(location?.avg_price ?? location?.price ?? 0) || null;
+                    const cheapestKnownPrice = Number(result?.cheapest_known_price ?? 0) || null;
+                    const cheapestLocationPrice = Number(result?.cheapest_location?.avg_price ?? result?.cheapest_location?.price ?? 0) || null;
+                    const offerPrice = Number(result?.offers?.[0]?.price ?? 0) || null;
+                    const displayPrice = selectedPrice ?? cheapestKnownPrice ?? cheapestLocationPrice ?? offerPrice;
+
+                    const selectedLocationText = [location?.aisle, location?.section, location?.shelf].filter(Boolean).join(" • ");
+                    const cheapestLocationText = [result?.cheapest_location?.aisle, result?.cheapest_location?.section, result?.cheapest_location?.shelf].filter(Boolean).join(" • ");
+                    const offerLocationText = [result?.offers?.[0]?.aisle, result?.offers?.[0]?.section, result?.offers?.[0]?.shelf].filter(Boolean).join(" • ");
+                    const bestLocationText = selectedLocationText || cheapestLocationText || offerLocationText;
+
+                    const bestKnownStoreName = result?.cheapest_known_store_name || result?.cheapest_location?.store_name || result?.offers?.[0]?.store_name || null;
+                    const displayPriceLabel = selectedPrice != null
+                      ? "$" + Number(selectedPrice).toFixed(2) + " " + formatPriceType(location?.price_type)
+                      : (displayPrice != null
+                        ? `Best known price: $${Number(displayPrice).toFixed(2)}${bestKnownStoreName ? ` at ${bestKnownStoreName}` : ""}`
+                        : null);
 
                     return (
                       <div
@@ -10686,12 +10761,12 @@ export default function App() {
                           </div>
                           {selectedStore?.id ? (
                             <div style={{ fontSize: 12, color: hasStoreLocation ? "#166534" : "#64748b", marginTop: 2 }}>
-                              {hasStoreLocation
-                                ? `${location.aisle || "Aisle"}${location.section ? ` • ${location.section}` : ""}${location.shelf ? ` • ${location.shelf}` : ""}`
+                              {bestLocationText
+                                ? bestLocationText
                                 : hasKnownPriceElsewhere
                                   ? "Known price found at another store; selected store still needs location."
                                   : "No known location for this store yet"}
-                              {displayPrice != null ? ` • $${Number(displayPrice).toFixed(2)} ${formatPriceType(location?.price_type)}` : ""}
+                              {displayPriceLabel ? ` • ${displayPriceLabel}` : ""}
                             </div>
                           ) : null}
                         </div>
