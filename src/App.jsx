@@ -1233,6 +1233,58 @@ export default function App() {
       .join("|");
   };
 
+  const extractMeatVariantKey = (normalized) => {
+    const debugEnabled = window.localStorage.getItem("mvpDebug") === "true";
+
+    // Ground beef: detect lean/fat percent patterns for variant-specific bucket keys.
+    if (/\bground\s+beef\b/.test(normalized)) {
+      let variant = "ground beef";
+      // "80/20", "85/15" style fractions
+      const fractionMatch = normalized.match(/\b(\d{2,3})\s*\/\s*(\d{2,3})\b/);
+      if (fractionMatch) {
+        variant = `ground beef ${fractionMatch[1]}/${fractionMatch[2]}`;
+      } else {
+        // "80% lean", "93 lean", "90 percent lean" style
+        const leanMatch = normalized.match(/\b(\d{2,3})\s*%?\s*(?:percent\s+)?lean\b/);
+        if (leanMatch) {
+          const lean = Number(leanMatch[1]);
+          if (lean >= 90) {
+            variant = `ground beef ${lean} lean`;
+          } else {
+            const fat = 100 - lean;
+            variant = `ground beef ${lean}/${fat}`;
+          }
+        }
+      }
+      // Preserve family/value pack signal as a separate variant bucket.
+      if (/\bfamily\s*pack\b/.test(normalized)) {
+        variant += " family pack";
+      }
+      if (debugEnabled) {
+        console.debug("MEAT_VARIANT_KEY", { input: normalized, variant, type: "ground_beef" });
+      }
+      return variant;
+    }
+
+    // Ribeye: normalize to canonical form and preserve meaningful cut details.
+    if (/\bribeye\b/.test(normalized)) {
+      let variant = "ribeye steak";
+      if (/\bbone[\s-]*in\b/.test(normalized)) {
+        variant = "ribeye steak bone in";
+      } else if (/\bboneless\b/.test(normalized)) {
+        variant = "ribeye steak boneless";
+      } else if (/\bthin[\s-]*slic(ed)?\b/.test(normalized)) {
+        variant = "ribeye steak thin sliced";
+      }
+      if (debugEnabled) {
+        console.debug("MEAT_VARIANT_KEY", { input: normalized, variant, type: "ribeye" });
+      }
+      return variant;
+    }
+
+    return null;
+  };
+
   const normalizeCommodityName = (value) => {
     let normalized = normalizeComparableText(value);
     if (!normalized) return "";
@@ -1240,8 +1292,9 @@ export default function App() {
     // Canonical commodity forms first.
     if (/\bcilantro\b/.test(normalized)) return "cilantro";
     if (/\bbanana(s)?\b/.test(normalized)) return "bananas";
-    if (/\bribeye\b/.test(normalized)) return "ribeye steak";
-    if (/\bground\s+beef\b/.test(normalized)) return "ground beef";
+    // For ground beef and ribeye, use extractMeatVariantKey for granular variant-specific keys.
+    const meatVariantKey = extractMeatVariantKey(normalized);
+    if (meatVariantKey) return meatVariantKey;
     if (/\bchicken\s+breast\b/.test(normalized)) return "chicken breast";
     if (/\bchicken\s+thigh\b/.test(normalized)) return "chicken thigh";
     if (/\bpork\s+chop(s)?\b/.test(normalized)) return "pork chop";
@@ -1477,6 +1530,49 @@ export default function App() {
       return null;
     }
 
+    // Priority 3: commodity identity — only when BOTH sides are commodity items.
+    // Must run BEFORE the strict packaged-goods name/size check so produce/meat/seafood
+    // can match even when product names or sizes differ between stores/brands.
+    const cartCommodityKey = buildCommodityMatchKey(cartItem);
+    const rowCommodityKey = buildCommodityMatchKey(row);
+
+    if (debugEnabled) {
+      console.debug("COMMODITY_MATCH_ATTEMPT", {
+        cart_product_name: cartItem?.product_name || cartItem?.name || null,
+        row_product_name: row?.product_name || row?.name || null,
+        cartCommodityKey: cartCommodityKey || null,
+        rowCommodityKey: rowCommodityKey || null,
+      });
+    }
+
+    if (cartCommodityKey && rowCommodityKey) {
+      if (cartCommodityKey === rowCommodityKey) {
+        if (debugEnabled) {
+          console.debug("COMMODITY_MATCH_ACCEPTED", {
+            method: "commodity_identity",
+            cartCommodityKey,
+            rowCommodityKey,
+            cart_product_name: cartItem?.product_name || cartItem?.name || null,
+            row_product_name: row?.product_name || row?.name || null,
+          });
+        }
+        return "commodity_identity";
+      }
+      // Both sides are commodity items but different variants — do NOT fall through to
+      // packaged-goods strict check (prevents 80/20 from matching 93 lean via flexible_identity).
+      if (debugEnabled) {
+        console.debug("COMMODITY_MATCH_REJECTED", {
+          cartCommodityKey,
+          rowCommodityKey,
+          reason: "commodity_variant_mismatch",
+          cart_product_name: cartItem?.product_name || cartItem?.name || null,
+          row_product_name: row?.product_name || row?.name || null,
+        });
+      }
+      return null;
+    }
+
+    // Priority 4 (packaged goods): strict identity requires exact name + size.
     // Size comparison is strict: prefer explicit size value+unit, otherwise allow exact display_size fallback.
     const hasExactSizePair = Boolean(cart.sizePair && candidate.sizePair && cart.sizePair === candidate.sizePair);
     const hasExactDisplaySizeFallback = Boolean(
@@ -1494,53 +1590,18 @@ export default function App() {
       return null;
     }
 
-    // Priority 3: strict identity requires exact brand + name + size.
+    // Priority 5: strict identity requires exact brand + name + size.
     if (cart.brand && candidate.brand && cart.brand === candidate.brand) {
       return "strict_identity";
     }
 
-    // Priority 4: flexible identity allows missing brand only when name+size are already exact and category does not conflict.
+    // Priority 6: flexible identity allows missing brand only when name+size are already exact and category does not conflict.
     if (!requireExactBrand) {
       const categoryCompatible = !cart.category || !candidate.category || cart.category === candidate.category;
       const hasMissingBrand = !cart.brand || !candidate.brand;
       if (hasMissingBrand && categoryCompatible) {
         return "flexible_identity";
       }
-    }
-
-    const cartCommodityKey = buildCommodityMatchKey(cartItem);
-    const rowCommodityKey = buildCommodityMatchKey(row);
-
-    if (debugEnabled) {
-      console.debug("COMMODITY_MATCH_KEY", {
-        cartCommodityKey: cartCommodityKey || null,
-        rowCommodityKey: rowCommodityKey || null,
-        cart_product_name: cartItem?.product_name || cartItem?.name || null,
-        row_product_name: row?.product_name || row?.name || null,
-      });
-    }
-
-    if (cartCommodityKey && rowCommodityKey && cartCommodityKey === rowCommodityKey) {
-      if (debugEnabled) {
-        console.debug("COMMODITY_MATCH_ACCEPTED", {
-          method: "commodity_identity",
-          cartCommodityKey,
-          rowCommodityKey,
-          cart_product_name: cartItem?.product_name || cartItem?.name || null,
-          row_product_name: row?.product_name || row?.name || null,
-        });
-      }
-      return "commodity_identity";
-    }
-
-    if (debugEnabled && (cartCommodityKey || rowCommodityKey)) {
-      console.debug("COMMODITY_MATCH_REJECTED", {
-        cartCommodityKey: cartCommodityKey || null,
-        rowCommodityKey: rowCommodityKey || null,
-        reason: "commodity_keys_missing_or_mismatch",
-        cart_product_name: cartItem?.product_name || cartItem?.name || null,
-        row_product_name: row?.product_name || row?.name || null,
-      });
     }
 
     return null;
@@ -2013,9 +2074,27 @@ export default function App() {
           display_size: row?.display_size || null,
         };
 
-        // Keep the best (lowest) price for each store
-        if (!offersByStore[storeId] || price < offersByStore[storeId].price) {
-          offersByStore[storeId] = offer;
+        // Group by store + commodity variant key to prevent cross-variant merging.
+        // e.g. "Ground Beef 80/20" and "Ground Beef 93 Lean" at the same store must not share a bucket.
+        const rowCommodityKey = buildCommodityMatchKey(row);
+        const offerGroupKey = rowCommodityKey ? `${storeId}|${rowCommodityKey}` : storeId;
+
+        if (debugEnabled) {
+          const nameStr = String(row?.product_name || "").toLowerCase();
+          if (/ground\s+beef/.test(nameStr)) {
+            console.debug("GROUND_BEEF_VARIANT_BUCKET", {
+              storeId, offerGroupKey, rowCommodityKey: rowCommodityKey || null, price, product_name: row?.product_name || null,
+            });
+          } else if (/ribeye/.test(nameStr)) {
+            console.debug("RIBEYE_VARIANT_BUCKET", {
+              storeId, offerGroupKey, rowCommodityKey: rowCommodityKey || null, price, product_name: row?.product_name || null,
+            });
+          }
+        }
+
+        // Keep the best (lowest) price per store+variant group.
+        if (!offersByStore[offerGroupKey] || price < offersByStore[offerGroupKey].price) {
+          offersByStore[offerGroupKey] = offer;
         }
       });
 
@@ -3168,8 +3247,8 @@ export default function App() {
         }
       }
 
-      // Priority 3: Use price index from search/compare
-      const priceInsights = itemKey ? cartPriceInsightsByKey[itemKey] || null : null;
+      // Priority 3: Use price index from search/compare (considers barcode, canonical key, and commodity key candidates)
+      const priceInsights = getComparablePriceBucket(cartPriceInsightsByKey, item);
       const cheapestRow = priceInsights?.cheapestRow || null;
       const cheapestPrice = Number(cheapestRow?.avg_price ?? cheapestRow?.price);
       if (Number.isFinite(cheapestPrice) && cheapestPrice > 0) {
