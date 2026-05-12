@@ -6637,7 +6637,7 @@ export default function App() {
         return [productName, brand, sizePair].filter(Boolean).join("|");
       };
 
-      const productLocationsBaseSelect = "barcode, canonical_product_key, product_name, brand, category, size_value, size_unit, display_size, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at, image_url, verified_image_url";
+      const productLocationsBaseSelect = "barcode, canonical_product_key, product_name, brand, category, size_value, size_unit, display_size, store_id, store_name, aisle, section, shelf, price, avg_price, price_type, confidence_score, last_confirmed_at";
 
       // 1) catalog_products query FIRST (source of truth for typed search)
       const catalogMinSelect = "id, barcode, product_name, brand, image_url, source";
@@ -6697,6 +6697,7 @@ export default function App() {
       const catalogCanonicalKeys = [...new Set(catalogEnhancedRows.map((row) => normalizeComparableKey(row?.canonical_product_key)).filter(Boolean))];
 
       let locationRowsByBarcode = [];
+      let productLocationsQuerySucceeded = false;
       if (catalogBarcodes.length > 0) {
         const queryByBarcode = await supabase
           .from("product_locations")
@@ -6707,6 +6708,7 @@ export default function App() {
           logCatalogSearchError("product_locations_by_barcode", queryByBarcode.error);
         } else {
           locationRowsByBarcode = Array.isArray(queryByBarcode.data) ? queryByBarcode.data : [];
+          productLocationsQuerySucceeded = true;
         }
       }
       if (debugEnabled) {
@@ -6729,6 +6731,7 @@ export default function App() {
           }
         } else {
           locationRowsByCanonical = Array.isArray(queryByCanonical.data) ? queryByCanonical.data : [];
+          productLocationsQuerySucceeded = true;
         }
       }
       if (debugEnabled) {
@@ -6756,9 +6759,11 @@ export default function App() {
           .limit(500);
         if (!fallbackTermQuery.error) {
           locationRowsByTerm = Array.isArray(fallbackTermQuery.data) ? fallbackTermQuery.data : [];
+          productLocationsQuerySucceeded = true;
         }
       } else {
         locationRowsByTerm = Array.isArray(queryByTerm.data) ? queryByTerm.data : [];
+        productLocationsQuerySucceeded = true;
       }
 
       // Merge location rows (dedupe by store + identity + price)
@@ -6777,6 +6782,14 @@ export default function App() {
         }
       });
       const locationRows = Array.from(mergedLocationMap.values());
+
+      if (productLocationsQuerySucceeded && locationRows.length === 0) {
+        console.warn("PRODUCT_LOCATIONS_NO_ROWS", {
+          term: safeTerm,
+          barcodeCount: catalogBarcodes.length,
+          canonicalKeyCount: catalogCanonicalKeys.length,
+        });
+      }
 
       const catalogByBarcode = new Map();
       catalogEnhancedRows.forEach((row) => {
