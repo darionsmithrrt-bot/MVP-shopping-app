@@ -52,6 +52,8 @@
 
 body {
   margin: 0;
+  /* Prevent content from being obscured by iPhone home indicator / notch */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 #root {

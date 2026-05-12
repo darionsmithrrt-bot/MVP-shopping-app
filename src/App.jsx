@@ -1642,7 +1642,7 @@ export default function App() {
 
     (cartItems || []).forEach((cartItem) => {
       const itemKey = buildComparableProductKey(cartItem);
-      const priceBucket = itemKey ? priceIndex?.[itemKey] || null : null;
+      const priceBucket = getComparablePriceBucket(priceIndex, cartItem);
 
       if (!priceBucket) return;
 
@@ -1669,9 +1669,24 @@ export default function App() {
         }
 
         const storeGroup = storeGroups[storeId];
-        const currentMatch = storeGroup.itemsByKey[itemKey];
+        // Validate row identity against cart item using the same strict logic as calculateBestStore
+        const matchMethod = getProductMatchMethod(cartItem, row);
+        if (!matchMethod) return;
+
+        // Stable bucket key — never use Math.random()
+        const bucketKey =
+          itemKey ||
+          String(
+            cartItem?.cart_item_id ||
+            cartItem?.id ||
+            cartItem?.barcode ||
+            cartItem?.product_name ||
+            cartItem?.name ||
+            "cart-item"
+          );
+        const currentMatch = storeGroup.itemsByKey[bucketKey];
         if (!currentMatch || isBetterPriceObservation(row, currentMatch.row)) {
-          storeGroup.itemsByKey[itemKey] = { row, cartItem };
+          storeGroup.itemsByKey[bucketKey] = { row: { ...row, match_method: matchMethod }, cartItem };
         }
       });
     });
@@ -1848,12 +1863,21 @@ export default function App() {
           store_id: storeId,
           store_name: row?.store_name || "Unknown store",
           price: price,
+          avg_price: Number(row?.avg_price) || price,
+          price_type: row?.price_type || "each",
           aisle: row?.aisle || "",
           section: row?.section || "",
           shelf: row?.shelf || "",
           confidence_score: Number(row?.confidence_score || 0),
           updated_at: row?.last_confirmed_at || new Date().toISOString(),
-          price_type: row?.price_type || "each",
+          last_confirmed_at: row?.last_confirmed_at || null,
+          canonical_product_key: row?.canonical_product_key || canonicalKey || null,
+          barcode: String(row?.barcode || "").trim() || barcode || null,
+          product_name: row?.product_name || productName || null,
+          brand: row?.brand || brand || null,
+          size_value: row?.size_value || sizeValue || null,
+          size_unit: row?.size_unit || sizeUnit || null,
+          display_size: row?.display_size || null,
         };
 
         // Keep the best (lowest) price for each store
@@ -6492,6 +6516,27 @@ export default function App() {
           cheapest_location: cheapestLocation,
           selected_store_location: selectedLocation,
           all_known_store_prices: allKnownStorePrices,
+          offers: allKnownStorePrices.map((entry) => ({
+            store_id: entry.store_id || null,
+            store_name: entry.store_name || "Unknown store",
+            price: entry.price,
+            avg_price: entry.price,
+            price_type: entry.price_type || "each",
+            aisle: entry.aisle || "",
+            section: entry.section || "",
+            shelf: entry.shelf || "",
+            confidence_score: Number(entry.confidence_score || 0),
+            updated_at: null,
+            last_confirmed_at: null,
+            canonical_product_key: baseRow?.canonical_product_key || null,
+            barcode: rowBarcode || null,
+            product_name: baseRow?.product_name || "",
+            brand: baseRow?.brand || "",
+            size_value: baseRow?.size_value || "",
+            size_unit: baseRow?.size_unit || "",
+            display_size: baseRow?.display_size || "",
+          })),
+          known_store_count: allKnownStorePrices.length,
           source,
           hasSelectedStoreLocation: Boolean(selectedLocation?.aisle || selectedLocation?.section || selectedLocation?.shelf),
           hasKnownPriceAtAnotherStore: Boolean(!selectedLocation && allKnownStorePrices.length > 0),
@@ -6553,6 +6598,23 @@ export default function App() {
 
       console.log("CATALOG_SEARCH_MERGED_RESULTS", mergedResults.length);
       console.log("CATALOG_SEARCH_FINAL_RESULTS", mergedResults.length);
+
+      if (window.localStorage.getItem("mvpDebug") === "true") {
+        console.debug("CATALOG_SEARCH_WITH_LOCATION_INTELLIGENCE", {
+          searchTerm: safeTerm,
+          catalogRows: catalogEnhancedRows.length,
+          productLocationRows: locationRows.length,
+          enrichedResults: mergedResults.map((r) => ({
+            product_name: r.product_name,
+            brand: r.brand,
+            known_store_count: r.known_store_count,
+            cheapest_known_price: r.cheapest_known_price,
+            cheapest_known_store_name: r.cheapest_known_store_name,
+            hasSelectedStoreLocation: r.hasSelectedStoreLocation,
+            hasKnownPriceAtAnotherStore: r.hasKnownPriceAtAnotherStore,
+          })),
+        });
+      }
 
       setCatalogSearchResults(mergedResults);
       setCatalogSearchMessage(
@@ -6682,6 +6744,27 @@ export default function App() {
     if (lastSeen && Object.keys(lastSeen).length > 0) {
       normalized.last_seen_location = lastSeen;
     }
+
+    // Preserve price/store intelligence fields so they survive save/reload/restore
+    normalized.canonical_product_key = item.canonical_product_key || null;
+    if (item.selected_store_location && typeof item.selected_store_location === "object") {
+      normalized.selected_store_location = item.selected_store_location;
+    }
+    if (item.cheapest_location && typeof item.cheapest_location === "object") {
+      normalized.cheapest_location = item.cheapest_location;
+    }
+    normalized.known_store_prices = Array.isArray(item.known_store_prices) ? item.known_store_prices : [];
+    normalized.all_known_store_prices = Array.isArray(item.all_known_store_prices) ? item.all_known_store_prices : [];
+    normalized.other_known_prices = Array.isArray(item.other_known_prices) ? item.other_known_prices : [];
+    normalized.offers = Array.isArray(item.offers) ? item.offers : [];
+    if (item.price_insights && typeof item.price_insights === "object") {
+      normalized.price_insights = item.price_insights;
+    }
+    normalized.cheapest_known_price = item.cheapest_known_price ?? null;
+    normalized.cheapest_known_store_name = item.cheapest_known_store_name || null;
+    normalized.price = item.price ?? null;
+    normalized.avg_price = item.avg_price ?? null;
+    normalized.price_type = item.price_type || null;
 
     return normalized;
   };
@@ -6928,23 +7011,54 @@ export default function App() {
     );
 
     const fallbackLocation = hasSelectedStoreLocation ? selectedLocation : cheapestLocation;
-    const lastSeenLocation = fallbackLocation && Object.keys(fallbackLocation).length > 0
+    // If neither selectedLocation nor cheapestLocation from search carry location info,
+    // fall back to the best hydrated offer so last_seen_location is always populated
+    // with real database intelligence even when the selected store has no mapping yet.
+    const bestOfferAsLocation = bestOffer
       ? {
-          store_id: fallbackLocation?.store_id || null,
-          store_name: fallbackLocation?.store_name || fallbackLocation?.stores?.name || "",
-          aisle: fallbackLocation?.aisle || "",
-          section: fallbackLocation?.section || "",
-          shelf: fallbackLocation?.shelf || "",
-          price: fallbackLocation?.price ?? result?.price ?? cheapestKnownPrice ?? null,
-          avg_price: fallbackLocation?.avg_price ?? result?.avg_price ?? cheapestKnownPrice ?? null,
-          price_type: fallbackLocation?.price_type || result?.price_type || "each",
-          confidence_score: Number(result?.confidence_score ?? fallbackLocation?.confidence_score ?? 0),
+          store_id: bestOffer.store_id || null,
+          store_name: bestOffer.store_name || "",
+          aisle: bestOffer.aisle || "",
+          section: bestOffer.section || "",
+          shelf: bestOffer.shelf || "",
+          price: bestOffer.price ?? null,
+          avg_price: bestOffer.avg_price ?? bestOffer.price ?? null,
+          price_type: bestOffer.price_type || "each",
+          confidence_score: Number(bestOffer.confidence_score || 0),
+          canonical_product_key: canonicalProductKey,
+        }
+      : null;
+    const resolvedFallback = (fallbackLocation && Object.keys(fallbackLocation).length > 0)
+      ? fallbackLocation
+      : bestOfferAsLocation;
+    const lastSeenLocation = resolvedFallback
+      ? {
+          store_id: resolvedFallback?.store_id || null,
+          store_name: resolvedFallback?.store_name || resolvedFallback?.stores?.name || "",
+          aisle: resolvedFallback?.aisle || "",
+          section: resolvedFallback?.section || "",
+          shelf: resolvedFallback?.shelf || "",
+          price: resolvedFallback?.price ?? result?.price ?? bestOfferPrice ?? null,
+          avg_price: resolvedFallback?.avg_price ?? result?.avg_price ?? bestOfferPrice ?? null,
+          price_type: resolvedFallback?.price_type || result?.price_type || "each",
+          confidence_score: Number(result?.confidence_score ?? resolvedFallback?.confidence_score ?? 0),
           canonical_product_key: canonicalProductKey,
         }
       : null;
 
     const addResult = await handleAddToShoppingList(productToAdd, lastSeenLocation);
     if (addResult?.added || addResult?.updated) {
+      if (window.localStorage.getItem("mvpDebug") === "true") {
+        console.debug("KNOWN_DB_ITEM_ADDED_TO_LIST", {
+          product_name: productToAdd.product_name,
+          barcode: productToAdd.barcode,
+          canonical_product_key: productToAdd.canonical_product_key,
+          offers: productToAdd.offers,
+          last_seen_location: lastSeenLocation,
+          cheapest_known_price: productToAdd.cheapest_known_price,
+          cheapest_known_store_name: productToAdd.cheapest_known_store_name,
+        });
+      }
       setManualListItemName("");
       setCatalogSearchTerm("");
       setCatalogSearchResults([]);
@@ -7409,6 +7523,12 @@ export default function App() {
             cheapest_known_store_name: productToAdd.cheapest_known_store_name || item.cheapest_known_store_name || null,
             other_known_prices: Array.isArray(productToAdd.other_known_prices) ? productToAdd.other_known_prices : (item.other_known_prices || []),
             all_known_store_prices: Array.isArray(productToAdd.all_known_store_prices) ? productToAdd.all_known_store_prices : (item.all_known_store_prices || []),
+            offers: (
+              Array.isArray(productToAdd?.offers) && productToAdd.offers.length > 0
+                ? productToAdd.offers
+                : (Array.isArray(item?.offers) && item.offers.length > 0 ? item.offers : [])
+            ),
+            price_insights: productToAdd.price_insights || item.price_insights || null,
             price: productToAdd.price ?? item.price ?? null,
             avg_price: productToAdd.avg_price ?? item.avg_price ?? null,
             price_type: productToAdd.price_type || item.price_type || "each",
@@ -7459,6 +7579,8 @@ export default function App() {
       cheapest_known_store_name: productToAdd.cheapest_known_store_name || null,
       other_known_prices: Array.isArray(productToAdd.other_known_prices) ? productToAdd.other_known_prices : [],
       all_known_store_prices: Array.isArray(productToAdd.all_known_store_prices) ? productToAdd.all_known_store_prices : knownStorePrices,
+      offers: Array.isArray(productToAdd.offers) ? productToAdd.offers : [],
+      price_insights: productToAdd.price_insights || null,
       price: productToAdd.price ?? null,
       avg_price: productToAdd.avg_price ?? null,
       price_type: productToAdd.price_type || "each",
@@ -8334,12 +8456,19 @@ export default function App() {
 
         const priceIndex = buildPriceObservationIndex(priceRows);
         console.info("PRICE INDEX KEYS", Object.keys(priceIndex || {}));
-        setCartPriceInsightsByKey(priceIndex);
 
         const sortedResults = calculateBestStore(shoppingListItems, priceRows || [], brandComparisonMode);
+        const localBest = sortedResults?.[0] || null;
 
-        console.info("FINAL STORE COMPARISON RESULTS", sortedResults || []);
-        console.info("CHEAPEST STORE RESULT", sortedResults?.[0] || null);
+        console.info("LOCAL_FALLBACK_RESULT_SUMMARY", {
+          storeCount: sortedResults.length,
+          bestStore: localBest?.store?.name || null,
+          matchedCount: localBest?.matched_count || 0,
+          totalPrice: localBest?.total_price || 0,
+          coverage: localBest?.coverage || 0,
+          hasItemBreakdown: Object.keys(localBest?.itemsByKey || {}).length > 0,
+        });
+
         if ((!sortedResults || sortedResults.length === 0) && (import.meta.env.DEV || window.localStorage.getItem("mvpDebug") === "true")) {
           console.warn("CART COMPARISON NO MATCHES", {
             cartComparableKeys: cartKeys,
@@ -8348,90 +8477,133 @@ export default function App() {
           });
         }
 
-        setCartComparison(sortedResults);
-        console.info("FALLBACK USED", true);
-        setToast({ message: "Cart comparison complete", type: "success" });
-        return sortedResults;
+        // Return data only — caller decides whether to commit to state
+        return { sortedResults, priceIndex };
       };
 
+      // Step 1: attempt RPC
+      let rpcMappedResults = null;
+      let rpcUsable = false;
       try {
         const { data: rpcRows, error: rpcError } = await supabase.rpc("find_cheapest_store_for_cart_v1", {
           cart_items: rpcCartItems,
           brand_mode: brandComparisonMode,
         });
 
-        if (rpcError) {
-          throw rpcError;
-        }
+        if (rpcError) throw rpcError;
 
         const safeRpcRows = Array.isArray(rpcRows) ? rpcRows : [];
-        console.info("RPC RESULT COUNT", safeRpcRows.length);
-        console.info("FALLBACK USED", false);
+        const rpcBestRow = safeRpcRows[0] || null;
+        const rpcMatchedCount = Number(rpcBestRow?.matched_count || 0);
+        const rpcTotalPrice = Number(rpcBestRow?.total_price || 0);
+        const rpcCoverage = Number(rpcBestRow?.coverage_pct || 0);
+        const rpcHasBreakdown = Array.isArray(rpcBestRow?.item_breakdown) && rpcBestRow.item_breakdown.length > 0;
 
-        if (safeRpcRows.length === 0) {
-          console.info("RPC returned empty; running local fallback comparison");
-          const fallbackResults = await runLocalFallbackComparison();
-          const hasFallbackResults = Array.isArray(fallbackResults) && fallbackResults.length > 0;
-          if (!hasFallbackResults) {
-            console.warn("NO COMPARABLE PRICE RECORDS AFTER RPC AND FALLBACK");
-            setCartComparison([]);
-            setError("No comparable price records found yet for these cart items.");
-          }
-          return;
-        }
+        rpcUsable = safeRpcRows.length > 0 && rpcMatchedCount > 0 && rpcTotalPrice > 0 && rpcHasBreakdown && rpcCoverage > 0;
 
-        const mappedResults = safeRpcRows.map((row) => {
-          const breakdown = Array.isArray(row?.item_breakdown) ? row.item_breakdown : [];
-          const itemsByKey = {};
-
-          breakdown.forEach((entry, index) => {
-            const key = normalizeComparableKey(
-              `${entry?.cart_product_name || "item"}|${entry?.matched_product_name || ""}|${index}`
-            ) || `item-${index}`;
-            itemsByKey[key] = {
-              row: {
-                store_id: row?.store_id || null,
-                store_name: row?.store_name || null,
-                product_name: entry?.matched_product_name || entry?.cart_product_name || "Unknown product",
-                brand: entry?.brand || null,
-                size_value: null,
-                size_unit: null,
-                display_size: entry?.size || null,
-                avg_price: entry?.price_used ?? null,
-                price: entry?.price_used ?? null,
-                price_type: entry?.price_type || "each",
-                aisle: entry?.aisle || "",
-                section: entry?.section || "",
-                shelf: entry?.shelf || "",
-                confidence_score: Number(entry?.confidence_score || 0),
-                match_method: entry?.match_method || null,
-              },
-              cartItem: {
-                product_name: entry?.cart_product_name || entry?.matched_product_name || "Unknown product",
-              },
-            };
-          });
-
-          return {
-            store_id: row?.store_id || null,
-            store: { name: row?.store_name || "Unknown store" },
-            matched_count: Number(row?.matched_count || 0),
-            total_items: Number(row?.total_item_count || shoppingListItems.length),
-            total_price: Number(row?.total_price || 0),
-            coverage: Number(row?.coverage_pct || 0),
-            avg_confidence: Number(row?.avg_confidence || 0),
-            brand_match_pct: null,
-            is_estimate: false,
-            decision_reason: row?.decision_reason || "",
-            itemsByKey,
-          };
+        console.info("RPC_RESULT_SUMMARY", {
+          rowCount: safeRpcRows.length,
+          bestStore: rpcBestRow?.store_name || null,
+          matchedCount: rpcMatchedCount,
+          totalPrice: rpcTotalPrice,
+          coverage: rpcCoverage,
+          hasItemBreakdown: rpcHasBreakdown,
+          isUsable: rpcUsable,
         });
 
-        setCartComparison(mappedResults);
-        setToast({ message: "Cart comparison complete", type: "success" });
+        if (safeRpcRows.length > 0) {
+          rpcMappedResults = safeRpcRows.map((row) => {
+            const breakdown = Array.isArray(row?.item_breakdown) ? row.item_breakdown : [];
+            const itemsByKey = {};
+
+            breakdown.forEach((entry, index) => {
+              const key = normalizeComparableKey(
+                `${entry?.cart_product_name || "item"}|${entry?.matched_product_name || ""}|${index}`
+              ) || `item-${index}`;
+              itemsByKey[key] = {
+                row: {
+                  store_id: row?.store_id || null,
+                  store_name: row?.store_name || null,
+                  product_name: entry?.matched_product_name || entry?.cart_product_name || "Unknown product",
+                  brand: entry?.brand || null,
+                  size_value: null,
+                  size_unit: null,
+                  display_size: entry?.size || null,
+                  avg_price: entry?.price_used ?? null,
+                  price: entry?.price_used ?? null,
+                  price_type: entry?.price_type || "each",
+                  aisle: entry?.aisle || "",
+                  section: entry?.section || "",
+                  shelf: entry?.shelf || "",
+                  confidence_score: Number(entry?.confidence_score || 0),
+                  match_method: entry?.match_method || null,
+                },
+                cartItem: {
+                  product_name: entry?.cart_product_name || entry?.matched_product_name || "Unknown product",
+                },
+              };
+            });
+
+            return {
+              store_id: row?.store_id || null,
+              store: { name: row?.store_name || "Unknown store" },
+              matched_count: Number(row?.matched_count || 0),
+              total_items: Number(row?.total_item_count || shoppingListItems.length),
+              total_price: Number(row?.total_price || 0),
+              coverage: Number(row?.coverage_pct || 0),
+              avg_confidence: Number(row?.avg_confidence || 0),
+              brand_match_pct: null,
+              is_estimate: false,
+              decision_reason: row?.decision_reason || "",
+              itemsByKey,
+            };
+          });
+        }
       } catch (rpcErr) {
         console.warn("CART COMPARISON RPC WARNING:", rpcErr?.message || rpcErr);
-        await runLocalFallbackComparison();
+      }
+
+      // Step 2: always run local fallback so we can compare
+      const { sortedResults: localResults, priceIndex: localPriceIndex } = await runLocalFallbackComparison();
+      const localBest = localResults?.[0] || null;
+      const localUsable = Array.isArray(localResults) && localResults.length > 0 && Number(localBest?.matched_count || 0) > 0;
+      const localCoverage = Number(localBest?.coverage || 0);
+      const rpcBestCoverage = Number(rpcMappedResults?.[0]?.coverage || 0);
+      const localHasEqualOrBetterCoverage = localUsable && rpcUsable && localCoverage >= rpcBestCoverage;
+
+      // Step 3: pick the best source
+      let useSource;
+      let finalResults;
+
+      if (!rpcUsable && localUsable) {
+        useSource = "local_fallback";
+        finalResults = localResults;
+      } else if (rpcUsable && !localUsable) {
+        useSource = "rpc";
+        finalResults = rpcMappedResults;
+      } else if (rpcUsable && localUsable && localHasEqualOrBetterCoverage) {
+        useSource = "local_fallback";
+        finalResults = localResults;
+      } else if (rpcUsable) {
+        useSource = "rpc";
+        finalResults = rpcMappedResults;
+      } else {
+        useSource = "local_fallback";
+        finalResults = localResults || [];
+      }
+
+      console.info("COMPARISON_SOURCE_USED", useSource);
+      console.info("FINAL STORE COMPARISON RESULTS", finalResults || []);
+      console.info("CHEAPEST STORE RESULT", finalResults?.[0] || null);
+
+      setCartPriceInsightsByKey(localPriceIndex);
+      setCartComparison(finalResults);
+
+      if (!finalResults || finalResults.length === 0) {
+        console.warn("NO COMPARABLE PRICE RECORDS AFTER RPC AND FALLBACK");
+        setError("No comparable price records found yet for these cart items.");
+      } else {
+        setToast({ message: "Cart comparison complete", type: "success" });
       }
     } catch (err) {
       setError(err.message || "Failed to compare cart");
@@ -10657,7 +10829,7 @@ export default function App() {
                       const lastSeenLocationText = [lastSeen?.aisle, lastSeen?.section, lastSeen?.shelf].filter(Boolean).join(" • ");
                       const displayImageUrl = resolveProductImage(item);
                       const itemKey = buildComparableProductKey(item);
-                      const priceInsight = itemKey ? cartPriceInsightsByKey[itemKey] || null : null;
+                      const priceInsight = getComparablePriceBucket(cartPriceInsightsByKey, item);
                       const cheapestKnownRow = priceInsight?.cheapestRow || null;
                       const otherKnownPrices = Object.values(priceInsight?.rowsByStore || {})
                         .filter((row) => row && row !== cheapestKnownRow)
@@ -10739,13 +10911,19 @@ export default function App() {
                       Cheapest known: {cheapestKnownStoreName || "Unknown store"} ${cheapestKnownPrice.toFixed(2)}
                     </div>
                   ) : null}
-                  {bestOfferPrice != null && otherKnownPrices.length > 0 ? (
+                  {bestOfferPrice != null && itemOffers.length > 1 ? (
                     <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3 }}>
-                      Other stores: {itemOffers.slice(1, 3).map((offer) => `${offer.store_name} $${Number(offer.price).toFixed(2)}`).join(" • ")}
+                      Also known at {itemOffers.length - 1} other store{itemOffers.length - 1 !== 1 ? "s" : ""}
                     </div>
                   ) : !bestOfferPrice && otherKnownPrices.length > 0 ? (
                     <div style={{ fontSize: 12, color: "#64748b", marginBottom: 3 }}>
                       Other known price: {otherKnownPrices.slice(0, 2).map((entry) => `${entry.storeName} $${entry.price.toFixed(2)}`).join(" • ")}
+                    </div>
+                  ) : null}
+                  {/* Last seen location from best offer or last_seen_location */}
+                  {(bestOffer?.aisle || bestOffer?.section || bestOffer?.shelf) ? (
+                    <div style={{ fontSize: 12, color: "#475569", marginBottom: 3 }}>
+                      Last seen: {[bestOffer.aisle, bestOffer.section, bestOffer.shelf].filter(Boolean).join(" • ")}
                     </div>
                   ) : null}
                   {!hasKnownPrice ? (
@@ -12820,6 +12998,7 @@ export default function App() {
             borderTopLeftRadius: 24,
             borderTopRightRadius: 24,
             padding: 20,
+            paddingBottom: "calc(20px + env(safe-area-inset-bottom, 0px))",
             zIndex: 9999,
             boxShadow: "0 -4px 20px rgba(0,0,0,0.15)",
             maxHeight: "90vh",
@@ -13135,6 +13314,8 @@ const styles = {
     marginBottom: 12,
     borderRadius: 10,
     border: "1px solid #ccc",
+    fontSize: 16,
+    boxSizing: "border-box",
   },
   modalPrimaryButton: {
     width: "100%",
@@ -13214,7 +13395,7 @@ const styles = {
     borderRadius: 12,
     padding: "11px 12px",
     marginBottom: 12,
-    fontSize: 14,
+    fontSize: 16,
     color: "#0f172a",
     background: "#ffffff",
     boxSizing: "border-box",
@@ -13284,6 +13465,8 @@ const styles = {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
     padding: "10px 4px",
     marginBottom: 4,
   },
@@ -13657,7 +13840,7 @@ const styles = {
     background: "#ffffff",
     color: "#0f172a",
     padding: "12px 14px",
-    fontSize: 15,
+    fontSize: 16,
     boxShadow: "inset 0 1px 2px rgba(15,23,42,0.05)",
   },
   input: {
@@ -13668,7 +13851,7 @@ const styles = {
     background: "#ffffff",
     color: "#0f172a",
     padding: "12px 14px",
-    fontSize: 15,
+    fontSize: 16,
     marginBottom: 12,
     boxSizing: "border-box",
     boxShadow: "inset 0 1px 2px rgba(15,23,42,0.05)",
@@ -13682,7 +13865,7 @@ const styles = {
     background: "#ffffff",
     color: "#0f172a",
     padding: "12px 14px",
-    fontSize: 15,
+    fontSize: 16,
     marginBottom: 12,
     resize: "vertical",
     boxSizing: "border-box",
@@ -14270,7 +14453,7 @@ const styles = {
   },
   toast: {
     position: "fixed",
-    bottom: 24,
+    bottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
     left: "50%",
     transform: "translateX(-50%) translateY(0)",
     background: MVP_GRADIENT,
@@ -14284,7 +14467,9 @@ const styles = {
     border: "1px solid rgba(255,255,255,0.2)",
     opacity: 1,
     transition: "all 0.4s cubic-bezier(0.32, 0.72, 0, 1)",
-    whiteSpace: "nowrap",
+    whiteSpace: "normal",
+    maxWidth: "calc(100vw - 48px)",
+    textAlign: "center",
   },
   locationCardHeader: {
     display: "flex",
