@@ -1020,6 +1020,9 @@ export default function App() {
   const cloudShoppingListReadyRef = useRef(false);
   const cloudShoppingListExplicitClearRef = useRef(false);
   const latestShoppingListItemsRef = useRef([]);
+  const shoppingListRehydrateTimerRef = useRef(null);
+  const shoppingListRehydrateInFlightRef = useRef(false);
+  const shoppingListRehydrateSignatureRef = useRef("");
 
   // ============================================================================
   // STATE - Scanner & Camera
@@ -2621,6 +2624,84 @@ export default function App() {
       cancelled = true;
     };
   }, [shoppingListItems, hasHydratedLocalShoppingList, selectedStore?.id]);
+
+  useEffect(() => {
+    if (!hasHydratedLocalShoppingList) return;
+    if (canUseSavedShoppingList() && !isCloudShoppingListReady) return;
+
+    const items = latestShoppingListItemsRef.current || [];
+    if (!Array.isArray(items) || items.length === 0) return;
+
+    const hasRehydratableItem = items.some((item) => Boolean(
+      item?.source === "shared_catalog" ||
+      item?.catalog_id ||
+      item?.barcode ||
+      item?.canonical_product_key ||
+      item?.product_name
+    ));
+    if (!hasRehydratableItem) return;
+
+    const selectedStoreId = String(selectedStore?.id || "").trim();
+    const toSignature = (list) => JSON.stringify((list || []).map((item) => ({
+      cart_item_id: item?.cart_item_id || null,
+      id: item?.id || null,
+      barcode: item?.barcode || "",
+      catalog_id: item?.catalog_id || null,
+      canonical_product_key: item?.canonical_product_key || null,
+      offersCount: Array.isArray(item?.offers) ? item.offers.length : 0,
+      cheapest_known_price: item?.cheapest_known_price ?? null,
+      cheapest_known_store_name: item?.cheapest_known_store_name || null,
+      price: item?.price ?? null,
+      avg_price: item?.avg_price ?? null,
+      price_type: item?.price_type || null,
+      selected_store_location: item?.selected_store_location || null,
+      cheapest_location: item?.cheapest_location || null,
+      last_seen_location: item?.last_seen_location || null,
+      selectedStoreId,
+    })));
+
+    const inputSignature = toSignature(items);
+    if (shoppingListRehydrateSignatureRef.current === inputSignature) {
+      return;
+    }
+
+    if (shoppingListRehydrateTimerRef.current) {
+      clearTimeout(shoppingListRehydrateTimerRef.current);
+    }
+
+    shoppingListRehydrateTimerRef.current = setTimeout(async () => {
+      if (shoppingListRehydrateInFlightRef.current) return;
+      shoppingListRehydrateInFlightRef.current = true;
+
+      try {
+        const nextItems = await rehydrateShoppingListPriceIntelligence(items);
+        const nextSignature = toSignature(nextItems);
+        shoppingListRehydrateSignatureRef.current = nextSignature;
+
+        if (nextSignature !== inputSignature) {
+          setShoppingListItems(nextItems);
+        }
+      } catch (rehydrateErr) {
+        console.warn("SHOPPING_LIST_REHYDRATE_WARNING:", rehydrateErr?.message || rehydrateErr);
+      } finally {
+        shoppingListRehydrateInFlightRef.current = false;
+      }
+    }, 400);
+
+    return () => {
+      if (shoppingListRehydrateTimerRef.current) {
+        clearTimeout(shoppingListRehydrateTimerRef.current);
+      }
+    };
+  }, [
+    shoppingListItems,
+    selectedStore?.id,
+    hasHydratedLocalShoppingList,
+    isCloudShoppingListReady,
+    authUser?.id,
+    currentUserProfile?.id,
+    currentUserProfile?.is_guest,
+  ]);
 
   useEffect(() => {
     const trimmedTerm = String(catalogSearchTerm || "").trim();
@@ -6822,6 +6903,376 @@ export default function App() {
     normalized.price_type = item.price_type || null;
 
     return normalized;
+  };
+
+  const rehydrateShoppingListPriceIntelligence = async (items) => {
+    if (!Array.isArray(items) || items.length === 0) return Array.isArray(items) ? items : [];
+
+    const debugEnabled = window.localStorage.getItem("mvpDebug") === "true";
+    const selectedStoreId = String(selectedStore?.id || "").trim();
+
+    const hasPositivePrice = (value) => {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) && numeric > 0;
+    };
+
+    const toDebugPayload = (item, extras = {}) => ({
+      product_name: item?.product_name || item?.name || null,
+      brand: item?.brand || null,
+      barcode: String(item?.barcode || "").trim() || null,
+      catalog_id: item?.catalog_id || item?.id || null,
+      canonical_product_key: item?.canonical_product_key || null,
+      locationRowCount: extras.locationRowCount || 0,
+      offersCount: extras.offersCount || 0,
+      cheapest_known_price: extras.cheapest_known_price ?? item?.cheapest_known_price ?? null,
+      cheapest_known_store_name: extras.cheapest_known_store_name || item?.cheapest_known_store_name || null,
+      selectedStoreId: selectedStoreId || null,
+      selected_store_location: extras.selected_store_location || item?.selected_store_location || null,
+      cheapest_location: extras.cheapest_location || item?.cheapest_location || null,
+    });
+
+    if (debugEnabled) {
+      console.debug("SHOPPING_LIST_REHYDRATE_START", {
+        itemCount: items.length,
+        selectedStoreId: selectedStoreId || null,
+      });
+    }
+
+    const catalogSelect = "id, barcode, product_name, brand, category, size_value, size_unit, display_size, quantity, canonical_product_key, image_url, verified_image_url, source";
+    const rehydratedItems = [];
+
+    for (const item of items) {
+      const safeItem = item && typeof item === "object" ? item : {};
+
+      if (debugEnabled) {
+        console.debug("SHOPPING_LIST_REHYDRATE_ITEM_INPUT", toDebugPayload(safeItem));
+      }
+
+      const itemBarcode = String(safeItem?.barcode || "").trim();
+      const itemCatalogId = safeItem?.catalog_id || safeItem?.id || null;
+      const itemProductName = String(safeItem?.product_name || safeItem?.name || "").trim();
+      const itemBrand = String(safeItem?.brand || "").trim();
+      const itemCanonicalKey = normalizeComparableKey(
+        safeItem?.canonical_product_key || safeItem?.last_seen_location?.canonical_product_key || buildComparableProductKey(safeItem)
+      ) || null;
+
+      let catalogProduct = null;
+
+      if (itemCatalogId != null) {
+        const byId = await supabase
+          .from("catalog_products")
+          .select(catalogSelect)
+          .eq("id", itemCatalogId)
+          .limit(1)
+          .maybeSingle();
+        if (!byId.error && byId.data) {
+          catalogProduct = byId.data;
+        }
+      }
+
+      if (!catalogProduct && itemBarcode) {
+        const byBarcode = await supabase
+          .from("catalog_products")
+          .select(catalogSelect)
+          .eq("barcode", itemBarcode)
+          .limit(1)
+          .maybeSingle();
+        if (!byBarcode.error && byBarcode.data) {
+          catalogProduct = byBarcode.data;
+        }
+      }
+
+      if (!catalogProduct && itemProductName) {
+        let nameBrandQuery = supabase
+          .from("catalog_products")
+          .select(catalogSelect)
+          .ilike("product_name", `%${itemProductName}%`)
+          .limit(5);
+        if (itemBrand) {
+          nameBrandQuery = nameBrandQuery.ilike("brand", `%${itemBrand}%`);
+        }
+
+        const byNameBrand = await nameBrandQuery;
+        if (!byNameBrand.error) {
+          const candidates = Array.isArray(byNameBrand.data) ? byNameBrand.data : [];
+          catalogProduct = candidates.find((candidate) => {
+            const candidateName = normalizeComparableText(candidate?.product_name);
+            const candidateBrand = normalizeComparableText(candidate?.brand);
+            const targetName = normalizeComparableText(itemProductName);
+            const targetBrand = normalizeComparableText(itemBrand);
+            if (!targetName) return false;
+            if (candidateName !== targetName) return false;
+            if (targetBrand && candidateBrand) {
+              return candidateBrand === targetBrand;
+            }
+            return true;
+          }) || candidates[0] || null;
+        }
+      }
+
+      const resolvedCatalogProduct = catalogProduct
+        ? {
+            ...catalogProduct,
+            product_name: catalogProduct?.product_name || itemProductName || safeItem?.name || "",
+            brand: catalogProduct?.brand || itemBrand || "",
+            barcode: String(catalogProduct?.barcode || itemBarcode).trim() || "",
+            canonical_product_key: catalogProduct?.canonical_product_key || itemCanonicalKey || null,
+          }
+        : {
+            ...safeItem,
+            product_name: itemProductName || safeItem?.name || "",
+            brand: itemBrand,
+            barcode: itemBarcode,
+            canonical_product_key: itemCanonicalKey,
+          };
+
+      if (debugEnabled) {
+        console.debug("SHOPPING_LIST_REHYDRATE_CATALOG_MATCH", toDebugPayload({
+          ...safeItem,
+          barcode: resolvedCatalogProduct?.barcode || itemBarcode,
+          catalog_id: resolvedCatalogProduct?.id || itemCatalogId,
+          canonical_product_key: resolvedCatalogProduct?.canonical_product_key || itemCanonicalKey,
+          product_name: resolvedCatalogProduct?.product_name || itemProductName,
+          brand: resolvedCatalogProduct?.brand || itemBrand,
+        }));
+      }
+
+      const { offers: hydratedOffers, bestOffer } = await hydratePriceOffers(resolvedCatalogProduct);
+
+      const resolvedBarcode = String(resolvedCatalogProduct?.barcode || itemBarcode).trim();
+      const resolvedCanonicalKey = normalizeComparableKey(
+        resolvedCatalogProduct?.canonical_product_key || itemCanonicalKey
+      ) || null;
+
+      const rowsByBarcode = resolvedBarcode
+        ? await fetchComparableProductLocationRows({
+            barcodes: [resolvedBarcode],
+            canonicalKeys: [],
+            terms: [],
+            lookupTerms: [],
+          })
+        : [];
+
+      const rowsByCanonical = resolvedCanonicalKey
+        ? await fetchComparableProductLocationRows({
+            barcodes: [],
+            canonicalKeys: [resolvedCanonicalKey],
+            terms: [],
+            lookupTerms: [],
+          })
+        : [];
+
+      const rowsByFallback = await fetchComparableProductLocationRows({
+        barcodes: [],
+        canonicalKeys: [],
+        terms: [resolvedCatalogProduct?.product_name, resolvedCatalogProduct?.brand, resolvedCatalogProduct?.size_value].filter(Boolean),
+        lookupTerms: [resolvedCatalogProduct?.product_name, resolvedCatalogProduct?.brand, resolvedCatalogProduct?.size_value, resolvedCatalogProduct?.size_unit].filter(Boolean),
+      });
+
+      const dedupedRowsByKey = new Map();
+      [...rowsByBarcode, ...rowsByCanonical, ...rowsByFallback].forEach((row) => {
+        const dedupeKey = [
+          String(row?.store_id || "").trim(),
+          String(row?.barcode || "").trim(),
+          normalizeComparableKey(row?.canonical_product_key) || "",
+          String(row?.avg_price ?? row?.price ?? "").trim(),
+        ].join("|");
+        if (!dedupedRowsByKey.has(dedupeKey)) {
+          dedupedRowsByKey.set(dedupeKey, row);
+        }
+      });
+
+      const locationRows = Array.from(dedupedRowsByKey.values());
+      const validPriceRows = locationRows.filter((row) => hasPositivePrice(row?.avg_price ?? row?.price));
+
+      if (debugEnabled) {
+        console.debug("SHOPPING_LIST_REHYDRATE_LOCATION_ROWS", toDebugPayload(safeItem, {
+          locationRowCount: locationRows.length,
+          offersCount: Array.isArray(hydratedOffers) ? hydratedOffers.length : 0,
+        }));
+      }
+
+      const offersByStore = {};
+      validPriceRows.forEach((row) => {
+        const storeId = String(row?.store_id || "").trim();
+        if (!storeId) return;
+
+        const rowPrice = Number(row?.avg_price ?? row?.price);
+        if (!Number.isFinite(rowPrice) || rowPrice <= 0) return;
+
+        const candidateOffer = {
+          store_id: storeId,
+          store_name: row?.store_name || row?.stores?.name || "Unknown store",
+          price: rowPrice,
+          avg_price: Number(row?.avg_price ?? rowPrice) || rowPrice,
+          price_type: row?.price_type || "each",
+          aisle: row?.aisle || "",
+          section: row?.section || "",
+          shelf: row?.shelf || "",
+          confidence_score: Number(row?.confidence_score || 0),
+          updated_at: row?.last_confirmed_at || null,
+          last_confirmed_at: row?.last_confirmed_at || null,
+          canonical_product_key: row?.canonical_product_key || resolvedCanonicalKey || null,
+          barcode: String(row?.barcode || "").trim() || resolvedBarcode || null,
+          product_name: row?.product_name || resolvedCatalogProduct?.product_name || null,
+          brand: row?.brand || resolvedCatalogProduct?.brand || null,
+          size_value: row?.size_value || resolvedCatalogProduct?.size_value || null,
+          size_unit: row?.size_unit || resolvedCatalogProduct?.size_unit || null,
+          display_size: row?.display_size || resolvedCatalogProduct?.display_size || null,
+        };
+
+        const existingOffer = offersByStore[storeId];
+        if (!existingOffer || candidateOffer.price < existingOffer.price) {
+          offersByStore[storeId] = candidateOffer;
+        }
+      });
+
+      const hydratedOfferList = Array.isArray(hydratedOffers) ? hydratedOffers : [];
+      hydratedOfferList.forEach((offer) => {
+        const storeId = String(offer?.store_id || "").trim();
+        const offerPrice = Number(offer?.price ?? offer?.avg_price ?? 0);
+        if (!storeId || !Number.isFinite(offerPrice) || offerPrice <= 0) return;
+
+        const existingOffer = offersByStore[storeId];
+        if (!existingOffer || offerPrice < Number(existingOffer?.price || 0)) {
+          offersByStore[storeId] = {
+            ...offer,
+            store_id: storeId,
+            price: offerPrice,
+            avg_price: Number(offer?.avg_price ?? offerPrice) || offerPrice,
+            barcode: String(offer?.barcode || resolvedBarcode).trim() || null,
+            canonical_product_key: offer?.canonical_product_key || resolvedCanonicalKey || null,
+          };
+        }
+      });
+
+      const mergedOffers = Object.values(offersByStore).sort((a, b) => Number(a?.price || 0) - Number(b?.price || 0));
+      const resolvedBestOffer = mergedOffers[0] || bestOffer || null;
+
+      const selectedStoreLocation = selectedStoreId
+        ? validPriceRows
+            .filter((row) => String(row?.store_id || "").trim() === selectedStoreId)
+            .sort((a, b) => {
+              const aPrice = Number(a?.avg_price ?? a?.price ?? Infinity);
+              const bPrice = Number(b?.avg_price ?? b?.price ?? Infinity);
+              if (aPrice !== bPrice) return aPrice - bPrice;
+              return Number(b?.confidence_score || 0) - Number(a?.confidence_score || 0);
+            })[0] || null
+        : null;
+
+      const cheapestLocation = validPriceRows.reduce((current, row) => {
+        if (!current) return row;
+        const currentPrice = Number(current?.avg_price ?? current?.price ?? Infinity);
+        const rowPrice = Number(row?.avg_price ?? row?.price ?? Infinity);
+        if (rowPrice < currentPrice) return row;
+        if (rowPrice === currentPrice && Number(row?.confidence_score || 0) > Number(current?.confidence_score || 0)) {
+          return row;
+        }
+        return current;
+      }, null);
+
+      const cheapestKnownPrice = Number(
+        resolvedBestOffer?.price ??
+        cheapestLocation?.avg_price ??
+        cheapestLocation?.price ??
+        selectedStoreLocation?.avg_price ??
+        selectedStoreLocation?.price ??
+        0
+      ) || null;
+      const cheapestKnownStoreName = resolvedBestOffer?.store_name || cheapestLocation?.store_name || null;
+
+      const knownStorePrices = mergedOffers
+        .map((offer) => ({
+          store_id: offer?.store_id || null,
+          store_name: offer?.store_name || "Unknown store",
+          price: Number(offer?.price ?? offer?.avg_price ?? 0) || null,
+          price_type: offer?.price_type || "each",
+          aisle: offer?.aisle || "",
+          section: offer?.section || "",
+          shelf: offer?.shelf || "",
+          confidence_score: Number(offer?.confidence_score || 0),
+        }))
+        .filter((entry) => hasPositivePrice(entry?.price));
+
+      const bestLocationCandidate = selectedStoreLocation || cheapestLocation || (resolvedBestOffer
+        ? {
+            store_id: resolvedBestOffer?.store_id || null,
+            store_name: resolvedBestOffer?.store_name || "",
+            aisle: resolvedBestOffer?.aisle || "",
+            section: resolvedBestOffer?.section || "",
+            shelf: resolvedBestOffer?.shelf || "",
+            price: resolvedBestOffer?.price ?? null,
+            avg_price: resolvedBestOffer?.avg_price ?? resolvedBestOffer?.price ?? null,
+            price_type: resolvedBestOffer?.price_type || "each",
+            confidence_score: Number(resolvedBestOffer?.confidence_score || 0),
+            canonical_product_key: resolvedCanonicalKey,
+          }
+        : null);
+
+      const nextItem = {
+        ...safeItem,
+        barcode: resolvedBarcode || safeItem?.barcode || "",
+        catalog_id: safeItem?.catalog_id || resolvedCatalogProduct?.id || null,
+        canonical_product_key: safeItem?.canonical_product_key || resolvedCanonicalKey || null,
+      };
+
+      if (Array.isArray(mergedOffers) && mergedOffers.length > 0) {
+        nextItem.offers = mergedOffers;
+      }
+      if (Array.isArray(knownStorePrices) && knownStorePrices.length > 0) {
+        nextItem.known_store_prices = knownStorePrices;
+        nextItem.all_known_store_prices = knownStorePrices;
+      }
+      if (hasPositivePrice(cheapestKnownPrice)) {
+        nextItem.cheapest_known_price = cheapestKnownPrice;
+        nextItem.cheapest_known_store_name = cheapestKnownStoreName || safeItem?.cheapest_known_store_name || null;
+        nextItem.price = cheapestKnownPrice;
+        nextItem.avg_price = cheapestKnownPrice;
+        nextItem.price_type = resolvedBestOffer?.price_type || cheapestLocation?.price_type || selectedStoreLocation?.price_type || safeItem?.price_type || "each";
+      }
+      if (selectedStoreLocation && typeof selectedStoreLocation === "object") {
+        nextItem.selected_store_location = selectedStoreLocation;
+      }
+      if (cheapestLocation && typeof cheapestLocation === "object") {
+        nextItem.cheapest_location = cheapestLocation;
+      }
+      if (bestLocationCandidate && typeof bestLocationCandidate === "object") {
+        nextItem.last_seen_location = bestLocationCandidate;
+      }
+
+      nextItem.price_insights = {
+        ...(safeItem?.price_insights && typeof safeItem.price_insights === "object" ? safeItem.price_insights : {}),
+        selected_store_location: nextItem.selected_store_location || safeItem?.selected_store_location || null,
+        cheapest_location: nextItem.cheapest_location || safeItem?.cheapest_location || null,
+        all_known_store_prices: Array.isArray(nextItem.all_known_store_prices)
+          ? nextItem.all_known_store_prices
+          : (Array.isArray(safeItem?.all_known_store_prices) ? safeItem.all_known_store_prices : []),
+        cheapest_known_price: nextItem.cheapest_known_price ?? safeItem?.cheapest_known_price ?? null,
+        cheapest_known_store_name: nextItem.cheapest_known_store_name || safeItem?.cheapest_known_store_name || null,
+      };
+
+      if (debugEnabled) {
+        console.debug("SHOPPING_LIST_REHYDRATE_ITEM_OUTPUT", toDebugPayload(nextItem, {
+          locationRowCount: locationRows.length,
+          offersCount: Array.isArray(nextItem?.offers) ? nextItem.offers.length : 0,
+          cheapest_known_price: nextItem?.cheapest_known_price ?? null,
+          cheapest_known_store_name: nextItem?.cheapest_known_store_name || null,
+          selected_store_location: nextItem?.selected_store_location || null,
+          cheapest_location: nextItem?.cheapest_location || null,
+        }));
+      }
+
+      rehydratedItems.push(nextItem);
+    }
+
+    if (debugEnabled) {
+      console.debug("SHOPPING_LIST_REHYDRATE_COMPLETE", {
+        itemCount: rehydratedItems.length,
+        selectedStoreId: selectedStoreId || null,
+      });
+    }
+
+    return rehydratedItems;
   };
 
   const sanitizeShoppingListForSave = (items) => {
