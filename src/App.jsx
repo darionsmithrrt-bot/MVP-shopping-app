@@ -20,6 +20,7 @@ import {
 import { tryInsertWithPayloads } from "./utils/dbUtils";
 import { blobToFile, extractAiProductData } from "./utils/productUtils";
 import { useRewards } from "./hooks/useRewards";
+import ScanditScannerTest from "./ScanditScannerTest";
 import mvpLogo from "./assets/mvp-logo.png";
 
 const AUTH_REDIRECT_URL =
@@ -1088,6 +1089,7 @@ export default function App() {
   });
   const [aiIdentityConfidence, setAiIdentityConfidence] = useState(0);
   const [showAiSummaryCard, setShowAiSummaryCard] = useState(false);
+  const [showScanditScannerTest, setShowScanditScannerTest] = useState(false);
   const [imageDebugResult, setImageDebugResult] = useState(null);
   const [isEggQuantityOther, setIsEggQuantityOther] = useState(false);
   // Multi-photo capture
@@ -10360,6 +10362,16 @@ export default function App() {
     );
   }
 
+  if (showScanditScannerTest) {
+    return (
+      <ScanditScannerTest
+        onClose={() => {
+          setShowScanditScannerTest(false);
+        }}
+      />
+    );
+  }
+
   if (activeScreen === "landing" || !currentUserProfile) {
     return (
       <div style={styles.introPage}>
@@ -12395,6 +12407,29 @@ export default function App() {
               Upload from Gallery
             </button>
           </div>
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await stopScanner();
+              } catch {
+                // Keep temporary test access resilient if scanner is already stopped.
+              }
+              setShowScanditScannerTest(true);
+            }}
+            style={{
+              ...styles.secondaryButton,
+              width: "100%",
+              minHeight: 52,
+              marginBottom: 10,
+              background: "#f8fafc",
+              color: "#0f172a",
+              border: "1px dashed #94a3b8",
+              fontWeight: 800,
+            }}
+          >
+            Test Scandit Scanner
+          </button>
           <div style={{ ...styles.infoBox, marginTop: 6, marginBottom: 10 }}>
             <div style={{ fontWeight: 800, marginBottom: 4 }}>Best results</div>
             <div>- Photo 1: front label</div>
