@@ -18,7 +18,7 @@ const sdkLibraryLocation =
   "https://cdn.jsdelivr.net/npm/@scandit/web-datacapture-barcode@8.3.1/sdc-lib/";
 
 function ScanditScannerTest({ onClose }) {
-  const scannerHostRef = useRef(null);
+  const scannerContainerRef = useRef(null);
   const contextRef = useRef(null);
   const sparkScanRef = useRef(null);
   const sparkScanViewRef = useRef(null);
@@ -82,8 +82,8 @@ function ScanditScannerTest({ onClose }) {
         }
       }
 
-      if (scannerHostRef.current) {
-        scannerHostRef.current.innerHTML = "";
+      if (scannerContainerRef.current) {
+        scannerContainerRef.current.innerHTML = "";
       }
     } finally {
       contextRef.current = null;
@@ -138,13 +138,13 @@ function ScanditScannerTest({ onClose }) {
         return;
       }
 
-      if (!scannerHostRef.current) {
+      if (!scannerContainerRef.current) {
         setStatus("error");
         setErrorMessage("Scanner container is unavailable.");
         return;
       }
 
-      const hostRect = scannerHostRef.current.getBoundingClientRect();
+      const hostRect = scannerContainerRef.current.getBoundingClientRect();
       console.info("SCANDIT_CONTAINER_DIMENSIONS", {
         width: Math.round(hostRect.width),
         height: Math.round(hostRect.height),
@@ -212,7 +212,7 @@ function ScanditScannerTest({ onClose }) {
 
         const sparkScanViewSettings = new SparkScanViewSettings();
         const sparkScanView = SparkScanView.forElement(
-          scannerHostRef.current,
+          scannerContainerRef.current,
           context,
           sparkScan,
           sparkScanViewSettings
@@ -227,7 +227,7 @@ function ScanditScannerTest({ onClose }) {
         await sparkScanView.startScanning();
 
         console.info("SCANDIT_INIT_SUCCESS", {
-          mountedTo: "scannerHostRef",
+          mountedTo: "scannerContainerRef",
         });
 
         contextRef.current = context;
@@ -258,12 +258,19 @@ function ScanditScannerTest({ onClose }) {
   return (
     <section style={styles.sheet} aria-label="Scandit scanner test">
       <style>{`
-        .scandit-test-camera-host > scandit-spark-scan-view {
-          position: absolute !important;
-          inset: 0 !important;
+        .scandit-test-scanner-container,
+        .scandit-test-scanner-container > scandit-spark-scan-view,
+        .scandit-test-scanner-container video,
+        .scandit-test-scanner-container canvas {
           width: 100% !important;
           height: 100% !important;
-          display: block !important;
+          max-width: 100% !important;
+          object-fit: cover !important;
+        }
+
+        .scandit-test-scanner-container {
+          display: block;
+          overflow: hidden;
         }
       `}</style>
       <header style={styles.header}>
@@ -278,7 +285,11 @@ function ScanditScannerTest({ onClose }) {
       ) : null}
 
       <div style={styles.cameraWrap}>
-        <div ref={scannerHostRef} className="scandit-test-camera-host" style={styles.cameraHost} />
+        <div
+          ref={scannerContainerRef}
+          className="scandit-test-scanner-container"
+          style={styles.scannerContainer}
+        />
       </div>
 
       <div style={styles.resultBox}>
@@ -337,18 +348,16 @@ const styles = {
   },
   cameraWrap: {
     width: "100%",
+    flexShrink: 0,
+  },
+  scannerContainer: {
+    width: "100%",
+    height: "460px",
     minHeight: "420px",
-    flex: 1,
     position: "relative",
     borderRadius: "24px",
     background: "#0a111f",
     border: "1px solid rgba(255,255,255,0.16)",
-    overflow: "hidden",
-  },
-  cameraHost: {
-    width: "100%",
-    height: "100%",
-    position: "relative",
     overflow: "hidden",
   },
   resultBox: {
