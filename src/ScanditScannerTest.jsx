@@ -144,6 +144,12 @@ function ScanditScannerTest({ onClose }) {
         return;
       }
 
+      const hostRect = scannerHostRef.current.getBoundingClientRect();
+      console.info("SCANDIT_CONTAINER_DIMENSIONS", {
+        width: Math.round(hostRect.width),
+        height: Math.round(hostRect.height),
+      });
+
       setStatus("initializing");
       setErrorMessage("");
 
@@ -168,6 +174,10 @@ function ScanditScannerTest({ onClose }) {
           didScan: async (_mode, session) => {
             const scannedData = String(session?.newlyRecognizedBarcode?.data || "").trim();
             if (!scannedData || hasScannedRef.current) return;
+
+            console.info("SCANDIT_BARCODE_RESULT", {
+              barcode: scannedData,
+            });
 
             hasScannedRef.current = true;
             if (isMounted) {
@@ -216,6 +226,10 @@ function ScanditScannerTest({ onClose }) {
         await sparkScanView.prepareScanning();
         await sparkScanView.startScanning();
 
+        console.info("SCANDIT_INIT_SUCCESS", {
+          mountedTo: "scannerHostRef",
+        });
+
         contextRef.current = context;
         sparkScanRef.current = sparkScan;
         sparkScanViewRef.current = sparkScanView;
@@ -243,6 +257,15 @@ function ScanditScannerTest({ onClose }) {
 
   return (
     <section style={styles.sheet} aria-label="Scandit scanner test">
+      <style>{`
+        .scandit-test-camera-host > scandit-spark-scan-view {
+          position: absolute !important;
+          inset: 0 !important;
+          width: 100% !important;
+          height: 100% !important;
+          display: block !important;
+        }
+      `}</style>
       <header style={styles.header}>
         <h2 style={styles.title}>Scandit Scanner Test</h2>
         <p style={styles.subtitle}>Mobile test for grocery barcode speed and camera behavior.</p>
@@ -255,7 +278,7 @@ function ScanditScannerTest({ onClose }) {
       ) : null}
 
       <div style={styles.cameraWrap}>
-        <div ref={scannerHostRef} style={styles.cameraHost} />
+        <div ref={scannerHostRef} className="scandit-test-camera-host" style={styles.cameraHost} />
       </div>
 
       <div style={styles.resultBox}>
@@ -313,9 +336,11 @@ const styles = {
     lineHeight: 1.35,
   },
   cameraWrap: {
-    minHeight: "45vh",
+    width: "100%",
+    minHeight: "420px",
     flex: 1,
-    borderRadius: "16px",
+    position: "relative",
+    borderRadius: "24px",
     background: "#0a111f",
     border: "1px solid rgba(255,255,255,0.16)",
     overflow: "hidden",
@@ -323,6 +348,8 @@ const styles = {
   cameraHost: {
     width: "100%",
     height: "100%",
+    position: "relative",
+    overflow: "hidden",
   },
   resultBox: {
     flexShrink: 0,
