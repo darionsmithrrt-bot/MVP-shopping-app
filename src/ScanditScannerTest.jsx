@@ -3,25 +3,21 @@ import {
   Camera,
   CameraPosition,
   DataCaptureContext,
+  DataCaptureView,
   FrameSourceState,
 } from "@scandit/web-datacapture-core";
 import {
   Symbology,
-  SparkScan,
-  SparkScanSettings,
-  SparkScanView,
-  SparkScanViewSettings,
+  BarcodeCapture,
+  BarcodeCaptureSettings,
   barcodeCaptureLoader,
 } from "@scandit/web-datacapture-barcode";
-
-const sdkLibraryLocation =
-  "https://cdn.jsdelivr.net/npm/@scandit/web-datacapture-barcode@8.3.1/sdc-lib/";
 
 function ScanditScannerTest({ onClose }) {
   const scannerContainerRef = useRef(null);
   const contextRef = useRef(null);
-  const sparkScanRef = useRef(null);
-  const sparkScanViewRef = useRef(null);
+  const barcodeCaptureRef = useRef(null);
+  const dataCaptureViewRef = useRef(null);
   const cameraRef = useRef(null);
   const listenerRef = useRef(null);
   const hasScannedRef = useRef(false);
@@ -36,26 +32,24 @@ function ScanditScannerTest({ onClose }) {
     setStatus("stopping");
 
     try {
-      const sparkScanView = sparkScanViewRef.current;
-      if (sparkScanView) {
-        try {
-          await sparkScanView.stopScanning();
-        } catch {
-          // Best-effort stop.
-        }
-        sparkScanView.sparkScan = null;
-        sparkScanView.dataCaptureContext = null;
+      const barcodeCapture = barcodeCaptureRef.current;
+      if (barcodeCapture && listenerRef.current) {
+        barcodeCapture.removeListener(listenerRef.current);
       }
-
-      const sparkScan = sparkScanRef.current;
-      if (sparkScan && listenerRef.current) {
-        sparkScan.removeListener(listenerRef.current);
-      }
-      if (sparkScan) {
+      if (barcodeCapture) {
         try {
-          await sparkScan.setEnabled(false);
+          await barcodeCapture.setEnabled(false);
         } catch {
           // Best-effort disable.
+        }
+      }
+
+      const dataCaptureView = dataCaptureViewRef.current;
+      if (dataCaptureView) {
+        try {
+          dataCaptureView.dispose();
+        } catch {
+          // Best-effort view cleanup.
         }
       }
 
@@ -87,8 +81,8 @@ function ScanditScannerTest({ onClose }) {
       }
     } finally {
       contextRef.current = null;
-      sparkScanRef.current = null;
-      sparkScanViewRef.current = null;
+      barcodeCaptureRef.current = null;
+      dataCaptureViewRef.current = null;
       cameraRef.current = null;
       listenerRef.current = null;
       hasScannedRef.current = false;
@@ -101,17 +95,15 @@ function ScanditScannerTest({ onClose }) {
     setScanValue("");
     hasScannedRef.current = false;
 
-    const sparkScan = sparkScanRef.current;
-    const sparkScanView = sparkScanViewRef.current;
+    const barcodeCapture = barcodeCaptureRef.current;
 
-    if (!sparkScan || !sparkScanView) {
+    if (!barcodeCapture) {
       setErrorMessage("Scanner is not ready. Close and reopen scanner test.");
       return;
     }
 
     try {
-      await sparkScan.setEnabled(true);
-      await sparkScanView.startScanning();
+      await barcodeCapture.setEnabled(true);
       setStatus("scanning");
     } catch (err) {
       setStatus("error");
@@ -154,26 +146,34 @@ function ScanditScannerTest({ onClose }) {
       setErrorMessage("");
 
       try {
-        SparkScanView.register();
-
         const context = await DataCaptureContext.forLicenseKey(licenseKey, {
-          libraryLocation: sdkLibraryLocation,
-          moduleLoaders: [barcodeCaptureLoader({ libraryLocation: sdkLibraryLocation })],
+          libraryLocation:
+            "https://cdn.jsdelivr.net/npm/@scandit/web-datacapture-barcode@8.3.1/sdc-lib/",
+          moduleLoaders: [
+            barcodeCaptureLoader({
+              libraryLocation:
+                "https://cdn.jsdelivr.net/npm/@scandit/web-datacapture-barcode@8.3.1/sdc-lib/",
+            }),
+          ],
         });
 
-        const sparkScanSettings = new SparkScanSettings();
-        sparkScanSettings.enableSymbologies([
+        const barcodeCaptureSettings = new BarcodeCaptureSettings();
+        barcodeCaptureSettings.enableSymbologies([
           Symbology.EAN13UPCA,
           Symbology.Code128,
           Symbology.QR,
         ]);
 
-        const sparkScan = SparkScan.forSettings(sparkScanSettings);
+        const barcodeCapture = BarcodeCapture.forSettings(barcodeCaptureSettings);
 
         const listener = {
-          didScan: async (_mode, session) => {
-            const scannedData = String(session?.newlyRecognizedBarcode?.data || "").trim();
-            if (!scannedData || hasScannedRef.current) return;
+          didCapture: async (_mode, session) => {
+            const newlyRecognized = session?.newlyRecognizedBarcodes || [];
+            if (!newlyRecognized.length || hasScannedRef.current) return;
+
+            const barcode = newlyRecognized[0];
+            const scannedData = String(barcode?.data || "").trim();
+            if (!scannedData) return;
 
             console.info("SCANDIT_BARCODE_RESULT", {
               barcode: scannedData,
@@ -186,53 +186,32 @@ function ScanditScannerTest({ onClose }) {
             }
 
             try {
-              await sparkScan.setEnabled(false);
+              await barcodeCapture.setEnabled(false);
             } catch {
-              // Ignore if scanner already paused.
-            }
-
-            const sparkScanView = sparkScanViewRef.current;
-            if (sparkScanView) {
-              try {
-                await sparkScanView.pauseScanning();
-              } catch {
-                // Ignore if view already paused.
-              }
+              // Ignore if capture already disabled.
             }
           },
         };
 
-        sparkScan.addListener(listener);
+        barcodeCapture.addListener(listener);
 
         const camera = Camera.pickBestGuessForPosition(CameraPosition.WorldFacing);
 
         await context.setFrameSource(camera);
         await camera.switchToDesiredState(FrameSourceState.On);
-        await context.addMode(sparkScan);
+        await context.addMode(barcodeCapture);
 
-        const sparkScanViewSettings = new SparkScanViewSettings();
-        const sparkScanView = SparkScanView.forElement(
-          scannerContainerRef.current,
-          context,
-          sparkScan,
-          sparkScanViewSettings
-        );
-
-        sparkScanView.previewCloseControlVisible = false;
-        sparkScanView.cameraSwitchButtonVisible = true;
-        sparkScanView.torchControlVisible = true;
-        sparkScanView.triggerButtonVisible = true;
-
-        await sparkScanView.prepareScanning();
-        await sparkScanView.startScanning();
+        const dataCaptureView = DataCaptureView.forElement(scannerContainerRef.current);
+        dataCaptureView.context = context;
+        dataCaptureView.addOverlay(barcodeCapture.createOverlay());
 
         console.info("SCANDIT_INIT_SUCCESS", {
           mountedTo: "scannerContainerRef",
         });
 
         contextRef.current = context;
-        sparkScanRef.current = sparkScan;
-        sparkScanViewRef.current = sparkScanView;
+        barcodeCaptureRef.current = barcodeCapture;
+        dataCaptureViewRef.current = dataCaptureView;
         cameraRef.current = camera;
         listenerRef.current = listener;
 
@@ -242,7 +221,7 @@ function ScanditScannerTest({ onClose }) {
       } catch (err) {
         if (isMounted) {
           setStatus("error");
-          setErrorMessage(String(err?.message || "Failed to initialize SparkScan."));
+          setErrorMessage(String(err?.message || "Failed to initialize BarcodeCapture."));
         }
       }
     };
@@ -258,19 +237,23 @@ function ScanditScannerTest({ onClose }) {
   return (
     <section style={styles.sheet} aria-label="Scandit scanner test">
       <style>{`
-        .scandit-test-scanner-container,
-        .scandit-test-scanner-container > scandit-spark-scan-view,
+        .scandit-test-scanner-container {
+          display: block;
+          overflow: hidden;
+          width: 100%;
+          height: 100%;
+        }
+
+        .scandit-test-scanner-container > div[data-capture-view] {
+          width: 100% !important;
+          height: 100% !important;
+        }
+
         .scandit-test-scanner-container video,
         .scandit-test-scanner-container canvas {
           width: 100% !important;
           height: 100% !important;
-          max-width: 100% !important;
           object-fit: cover !important;
-        }
-
-        .scandit-test-scanner-container {
-          display: block;
-          overflow: hidden;
         }
       `}</style>
       <header style={styles.header}>
