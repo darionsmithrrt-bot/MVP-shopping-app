@@ -204,12 +204,30 @@ function ScanditScannerTest({ onClose }) {
         await context.setFrameSource(camera);
         await camera.switchToDesiredState(FrameSourceState.On);
 
-        const dataCaptureView = new DataCaptureView(context);
-        scannerRootRef.current.appendChild(dataCaptureView.element);
-        dataCaptureView.element.style.width = "100vw";
-        dataCaptureView.element.style.height = "100dvh";
-        dataCaptureView.element.style.position = "fixed";
-        dataCaptureView.element.style.inset = "0";
+        console.info("SCANDIT_VIEW_CREATED", {
+          hasScannerRoot: Boolean(scannerRootRef.current),
+        });
+
+        let dataCaptureView;
+        try {
+          dataCaptureView = DataCaptureView.forElement(scannerRootRef.current);
+          dataCaptureView.context = context;
+          console.info("SCANDIT_VIEW_ATTACHED", {
+            attachedTo: "scandit-root",
+          });
+        } catch (attachError) {
+          console.error("SCANDIT_VIEW_ATTACH_FAILED", {
+            message: String(attachError?.message || attachError),
+          });
+          throw attachError;
+        }
+
+        if (dataCaptureView.element) {
+          dataCaptureView.element.style.width = "100vw";
+          dataCaptureView.element.style.height = "100dvh";
+          dataCaptureView.element.style.position = "fixed";
+          dataCaptureView.element.style.inset = "0";
+        }
 
         await new Promise((resolve) => window.setTimeout(resolve, 250));
         if (dataCaptureView.element) {
