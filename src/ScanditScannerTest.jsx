@@ -7,14 +7,17 @@ import {
   FrameSourceState,
 } from "@scandit/web-datacapture-core";
 import {
-  Symbology,
   BarcodeCapture,
   BarcodeCaptureSettings,
+  Symbology,
   barcodeCaptureLoader,
 } from "@scandit/web-datacapture-barcode";
 
+const sdkLibraryLocation =
+  "https://cdn.jsdelivr.net/npm/@scandit/web-datacapture-barcode@8.3.1/sdc-lib/";
+
 function ScanditScannerTest({ onClose }) {
-  const scannerContainerRef = useRef(null);
+  const scannerRootRef = useRef(null);
   const contextRef = useRef(null);
   const barcodeCaptureRef = useRef(null);
   const dataCaptureViewRef = useRef(null);
@@ -28,13 +31,29 @@ function ScanditScannerTest({ onClose }) {
 
   const licenseKey = String(import.meta.env.VITE_SCANDIT_LICENSE_KEY || "").trim();
 
+  useEffect(() => {
+    const setViewportHeight = () => {
+      document.documentElement.style.setProperty("--app-height", `${window.innerHeight}px`);
+    };
+
+    setViewportHeight();
+    window.addEventListener("resize", setViewportHeight);
+    window.addEventListener("orientationchange", setViewportHeight);
+
+    return () => {
+      window.removeEventListener("resize", setViewportHeight);
+      window.removeEventListener("orientationchange", setViewportHeight);
+    };
+  }, []);
+
   const teardownScanner = useCallback(async () => {
     setStatus("stopping");
 
     try {
       const barcodeCapture = barcodeCaptureRef.current;
-      if (barcodeCapture && listenerRef.current) {
-        barcodeCapture.removeListener(listenerRef.current);
+      const listener = listenerRef.current;
+      if (barcodeCapture && listener) {
+        barcodeCapture.removeListener(listener);
       }
       if (barcodeCapture) {
         try {
@@ -49,7 +68,7 @@ function ScanditScannerTest({ onClose }) {
         try {
           dataCaptureView.dispose();
         } catch {
-          // Best-effort view cleanup.
+          // Best-effort cleanup.
         }
       }
 
@@ -58,7 +77,7 @@ function ScanditScannerTest({ onClose }) {
         try {
           await camera.switchToDesiredState(FrameSourceState.Off);
         } catch {
-          // Best-effort camera shutdown.
+          // Best-effort shutdown.
         }
       }
 
@@ -72,12 +91,12 @@ function ScanditScannerTest({ onClose }) {
         try {
           await context.dispose();
         } catch {
-          // Best-effort context cleanup.
+          // Best-effort cleanup.
         }
       }
 
-      if (scannerContainerRef.current) {
-        scannerContainerRef.current.innerHTML = "";
+      if (scannerRootRef.current) {
+        scannerRootRef.current.innerHTML = "";
       }
     } finally {
       contextRef.current = null;
@@ -96,7 +115,6 @@ function ScanditScannerTest({ onClose }) {
     hasScannedRef.current = false;
 
     const barcodeCapture = barcodeCaptureRef.current;
-
     if (!barcodeCapture) {
       setErrorMessage("Scanner is not ready. Close and reopen scanner test.");
       return;
@@ -130,31 +148,19 @@ function ScanditScannerTest({ onClose }) {
         return;
       }
 
-      if (!scannerContainerRef.current) {
+      if (!scannerRootRef.current) {
         setStatus("error");
         setErrorMessage("Scanner container is unavailable.");
         return;
       }
-
-      const hostRect = scannerContainerRef.current.getBoundingClientRect();
-      console.info("SCANDIT_CONTAINER_DIMENSIONS", {
-        width: Math.round(hostRect.width),
-        height: Math.round(hostRect.height),
-      });
 
       setStatus("initializing");
       setErrorMessage("");
 
       try {
         const context = await DataCaptureContext.forLicenseKey(licenseKey, {
-          libraryLocation:
-            "https://cdn.jsdelivr.net/npm/@scandit/web-datacapture-barcode@8.3.1/sdc-lib/",
-          moduleLoaders: [
-            barcodeCaptureLoader({
-              libraryLocation:
-                "https://cdn.jsdelivr.net/npm/@scandit/web-datacapture-barcode@8.3.1/sdc-lib/",
-            }),
-          ],
+          libraryLocation: sdkLibraryLocation,
+          moduleLoaders: [barcodeCaptureLoader({ libraryLocation: sdkLibraryLocation })],
         });
 
         const barcodeCaptureSettings = new BarcodeCaptureSettings();
@@ -168,16 +174,15 @@ function ScanditScannerTest({ onClose }) {
 
         const listener = {
           didCapture: async (_mode, session) => {
-            const newlyRecognized = session?.newlyRecognizedBarcodes || [];
-            if (!newlyRecognized.length || hasScannedRef.current) return;
+            if (hasScannedRef.current) return;
 
-            const barcode = newlyRecognized[0];
-            const scannedData = String(barcode?.data || "").trim();
+            const recognized = session?.newlyRecognizedBarcodes || [];
+            if (!recognized.length) return;
+
+            const scannedData = String(recognized[0]?.data || "").trim();
             if (!scannedData) return;
 
-            console.info("SCANDIT_BARCODE_RESULT", {
-              barcode: scannedData,
-            });
+            console.info("SCANDIT_BARCODE_RESULT", { barcode: scannedData });
 
             hasScannedRef.current = true;
             if (isMounted) {
@@ -188,7 +193,7 @@ function ScanditScannerTest({ onClose }) {
             try {
               await barcodeCapture.setEnabled(false);
             } catch {
-              // Ignore if capture already disabled.
+              // Ignore if already paused.
             }
           },
         };
@@ -196,17 +201,51 @@ function ScanditScannerTest({ onClose }) {
         barcodeCapture.addListener(listener);
 
         const camera = Camera.pickBestGuessForPosition(CameraPosition.WorldFacing);
-
         await context.setFrameSource(camera);
-        await camera.switchToDesiredState(FrameSourceState.On);
         await context.addMode(barcodeCapture);
+        await camera.switchToDesiredState(FrameSourceState.On);
 
-        const dataCaptureView = DataCaptureView.forElement(scannerContainerRef.current);
-        dataCaptureView.context = context;
-        dataCaptureView.addOverlay(barcodeCapture.createOverlay());
+        const dataCaptureView = new DataCaptureView(context);
+        scannerRootRef.current.appendChild(dataCaptureView.element);
+        dataCaptureView.element.style.width = "100vw";
+        dataCaptureView.element.style.height = "100dvh";
+        dataCaptureView.element.style.position = "fixed";
+        dataCaptureView.element.style.inset = "0";
 
-        console.info("SCANDIT_INIT_SUCCESS", {
-          mountedTo: "scannerContainerRef",
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+        if (dataCaptureView.element) {
+          dataCaptureView.element.style.width = "100vw";
+          dataCaptureView.element.style.height = "100dvh";
+        }
+
+        const containerRect = scannerRootRef.current.getBoundingClientRect();
+        const viewRect = dataCaptureView.element
+          ? dataCaptureView.element.getBoundingClientRect()
+          : null;
+
+        console.info("SCANDIT_INIT_SUCCESS", { mountedTo: "scandit-root" });
+        console.info("SCANDIT_DIAGNOSTICS", {
+          innerWidth: window.innerWidth,
+          innerHeight: window.innerHeight,
+          orientationType: window.screen?.orientation?.type || "unknown",
+          scannerContainerBounds: {
+            left: Math.round(containerRect.left),
+            top: Math.round(containerRect.top),
+            right: Math.round(containerRect.right),
+            bottom: Math.round(containerRect.bottom),
+            width: Math.round(containerRect.width),
+            height: Math.round(containerRect.height),
+          },
+          viewElementBounds: viewRect
+            ? {
+                left: Math.round(viewRect.left),
+                top: Math.round(viewRect.top),
+                right: Math.round(viewRect.right),
+                bottom: Math.round(viewRect.bottom),
+                width: Math.round(viewRect.width),
+                height: Math.round(viewRect.height),
+              }
+            : null,
         });
 
         contextRef.current = context;
@@ -236,43 +275,15 @@ function ScanditScannerTest({ onClose }) {
 
   return (
     <section style={styles.sheet} aria-label="Scandit scanner test">
-      <style>{`
-        .scandit-test-scanner-container {
-          display: block;
-          overflow: hidden;
-          width: 100%;
-          height: 100%;
-        }
+      <div id="scandit-root" ref={scannerRootRef} style={styles.scannerRoot} />
 
-        .scandit-test-scanner-container > div[data-capture-view] {
-          width: 100% !important;
-          height: 100% !important;
-        }
-
-        .scandit-test-scanner-container video,
-        .scandit-test-scanner-container canvas {
-          width: 100% !important;
-          height: 100% !important;
-          object-fit: cover !important;
-        }
-      `}</style>
-      <header style={styles.header}>
+      <div style={styles.overlayTop}>
         <h2 style={styles.title}>Scandit Scanner Test</h2>
-        <p style={styles.subtitle}>Mobile test for grocery barcode speed and camera behavior.</p>
-      </header>
-
-      {errorMessage ? (
-        <div style={styles.errorBox} role="alert">
-          {errorMessage}
-        </div>
-      ) : null}
-
-      <div style={styles.cameraWrap}>
-        <div
-          ref={scannerContainerRef}
-          className="scandit-test-scanner-container"
-          style={styles.scannerContainer}
-        />
+        {errorMessage ? (
+          <div style={styles.errorBox} role="alert">
+            {errorMessage}
+          </div>
+        ) : null}
       </div>
 
       <div style={styles.resultBox}>
@@ -297,57 +308,63 @@ const styles = {
   sheet: {
     position: "fixed",
     inset: 0,
-    zIndex: 9999,
-    display: "flex",
-    flexDirection: "column",
-    gap: "12px",
-    padding: "16px",
-    background: "linear-gradient(180deg, #0e1729 0%, #152a4a 100%)",
-    color: "#f8fbff",
+    width: "100vw",
+    height: "var(--app-height)",
+    background: "black",
+    zIndex: 999999,
     overflow: "hidden",
+    touchAction: "none",
+    WebkitOverflowScrolling: "touch",
+    transform: "translateZ(0)",
+    color: "#f8fbff",
   },
-  header: {
-    flexShrink: 0,
+  scannerRoot: {
+    position: "fixed",
+    inset: 0,
+    width: "100vw",
+    height: "var(--app-height)",
+    background: "black",
+    zIndex: 999999,
+    overflow: "hidden",
+    touchAction: "none",
+    WebkitOverflowScrolling: "touch",
+    transform: "translateZ(0)",
+    border: "2px solid red",
+  },
+  overlayTop: {
+    position: "fixed",
+    top: "max(8px, env(safe-area-inset-top))",
+    left: "12px",
+    right: "12px",
+    zIndex: 1000000,
+    pointerEvents: "none",
   },
   title: {
     margin: 0,
-    fontSize: "1.25rem",
-    lineHeight: 1.2,
+    fontSize: "1rem",
     fontWeight: 700,
-  },
-  subtitle: {
-    margin: "6px 0 0",
-    fontSize: "0.95rem",
-    lineHeight: 1.3,
-    opacity: 0.88,
+    lineHeight: 1.2,
+    textShadow: "0 1px 2px rgba(0,0,0,0.8)",
   },
   errorBox: {
+    marginTop: "8px",
     borderRadius: "12px",
-    padding: "12px",
+    padding: "10px 12px",
     background: "#592525",
     border: "1px solid #f06a6a",
-    fontSize: "0.95rem",
+    fontSize: "0.92rem",
     lineHeight: 1.35,
-  },
-  cameraWrap: {
-    width: "100%",
-    flexShrink: 0,
-  },
-  scannerContainer: {
-    width: "100%",
-    height: "460px",
-    minHeight: "420px",
-    position: "relative",
-    borderRadius: "24px",
-    background: "#0a111f",
-    border: "1px solid rgba(255,255,255,0.16)",
-    overflow: "hidden",
+    pointerEvents: "auto",
   },
   resultBox: {
-    flexShrink: 0,
+    position: "fixed",
+    left: "12px",
+    right: "12px",
+    bottom: "152px",
+    zIndex: 1000000,
     borderRadius: "12px",
     padding: "12px",
-    background: "rgba(255,255,255,0.09)",
+    background: "rgba(0,0,0,0.55)",
     border: "1px solid rgba(255,255,255,0.2)",
   },
   label: {
@@ -369,11 +386,14 @@ const styles = {
     opacity: 0.88,
   },
   actions: {
-    flexShrink: 0,
+    position: "fixed",
+    left: "12px",
+    right: "12px",
+    bottom: "max(8px, env(safe-area-inset-bottom))",
+    zIndex: 1000000,
     display: "grid",
     gridTemplateColumns: "1fr",
     gap: "10px",
-    paddingBottom: "max(8px, env(safe-area-inset-bottom))",
   },
   primaryButton: {
     width: "100%",
