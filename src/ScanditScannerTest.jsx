@@ -210,8 +210,8 @@ function ScanditScannerTest({ onClose }) {
 
         let dataCaptureView;
         try {
-          dataCaptureView = DataCaptureView.forElement(scannerRootRef.current);
-          dataCaptureView.context = context;
+          dataCaptureView = await DataCaptureView.forContext(context);
+          dataCaptureView.connectToElement(scannerRootRef.current);
           console.info("SCANDIT_VIEW_ATTACHED", {
             attachedTo: "scandit-root",
           });
