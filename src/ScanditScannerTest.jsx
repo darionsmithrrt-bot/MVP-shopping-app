@@ -162,6 +162,13 @@ function ScanditScannerTest({ onClose }) {
           libraryLocation: sdkLibraryLocation,
           moduleLoaders: [barcodeCaptureLoader({ libraryLocation: sdkLibraryLocation })],
         });
+        console.info("SCANDIT_STEP_CONTEXT_CREATED");
+
+        const view = await DataCaptureView.forContext(context);
+        view.connectToElement(scannerRootRef.current);
+        console.info("SCANDIT_STEP_VIEW_CONNECTED", {
+          hasScannerRoot: Boolean(scannerRootRef.current),
+        });
 
         const barcodeCaptureSettings = new BarcodeCaptureSettings();
         barcodeCaptureSettings.enableSymbologies([
@@ -171,6 +178,7 @@ function ScanditScannerTest({ onClose }) {
         ]);
 
         const barcodeCapture = await BarcodeCapture.forContext(context, barcodeCaptureSettings);
+        console.info("SCANDIT_STEP_BARCODE_CAPTURE_CREATED");
 
         const listener = {
           didCapture: async (_mode, session) => {
@@ -203,117 +211,11 @@ function ScanditScannerTest({ onClose }) {
         const camera = Camera.pickBestGuessForPosition(CameraPosition.WorldFacing);
         await context.setFrameSource(camera);
         await camera.switchToDesiredState(FrameSourceState.On);
-
-        console.info("SCANDIT_VIEW_CREATED", {
-          hasScannerRoot: Boolean(scannerRootRef.current),
-        });
-
-        let dataCaptureView;
-        try {
-          dataCaptureView = await DataCaptureView.forContext(context);
-          dataCaptureView.connectToElement(scannerRootRef.current);
-          console.info("SCANDIT_VIEW_ATTACHED", {
-            attachedTo: "scandit-root",
-          });
-        } catch (attachError) {
-          console.error("SCANDIT_VIEW_ATTACH_FAILED", {
-            message: String(attachError?.message || attachError),
-          });
-          throw attachError;
-        }
-
-        const applyRootChildSizingAndLog = (phase) => {
-          const scannerRoot = scannerRootRef.current;
-          if (!scannerRoot) return;
-
-          scannerRoot.style.position = "fixed";
-          scannerRoot.style.inset = "0";
-          scannerRoot.style.width = "100vw";
-          scannerRoot.style.height = "var(--app-height)";
-
-          const childElements = Array.from(scannerRoot.children).filter(
-            (node) => node instanceof HTMLElement
-          );
-
-          childElements.forEach((child) => {
-            child.style.width = "100%";
-            child.style.height = "100%";
-            child.style.maxWidth = "100%";
-            child.style.maxHeight = "100%";
-            child.style.position = "absolute";
-            child.style.inset = "0";
-          });
-
-          const childRects = childElements.map((child, index) => {
-            const rect = child.getBoundingClientRect();
-            return {
-              index,
-              tagName: child.tagName,
-              width: Math.round(rect.width),
-              height: Math.round(rect.height),
-              left: Math.round(rect.left),
-              top: Math.round(rect.top),
-              right: Math.round(rect.right),
-              bottom: Math.round(rect.bottom),
-            };
-          });
-
-          console.info("SCANDIT_ROOT_CHILDREN", {
-            phase,
-            childCount: childElements.length,
-            children: childRects,
-          });
-        };
-
-        applyRootChildSizingAndLog("after-connect");
-
-        if (dataCaptureView.element) {
-          dataCaptureView.element.style.width = "100vw";
-          dataCaptureView.element.style.height = "100dvh";
-          dataCaptureView.element.style.position = "fixed";
-          dataCaptureView.element.style.inset = "0";
-        }
-
-        await new Promise((resolve) => window.setTimeout(resolve, 250));
-        applyRootChildSizingAndLog("after-timeout");
-        if (dataCaptureView.element) {
-          dataCaptureView.element.style.width = "100vw";
-          dataCaptureView.element.style.height = "100dvh";
-        }
-
-        const containerRect = scannerRootRef.current.getBoundingClientRect();
-        const viewRect = dataCaptureView.element
-          ? dataCaptureView.element.getBoundingClientRect()
-          : null;
-
-        console.info("SCANDIT_INIT_SUCCESS", { mountedTo: "scandit-root" });
-        console.info("SCANDIT_DIAGNOSTICS", {
-          innerWidth: window.innerWidth,
-          innerHeight: window.innerHeight,
-          orientationType: window.screen?.orientation?.type || "unknown",
-          scannerContainerBounds: {
-            left: Math.round(containerRect.left),
-            top: Math.round(containerRect.top),
-            right: Math.round(containerRect.right),
-            bottom: Math.round(containerRect.bottom),
-            width: Math.round(containerRect.width),
-            height: Math.round(containerRect.height),
-          },
-          viewElementBounds: viewRect
-            ? {
-                left: Math.round(viewRect.left),
-                top: Math.round(viewRect.top),
-                right: Math.round(viewRect.right),
-                bottom: Math.round(viewRect.bottom),
-                width: Math.round(viewRect.width),
-                height: Math.round(viewRect.height),
-              }
-            : null,
-        });
+        console.info("SCANDIT_STEP_CAMERA_ON");
 
         contextRef.current = context;
         barcodeCaptureRef.current = barcodeCapture;
-        dataCaptureViewRef.current = dataCaptureView;
+        dataCaptureViewRef.current = view;
         cameraRef.current = camera;
         listenerRef.current = listener;
 
@@ -342,6 +244,7 @@ function ScanditScannerTest({ onClose }) {
 
       <div style={styles.overlayTop}>
         <h2 style={styles.title}>Scandit Scanner Test</h2>
+        <div style={styles.diagnosticBadge}>SCANDIT TEST BUILD 3</div>
         {errorMessage ? (
           <div style={styles.errorBox} role="alert">
             {errorMessage}
@@ -407,6 +310,19 @@ const styles = {
     fontWeight: 700,
     lineHeight: 1.2,
     textShadow: "0 1px 2px rgba(0,0,0,0.8)",
+  },
+  diagnosticBadge: {
+    marginTop: "8px",
+    display: "inline-block",
+    padding: "4px 8px",
+    borderRadius: "8px",
+    background: "rgba(255,255,255,0.16)",
+    border: "1px solid rgba(255,255,255,0.35)",
+    fontSize: "0.75rem",
+    fontWeight: 700,
+    letterSpacing: "0.02em",
+    textShadow: "none",
+    pointerEvents: "none",
   },
   errorBox: {
     marginTop: "8px",
