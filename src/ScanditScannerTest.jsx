@@ -244,7 +244,7 @@ function ScanditScannerTest({ onClose }) {
 
       <div style={styles.overlayTop}>
         <h2 style={styles.title}>Scandit Scanner Test</h2>
-        <div style={styles.diagnosticBadge}>SCANDIT TEST BUILD 3</div>
+        <div style={styles.diagnosticBadge}>SCANDIT TEST BUILD 4 - SDK 8.3.1 MATCHED</div>
         {errorMessage ? (
           <div style={styles.errorBox} role="alert">
             {errorMessage}

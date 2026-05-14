@@ -10,8 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@scandit/web-datacapture-barcode": "^8.3.1",
-    "@scandit/web-datacapture-core": "^8.3.1",
+    "@scandit/web-datacapture-barcode": "8.3.1",
+    "@scandit/web-datacapture-core": "8.3.1",
     "@supabase/supabase-js": "^2.103.0",
     "@zxing/browser": "^0.1.5",
     "html5-qrcode": "^2.3.8",
