@@ -173,9 +173,28 @@ function ScanditScannerTest({ onClose }) {
         const barcodeCaptureSettings = new BarcodeCaptureSettings();
         barcodeCaptureSettings.enableSymbologies([
           Symbology.EAN13UPCA,
+          Symbology.UPCE,
+          Symbology.EAN8,
           Symbology.Code128,
+          Symbology.Code39,
+          Symbology.Code93,
+          Symbology.InterleavedTwoOfFive,
+          Symbology.DataMatrix,
           Symbology.QR,
         ]);
+        console.info("SCANDIT_RETAIL_SYMBOLOGIES_ENABLED", {
+          symbologies: [
+            "EAN13UPCA",
+            "UPCE",
+            "EAN8",
+            "Code128",
+            "Code39",
+            "Code93",
+            "InterleavedTwoOfFive",
+            "DataMatrix",
+            "QR",
+          ],
+        });
 
         const barcodeCapture = await BarcodeCapture.forContext(context, barcodeCaptureSettings);
         console.info("SCANDIT_STEP_BARCODE_CAPTURE_CREATED");
@@ -209,6 +228,10 @@ function ScanditScannerTest({ onClose }) {
         barcodeCapture.addListener(listener);
 
         const camera = Camera.pickBestGuessForPosition(CameraPosition.WorldFacing);
+        console.info("SCANDIT_CAMERA_SELECTED", {
+          position: CameraPosition.WorldFacing,
+          hasCamera: Boolean(camera),
+        });
         await context.setFrameSource(camera);
         await camera.switchToDesiredState(FrameSourceState.On);
         console.info("SCANDIT_STEP_CAMERA_ON");
@@ -222,6 +245,7 @@ function ScanditScannerTest({ onClose }) {
         if (isMounted) {
           setStatus("scanning");
         }
+        console.info("SCANDIT_SCAN_READY");
       } catch (err) {
         if (isMounted) {
           setStatus("error");
@@ -252,6 +276,13 @@ function ScanditScannerTest({ onClose }) {
         ) : null}
       </div>
 
+      <div style={styles.scanGuideZone} aria-hidden="true">
+        <div style={styles.scanGuideBox} />
+        <div style={styles.scanGuideText}>
+          Center barcode in box • Hold 6-12 inches away • Avoid glare
+        </div>
+      </div>
+
       <div style={styles.resultBox}>
         <div style={styles.label}>Last scanned barcode</div>
         <div style={styles.value}>{scanValue || "No scan yet"}</div>
@@ -264,6 +295,9 @@ function ScanditScannerTest({ onClose }) {
         </button>
         <button type="button" style={styles.secondaryButton} onClick={handleClose}>
           Close Scanner
+        </button>
+        <button type="button" style={styles.tertiaryButton}>
+          Enter Barcode Manually
         </button>
       </div>
     </section>
@@ -334,11 +368,43 @@ const styles = {
     lineHeight: 1.35,
     pointerEvents: "auto",
   },
+  scanGuideZone: {
+    position: "fixed",
+    left: "50%",
+    top: "50%",
+    transform: "translate(-50%, -50%)",
+    zIndex: 1000000,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "10px",
+    pointerEvents: "none",
+  },
+  scanGuideBox: {
+    width: "min(78vw, 360px)",
+    height: "min(40vw, 180px)",
+    borderRadius: "14px",
+    border: "2px solid rgba(255,255,255,0.9)",
+    boxShadow: "0 0 0 9999px rgba(0,0,0,0.2)",
+    background: "transparent",
+  },
+  scanGuideText: {
+    maxWidth: "min(92vw, 520px)",
+    padding: "6px 10px",
+    borderRadius: "10px",
+    background: "rgba(0,0,0,0.55)",
+    border: "1px solid rgba(255,255,255,0.2)",
+    fontSize: "0.82rem",
+    lineHeight: 1.35,
+    textAlign: "center",
+    fontWeight: 600,
+    color: "#f8fbff",
+  },
   resultBox: {
     position: "fixed",
     left: "12px",
     right: "12px",
-    bottom: "152px",
+    bottom: "128px",
     zIndex: 1000000,
     borderRadius: "12px",
     padding: "12px",
@@ -391,6 +457,16 @@ const styles = {
     background: "rgba(255,255,255,0.08)",
     color: "#f8fbff",
     fontSize: "1rem",
+    fontWeight: 700,
+  },
+  tertiaryButton: {
+    width: "100%",
+    minHeight: "48px",
+    borderRadius: "12px",
+    border: "1px dashed rgba(255,255,255,0.5)",
+    background: "rgba(0,0,0,0.45)",
+    color: "#f8fbff",
+    fontSize: "0.95rem",
     fontWeight: 700,
   },
 };
