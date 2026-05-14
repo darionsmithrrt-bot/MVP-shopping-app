@@ -176,11 +176,6 @@ function ScanditScannerTest({ onClose }) {
           Symbology.UPCE,
           Symbology.EAN8,
           Symbology.Code128,
-          Symbology.Code39,
-          Symbology.Code93,
-          Symbology.InterleavedTwoOfFive,
-          Symbology.DataMatrix,
-          Symbology.QR,
         ]);
         console.info("SCANDIT_RETAIL_SYMBOLOGIES_ENABLED", {
           symbologies: [
@@ -188,11 +183,6 @@ function ScanditScannerTest({ onClose }) {
             "UPCE",
             "EAN8",
             "Code128",
-            "Code39",
-            "Code93",
-            "InterleavedTwoOfFive",
-            "DataMatrix",
-            "QR",
           ],
         });
 
@@ -299,6 +289,9 @@ function ScanditScannerTest({ onClose }) {
         <button type="button" style={styles.tertiaryButton}>
           Enter Barcode Manually
         </button>
+        <button type="button" style={styles.quaternaryButton} disabled aria-disabled="true">
+          More barcode types
+        </button>
       </div>
     </section>
   );
@@ -381,8 +374,8 @@ const styles = {
     pointerEvents: "none",
   },
   scanGuideBox: {
-    width: "min(78vw, 360px)",
-    height: "min(40vw, 180px)",
+    width: "min(82vw, 360px)",
+    height: "90px",
     borderRadius: "14px",
     border: "2px solid rgba(255,255,255,0.9)",
     boxShadow: "0 0 0 9999px rgba(0,0,0,0.2)",
@@ -404,7 +397,7 @@ const styles = {
     position: "fixed",
     left: "12px",
     right: "12px",
-    bottom: "128px",
+    bottom: "182px",
     zIndex: 1000000,
     borderRadius: "12px",
     padding: "12px",
@@ -468,6 +461,18 @@ const styles = {
     color: "#f8fbff",
     fontSize: "0.95rem",
     fontWeight: 700,
+  },
+  quaternaryButton: {
+    width: "100%",
+    minHeight: "46px",
+    borderRadius: "12px",
+    border: "1px dashed rgba(255,255,255,0.35)",
+    background: "rgba(255,255,255,0.05)",
+    color: "rgba(248,251,255,0.85)",
+    fontSize: "0.92rem",
+    fontWeight: 600,
+    cursor: "not-allowed",
+    opacity: 0.8,
   },
 };
 
