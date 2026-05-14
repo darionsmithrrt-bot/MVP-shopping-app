@@ -222,6 +222,51 @@ function ScanditScannerTest({ onClose }) {
           throw attachError;
         }
 
+        const applyRootChildSizingAndLog = (phase) => {
+          const scannerRoot = scannerRootRef.current;
+          if (!scannerRoot) return;
+
+          scannerRoot.style.position = "fixed";
+          scannerRoot.style.inset = "0";
+          scannerRoot.style.width = "100vw";
+          scannerRoot.style.height = "var(--app-height)";
+
+          const childElements = Array.from(scannerRoot.children).filter(
+            (node) => node instanceof HTMLElement
+          );
+
+          childElements.forEach((child) => {
+            child.style.width = "100%";
+            child.style.height = "100%";
+            child.style.maxWidth = "100%";
+            child.style.maxHeight = "100%";
+            child.style.position = "absolute";
+            child.style.inset = "0";
+          });
+
+          const childRects = childElements.map((child, index) => {
+            const rect = child.getBoundingClientRect();
+            return {
+              index,
+              tagName: child.tagName,
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+              left: Math.round(rect.left),
+              top: Math.round(rect.top),
+              right: Math.round(rect.right),
+              bottom: Math.round(rect.bottom),
+            };
+          });
+
+          console.info("SCANDIT_ROOT_CHILDREN", {
+            phase,
+            childCount: childElements.length,
+            children: childRects,
+          });
+        };
+
+        applyRootChildSizingAndLog("after-connect");
+
         if (dataCaptureView.element) {
           dataCaptureView.element.style.width = "100vw";
           dataCaptureView.element.style.height = "100dvh";
@@ -230,6 +275,7 @@ function ScanditScannerTest({ onClose }) {
         }
 
         await new Promise((resolve) => window.setTimeout(resolve, 250));
+        applyRootChildSizingAndLog("after-timeout");
         if (dataCaptureView.element) {
           dataCaptureView.element.style.width = "100vw";
           dataCaptureView.element.style.height = "100dvh";
@@ -346,7 +392,6 @@ const styles = {
     touchAction: "none",
     WebkitOverflowScrolling: "touch",
     transform: "translateZ(0)",
-    border: "2px solid red",
   },
   overlayTop: {
     position: "fixed",
