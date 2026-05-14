@@ -170,7 +170,7 @@ function ScanditScannerTest({ onClose }) {
           Symbology.QR,
         ]);
 
-        const barcodeCapture = BarcodeCapture.forSettings(barcodeCaptureSettings);
+        const barcodeCapture = await BarcodeCapture.forContext(context, barcodeCaptureSettings);
 
         const listener = {
           didCapture: async (_mode, session) => {
@@ -202,7 +202,6 @@ function ScanditScannerTest({ onClose }) {
 
         const camera = Camera.pickBestGuessForPosition(CameraPosition.WorldFacing);
         await context.setFrameSource(camera);
-        await context.addMode(barcodeCapture);
         await camera.switchToDesiredState(FrameSourceState.On);
 
         const dataCaptureView = new DataCaptureView(context);
