@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Camera,
-  CameraPosition,
   DataCaptureContext,
-  DataCaptureView,
-  FrameSourceState,
 } from "@scandit/web-datacapture-core";
 import {
-  BarcodeCapture,
-  BarcodeCaptureSettings,
+  SparkScan,
+  SparkScanSettings,
+  SparkScanView,
+  SparkScanViewSettings,
   Symbology,
   barcodeCaptureLoader,
 } from "@scandit/web-datacapture-barcode";
@@ -19,9 +17,8 @@ const sdkLibraryLocation =
 function ScanditScannerTest({ onClose }) {
   const scannerRootRef = useRef(null);
   const contextRef = useRef(null);
-  const barcodeCaptureRef = useRef(null);
-  const dataCaptureViewRef = useRef(null);
-  const cameraRef = useRef(null);
+  const sparkScanRef = useRef(null);
+  const sparkScanViewRef = useRef(null);
   const listenerRef = useRef(null);
   const hasScannedRef = useRef(false);
 
@@ -50,32 +47,16 @@ function ScanditScannerTest({ onClose }) {
     setStatus("stopping");
 
     try {
-      const barcodeCapture = barcodeCaptureRef.current;
+      const sparkScan = sparkScanRef.current;
       const listener = listenerRef.current;
-      if (barcodeCapture && listener) {
-        barcodeCapture.removeListener(listener);
-      }
-      if (barcodeCapture) {
-        try {
-          await barcodeCapture.setEnabled(false);
-        } catch {
-          // Best-effort disable.
-        }
+      if (sparkScan && listener) {
+        sparkScan.removeListener(listener);
       }
 
-      const dataCaptureView = dataCaptureViewRef.current;
-      if (dataCaptureView) {
+      const sparkScanView = sparkScanViewRef.current;
+      if (sparkScanView) {
         try {
-          dataCaptureView.dispose();
-        } catch {
-          // Best-effort cleanup.
-        }
-      }
-
-      const camera = cameraRef.current;
-      if (camera) {
-        try {
-          await camera.switchToDesiredState(FrameSourceState.Off);
+          await sparkScanView.stopScanning();
         } catch {
           // Best-effort shutdown.
         }
@@ -83,11 +64,6 @@ function ScanditScannerTest({ onClose }) {
 
       const context = contextRef.current;
       if (context) {
-        try {
-          await context.setFrameSource(null);
-        } catch {
-          // Ignore if already detached.
-        }
         try {
           await context.dispose();
         } catch {
@@ -100,9 +76,8 @@ function ScanditScannerTest({ onClose }) {
       }
     } finally {
       contextRef.current = null;
-      barcodeCaptureRef.current = null;
-      dataCaptureViewRef.current = null;
-      cameraRef.current = null;
+      sparkScanRef.current = null;
+      sparkScanViewRef.current = null;
       listenerRef.current = null;
       hasScannedRef.current = false;
       setStatus("stopped");
@@ -114,14 +89,14 @@ function ScanditScannerTest({ onClose }) {
     setScanValue("");
     hasScannedRef.current = false;
 
-    const barcodeCapture = barcodeCaptureRef.current;
-    if (!barcodeCapture) {
+    const sparkScanView = sparkScanViewRef.current;
+    if (!sparkScanView) {
       setErrorMessage("Scanner is not ready. Close and reopen scanner test.");
       return;
     }
 
     try {
-      await barcodeCapture.setEnabled(true);
+      await sparkScanView.startScanning();
       setStatus("scanning");
     } catch (err) {
       setStatus("error");
@@ -164,33 +139,22 @@ function ScanditScannerTest({ onClose }) {
         });
         console.info("SCANDIT_STEP_CONTEXT_CREATED");
 
-        const view = await DataCaptureView.forContext(context);
-        view.connectToElement(scannerRootRef.current);
-        console.info("SCANDIT_STEP_VIEW_CONNECTED", {
-          hasScannerRoot: Boolean(scannerRootRef.current),
-        });
-
-        const barcodeCaptureSettings = new BarcodeCaptureSettings();
-        barcodeCaptureSettings.enableSymbologies([
+        const sparkScanSettings = new SparkScanSettings();
+        sparkScanSettings.enableSymbologies([
           Symbology.EAN13UPCA,
           Symbology.UPCE,
           Symbology.EAN8,
           Symbology.Code128,
         ]);
         console.info("SCANDIT_RETAIL_SYMBOLOGIES_ENABLED", {
-          symbologies: [
-            "EAN13UPCA",
-            "UPCE",
-            "EAN8",
-            "Code128",
-          ],
+          symbologies: ["EAN13UPCA", "UPCE", "EAN8", "Code128"],
         });
 
-        const barcodeCapture = await BarcodeCapture.forContext(context, barcodeCaptureSettings);
-        console.info("SCANDIT_STEP_BARCODE_CAPTURE_CREATED");
+        const sparkScan = SparkScan.forSettings(sparkScanSettings);
+        console.info("SCANDIT_STEP_SPARKSCAN_CREATED");
 
         const listener = {
-          didCapture: async (_mode, session) => {
+          didScan: async (_mode, session) => {
             if (hasScannedRef.current) return;
 
             const recognized = session?.newlyRecognizedBarcodes || [];
@@ -206,30 +170,28 @@ function ScanditScannerTest({ onClose }) {
               setScanValue(scannedData);
               setStatus("scanned");
             }
-
-            try {
-              await barcodeCapture.setEnabled(false);
-            } catch {
-              // Ignore if already paused.
-            }
           },
         };
 
-        barcodeCapture.addListener(listener);
+        sparkScan.addListener(listener);
 
-        const camera = Camera.pickBestGuessForPosition(CameraPosition.WorldFacing);
-        console.info("SCANDIT_CAMERA_SELECTED", {
-          position: CameraPosition.WorldFacing,
-          hasCamera: Boolean(camera),
+        const sparkScanViewSettings = new SparkScanViewSettings();
+        const sparkScanView = SparkScanView.forElement(
+          scannerRootRef.current,
+          context,
+          sparkScan,
+          sparkScanViewSettings
+        );
+        console.info("SCANDIT_STEP_VIEW_CONNECTED", {
+          hasScannerRoot: Boolean(scannerRootRef.current),
         });
-        await context.setFrameSource(camera);
-        await camera.switchToDesiredState(FrameSourceState.On);
+
+        await sparkScanView.prepareScanning();
         console.info("SCANDIT_STEP_CAMERA_ON");
 
         contextRef.current = context;
-        barcodeCaptureRef.current = barcodeCapture;
-        dataCaptureViewRef.current = view;
-        cameraRef.current = camera;
+        sparkScanRef.current = sparkScan;
+        sparkScanViewRef.current = sparkScanView;
         listenerRef.current = listener;
 
         if (isMounted) {
@@ -239,7 +201,7 @@ function ScanditScannerTest({ onClose }) {
       } catch (err) {
         if (isMounted) {
           setStatus("error");
-          setErrorMessage(String(err?.message || "Failed to initialize BarcodeCapture."));
+          setErrorMessage(String(err?.message || "Failed to initialize SparkScan."));
         }
       }
     };
@@ -258,7 +220,7 @@ function ScanditScannerTest({ onClose }) {
 
       <div style={styles.overlayTop}>
         <h2 style={styles.title}>Scandit Scanner Test</h2>
-        <div style={styles.diagnosticBadge}>SCANDIT TEST BUILD 4 - SDK 8.3.1 MATCHED</div>
+        <div style={styles.diagnosticBadge}>SPARKSCAN BUILD 5 - SDK 8.3.1</div>
         {errorMessage ? (
           <div style={styles.errorBox} role="alert">
             {errorMessage}
